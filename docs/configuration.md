@@ -17,10 +17,15 @@ Runs the HTTP server: webhooks, manual trigger, JSON API, and dashboard.
 
 ### Config file
 
-`--config PATH` (or `$JANUS_CONFIG`) points at a YAML file. Unknown keys, a
-missing file, or a malformed value are **startup errors** — the server refuses
-to start rather than running with a misread config. See
-[janus.example.yml](janus.example.yml) for an annotated template.
+`--config PATH` (or `$JANUS_CONFIG`) points at a YAML file. When `--config` is
+not given, `janus serve` auto-loads **`./janus.yml`** if it exists; otherwise it
+runs on built-in defaults. Unknown keys, an explicitly-named missing file, or a
+malformed value are **startup errors** — the server refuses to start rather than
+running with a misread config.
+
+Run **`janus init`** to scaffold a commented `janus.yml` (it won't overwrite an
+existing file without `--force`); see the
+[annotated example](../internal/config/example.yml).
 
 | YAML key | Flag | Default | Purpose |
 |----------|------|---------|---------|
@@ -102,6 +107,15 @@ Runs a pipeline locally, streaming logs to the terminal.
 | `--keep-workspace` | `false` | Don't delete the checkout afterward. |
 
 Exit code is non-zero if the run does not succeed.
+
+## `janus init [flags]`
+
+Writes a commented starter config file and exits.
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--config` | `janus.yml` | Path to write. |
+| `--force` | `false` | Overwrite an existing file (otherwise it errors). |
 
 ## `janus validate <file>`
 

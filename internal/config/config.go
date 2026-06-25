@@ -8,6 +8,7 @@ package config
 
 import (
 	"bytes"
+	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,29 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultPath is the config file auto-loaded by `janus serve` when --config is
+// not given and the file exists in the working directory.
+const DefaultPath = "janus.yml"
+
+// ExampleYAML is an annotated starter config, written by `janus init` and the
+// single source of truth for the example documentation.
+//
+//go:embed example.yml
+var ExampleYAML string
+
+// Resolve returns the config path to load: the explicit path if non-empty;
+// otherwise DefaultPath if it exists as a file in the working directory;
+// otherwise "" (use built-in defaults, no file).
+func Resolve(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if fi, err := os.Stat(DefaultPath); err == nil && !fi.IsDir() {
+		return DefaultPath
+	}
+	return ""
+}
 
 // Config is the full set of `janus serve` settings.
 type Config struct {

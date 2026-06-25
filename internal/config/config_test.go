@@ -81,6 +81,36 @@ func TestLoadEmptyFileKeepsDefaults(t *testing.T) {
 	}
 }
 
+func TestResolve(t *testing.T) {
+	// Explicit path always wins, even if it doesn't exist.
+	if got := Resolve("/some/explicit.yml"); got != "/some/explicit.yml" {
+		t.Errorf("Resolve(explicit) = %q, want it returned verbatim", got)
+	}
+
+	// No explicit path, no ./janus.yml → empty (use defaults).
+	t.Chdir(t.TempDir())
+	if got := Resolve(""); got != "" {
+		t.Errorf("Resolve(\"\") with no file = %q, want empty", got)
+	}
+
+	// No explicit path, ./janus.yml present → DefaultPath.
+	if err := os.WriteFile(DefaultPath, []byte("addr: \":1\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := Resolve(""); got != DefaultPath {
+		t.Errorf("Resolve(\"\") with %s present = %q, want %s", DefaultPath, got, DefaultPath)
+	}
+}
+
+func TestExampleYAMLParses(t *testing.T) {
+	// The shipped starter config must satisfy the strict decoder, so `janus
+	// init` never produces a file that `janus serve` then rejects.
+	path := writeFile(t, ExampleYAML)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("embedded example.yml does not parse: %v", err)
+	}
+}
+
 func TestOverlayEnv(t *testing.T) {
 	t.Setenv("JANUS_GITLAB_SECRET", "from-env")
 	t.Setenv("JANUS_API_TOKEN", "tok-env")

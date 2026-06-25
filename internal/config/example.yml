@@ -1,4 +1,5 @@
 # Example Janus server config. Pass with: janus serve --config janus.yml
+# (janus serve also auto-loads ./janus.yml if present and --config is unset).
 #
 # Every key is optional; omitted keys fall back to the built-in defaults shown
 # below. CLI flags and the JANUS_* env vars override these values.

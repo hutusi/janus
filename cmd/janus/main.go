@@ -49,6 +49,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = runServe(args)
+	case "init":
+		err = runInit(args)
 	case "validate":
 		err = runValidate(args)
 	case "run":
@@ -74,6 +76,7 @@ func usage(w io.Writer) {
 
 Usage:
   janus serve [flags]     Start the HTTP server (webhooks, manual trigger, dashboard)
+  janus init [flags]      Write a starter janus.yml config file
   janus validate <file>   Validate a .janus/ci.yml pipeline file
   janus run <dir>         Run a pipeline locally against a directory
   janus version           Print the version
@@ -88,7 +91,7 @@ Run "janus <command> -h" for command-specific flags.
 func runServe(args []string) error {
 	def := config.Defaults()
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	configPath := fs.String("config", os.Getenv("JANUS_CONFIG"), "path to a YAML config file")
+	configPath := fs.String("config", os.Getenv("JANUS_CONFIG"), "path to a YAML config file (default: ./janus.yml if present)")
 	fs.String("addr", def.Addr, "HTTP listen address")
 	fs.String("data-dir", def.DataDir, "directory for persistent run history (empty = in-memory, lost on restart)")
 	fs.String("workspace-root", def.WorkspaceRoot, "directory for per-run workspaces")
@@ -104,8 +107,10 @@ func runServe(args []string) error {
 		return err
 	}
 
-	// Precedence: defaults < config file < env < flags.
-	cfg, err := config.Load(*configPath)
+	// Precedence: defaults < config file < env < flags. With no --config, fall
+	// back to ./janus.yml if it exists.
+	cfgPath := config.Resolve(*configPath)
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
 	}
@@ -113,6 +118,9 @@ func runServe(args []string) error {
 	cfg.OverlayFlags(fs)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if cfgPath != "" {
+		logger.Info("loaded config", "path", cfgPath)
+	}
 
 	allow, err := allowlist.New(cfg.AllowRepos)
 	if err != nil {
@@ -197,6 +205,26 @@ func runServe(args []string) error {
 		rn.Shutdown(30 * time.Second)
 		return nil
 	}
+}
+
+// runInit writes a starter config file, refusing to overwrite unless --force.
+func runInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	out := fs.String("config", config.DefaultPath, "path to write the config file")
+	force := fs.Bool("force", false, "overwrite an existing file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*force {
+		if _, err := os.Stat(*out); err == nil {
+			return fmt.Errorf("%s already exists (use --force to overwrite)", *out)
+		}
+	}
+	if err := os.WriteFile(*out, []byte(config.ExampleYAML), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s — edit it, then run: janus serve --config %s\n", *out, *out)
+	return nil
 }
 
 // runValidate parses a pipeline file and reports whether it is valid.
