@@ -17,8 +17,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/hutusi/janus/internal/pipeline"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -111,8 +115,32 @@ func runServe(args []string) error {
 	}
 }
 
-func runValidate(_ []string) error {
-	return errors.New("validate: not implemented yet (Phase 1)")
+// runValidate parses a pipeline file and reports whether it is valid.
+func runValidate(args []string) error {
+	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: janus validate <file>")
+	}
+	path := fs.Arg(0)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	wf, err := pipeline.Parse(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+
+	jobs := make([]string, 0, len(wf.Jobs))
+	for name := range wf.Jobs {
+		jobs = append(jobs, name)
+	}
+	sort.Strings(jobs)
+	fmt.Printf("ok: workflow %q — %d job(s): %s\n", wf.Name, len(jobs), strings.Join(jobs, ", "))
+	return nil
 }
 
 func runRun(_ []string) error {

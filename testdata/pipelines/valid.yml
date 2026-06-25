@@ -1,0 +1,18 @@
+name: ci
+on:
+  push: { branches: [main] }
+  merge_request: { branches: [main] }
+env:
+  CI: "true"
+jobs:
+  build:
+    env:
+      STAGE: build
+    steps:
+      - run: echo "building ${{ branch }} at ${{ short_sha }}"
+        working-directory: ./app
+      - run: echo "CI=${{ env.CI }} STAGE=${{ env.STAGE }}"
+  test:
+    needs: [build]
+    steps:
+      - run: echo "testing on event=${{ event }}"
