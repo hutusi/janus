@@ -27,6 +27,7 @@ import (
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/pipeline"
 	"github.com/hutusi/janus/internal/store"
+	"github.com/hutusi/janus/internal/workspace"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -147,25 +148,62 @@ func runValidate(args []string) error {
 	return nil
 }
 
-// runRun executes a pipeline locally against a directory, streaming logs to the
-// terminal. The repository is expected to already be present at <dir> (git
-// checkout is added in Phase 3).
+// runRun executes a pipeline locally, streaming logs to the terminal. It works
+// either against an existing directory (`janus run <dir>`) or by checking out a
+// repository at a commit (`janus run --repo <url> --sha <sha>`).
 func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	file := fs.String("file", ".janus/ci.yml", "pipeline file, relative to <dir>")
+	file := fs.String("file", ".janus/ci.yml", "pipeline file, relative to the workspace")
 	branch := fs.String("branch", "", "value for ${{ branch }}")
 	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently")
+	repo := fs.String("repo", "", "git repo URL to check out (instead of using <dir>)")
+	sha := fs.String("sha", "", "commit SHA to check out (with --repo)")
+	ref := fs.String("ref", "", "git ref to fetch as a fallback (with --repo)")
+	wsRoot := fs.String("workspace-root", "", "directory to create the workspace under (default: temp dir)")
+	keep := fs.Bool("keep-workspace", false, "do not delete the workspace after the run")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("usage: janus run [flags] <dir>")
+
+	ctx := context.Background()
+	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch}
+
+	var dir string
+	if *repo != "" {
+		if fs.NArg() != 0 {
+			return errors.New("provide either <dir> or --repo, not both")
+		}
+		root := *wsRoot
+		if root == "" {
+			root = os.TempDir()
+		}
+		wsDir, err := os.MkdirTemp(root, "janus-ws-*")
+		if err != nil {
+			return err
+		}
+		ws, err := workspace.Checkout(ctx, workspace.Options{
+			Dir: wsDir, RepoURL: *repo, SHA: *sha, Ref: *ref, Keep: *keep,
+		})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = ws.Cleanup() }()
+		dir = ws.Dir
+		ev.RepoURL, ev.SHA, ev.Ref = *repo, *sha, *ref
+		if ev.Branch == "" {
+			ev.Branch = strings.TrimPrefix(*ref, "refs/heads/")
+		}
+	} else {
+		if fs.NArg() != 1 {
+			return errors.New("usage: janus run [flags] <dir>  |  janus run --repo <url> --sha <sha>")
+		}
+		abs, err := filepath.Abs(fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		dir = abs
 	}
 
-	dir, err := filepath.Abs(fs.Arg(0))
-	if err != nil {
-		return err
-	}
 	data, err := os.ReadFile(filepath.Join(dir, *file))
 	if err != nil {
 		return err
@@ -177,9 +215,7 @@ func runRun(args []string) error {
 
 	st := store.NewMemory()
 	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithTee(os.Stdout))
-	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch}
-
-	run, err := eng.Run(context.Background(), wf, ev, dir)
+	run, err := eng.Run(ctx, wf, ev, dir)
 	if err != nil {
 		return err
 	}

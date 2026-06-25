@@ -18,7 +18,7 @@ Built incrementally. Current capabilities are tracked per phase:
 - [x] **Phase 0** — project skeleton, quality gate (lint/test/CI), `janus serve` with `/healthz`
 - [x] **Phase 1** — pipeline parsing, strict validation, variable interpolation (`janus validate`)
 - [x] **Phase 2** — DAG scheduler + host-process executor (`janus run`)
-- [ ] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
+- [x] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
 - [ ] **Phase 4** — HTTP server, manual trigger, read-only dashboard
 - [ ] **Phase 5** — persistent run history + GitLab webhook
 - [ ] **Phase 6** — hardening (process-group kill, timeouts, concurrency caps, auth)
@@ -35,6 +35,16 @@ make build
 # In another shell
 curl -s localhost:8080/healthz
 # {"status":"ok","version":"dev"}
+```
+
+Run a pipeline locally (logs stream to the terminal, prefixed by job):
+
+```sh
+# Against a directory that already contains .janus/ci.yml
+janus run --branch main ./my-repo
+
+# Or check out a repository at a specific commit first (shallow fetch)
+janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads/main
 ```
 
 ## Pipeline format (target)
