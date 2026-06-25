@@ -1,8 +1,10 @@
 // Package model holds Janus's core domain types: the immutable pipeline
-// specification parsed from YAML (Workflow/Job/Step) and, added later, the
-// mutable runtime run state. It has no dependencies so every other package can
-// import it without risking an import cycle.
+// specification parsed from YAML (Workflow/Job/Step), the normalized trigger
+// Event, and the mutable runtime run state (Run/JobRun/StepRun). It has no
+// dependencies so every other package can import it without risking a cycle.
 package model
+
+import "time"
 
 // Workflow is a parsed and validated pipeline specification (.janus/ci.yml).
 // It is immutable once produced by pipeline.Parse.
@@ -55,4 +57,82 @@ type Step struct {
 	Run        string
 	WorkingDir string
 	Env        map[string]string
+}
+
+// EventKind is the normalized trigger type. Provider-specific names (GitLab's
+// "merge_request", a future GitHub "pull_request") map onto these.
+type EventKind string
+
+const (
+	EventPush         EventKind = "push"
+	EventMergeRequest EventKind = "merge_request"
+	EventManual       EventKind = "manual"
+)
+
+// Event is a normalized trigger that produced a run, independent of which
+// provider (or manual call) created it. It is the value behind ${{ event }}
+// and supplies ${{ ref }}/${{ sha }}/${{ branch }}.
+type Event struct {
+	Provider string // "gitlab", "manual", ...
+	Kind     EventKind
+	RepoURL  string // clone URL
+	Ref      string // e.g. refs/heads/main
+	Branch   string // e.g. main
+	SHA      string // commit to check out
+	Title    string // commit/MR title, for display
+}
+
+// Status is the lifecycle state of a run, job, or step.
+type Status string
+
+const (
+	StatusPending   Status = "pending"
+	StatusRunning   Status = "running"
+	StatusSuccess   Status = "success"
+	StatusFailed    Status = "failed"
+	StatusCancelled Status = "cancelled"
+	StatusSkipped   Status = "skipped"
+)
+
+// Terminal reports whether the status is final (no further transitions).
+func (s Status) Terminal() bool {
+	switch s {
+	case StatusSuccess, StatusFailed, StatusCancelled, StatusSkipped:
+		return true
+	}
+	return false
+}
+
+// Run is a single execution of a workflow.
+type Run struct {
+	ID           string    `json:"id"`
+	WorkflowName string    `json:"workflow_name"`
+	Event        Event     `json:"event"`
+	Status       Status    `json:"status"`
+	Jobs         []*JobRun `json:"jobs"`
+	CreatedAt    time.Time `json:"created_at"`
+	StartedAt    time.Time `json:"started_at,omitempty"`
+	FinishedAt   time.Time `json:"finished_at,omitempty"`
+	WorkspaceDir string    `json:"workspace_dir,omitempty"`
+}
+
+// JobRun is the runtime state of one job within a run.
+type JobRun struct {
+	Name       string     `json:"name"`
+	Needs      []string   `json:"needs,omitempty"`
+	Status     Status     `json:"status"`
+	Steps      []*StepRun `json:"steps"`
+	StartedAt  time.Time  `json:"started_at,omitempty"`
+	FinishedAt time.Time  `json:"finished_at,omitempty"`
+}
+
+// StepRun is the runtime state of one step within a job. Logs are streamed to
+// the Store keyed by (run, job, step) rather than held here.
+type StepRun struct {
+	Index      int       `json:"index"`
+	Command    string    `json:"command"`
+	Status     Status    `json:"status"`
+	ExitCode   int       `json:"exit_code"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
 }

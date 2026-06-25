@@ -17,12 +17,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/hutusi/janus/internal/engine"
+	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/pipeline"
+	"github.com/hutusi/janus/internal/store"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -143,8 +147,58 @@ func runValidate(args []string) error {
 	return nil
 }
 
-func runRun(_ []string) error {
-	return errors.New("run: not implemented yet (Phase 2)")
+// runRun executes a pipeline locally against a directory, streaming logs to the
+// terminal. The repository is expected to already be present at <dir> (git
+// checkout is added in Phase 3).
+func runRun(args []string) error {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	file := fs.String("file", ".janus/ci.yml", "pipeline file, relative to <dir>")
+	branch := fs.String("branch", "", "value for ${{ branch }}")
+	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: janus run [flags] <dir>")
+	}
+
+	dir, err := filepath.Abs(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, *file))
+	if err != nil {
+		return err
+	}
+	wf, err := pipeline.Parse(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *file, err)
+	}
+
+	st := store.NewMemory()
+	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithTee(os.Stdout))
+	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch}
+
+	run, err := eng.Run(context.Background(), wf, ev, dir)
+	if err != nil {
+		return err
+	}
+	printRunSummary(run)
+	if run.Status != model.StatusSuccess {
+		return fmt.Errorf("run %s finished: %s", run.ID, run.Status)
+	}
+	return nil
+}
+
+// printRunSummary writes a compact per-job/step status report.
+func printRunSummary(run *model.Run) {
+	fmt.Printf("\n=== run %s: %s ===\n", run.ID, run.Status)
+	for _, jr := range run.Jobs {
+		fmt.Printf("  %s: %s\n", jr.Name, jr.Status)
+		for _, sr := range jr.Steps {
+			fmt.Printf("    step %d [%s] exit=%d: %s\n", sr.Index, sr.Status, sr.ExitCode, sr.Command)
+		}
+	}
 }
 
 // writeJSON writes a JSON body with the given status code.

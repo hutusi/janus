@@ -17,7 +17,7 @@ Built incrementally. Current capabilities are tracked per phase:
 
 - [x] **Phase 0** — project skeleton, quality gate (lint/test/CI), `janus serve` with `/healthz`
 - [x] **Phase 1** — pipeline parsing, strict validation, variable interpolation (`janus validate`)
-- [ ] **Phase 2** — DAG scheduler + host-process executor (`janus run`)
+- [x] **Phase 2** — DAG scheduler + host-process executor (`janus run`)
 - [ ] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
 - [ ] **Phase 4** — HTTP server, manual trigger, read-only dashboard
 - [ ] **Phase 5** — persistent run history + GitLab webhook
