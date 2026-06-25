@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -32,23 +33,41 @@ func logKey(runID, job string, stepIndex int) string {
 }
 
 func (m *Memory) SaveRun(run *model.Run) error {
+	snap := cloneRun(run)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.runs[run.ID]; !ok {
 		m.order = append(m.order, run.ID)
 	}
-	m.runs[run.ID] = run
+	m.runs[run.ID] = snap
 	return nil
 }
 
 func (m *Memory) UpdateRun(run *model.Run) error {
+	snap := cloneRun(run)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.runs[run.ID]; !ok {
 		return fmt.Errorf("run %q not found", run.ID)
 	}
-	m.runs[run.ID] = run
+	m.runs[run.ID] = snap
 	return nil
+}
+
+// cloneRun returns a deep, immutable snapshot of run. The engine mutates the
+// live run under its own lock and calls Save/Update from there, so snapshotting
+// at write time decouples the stored value from later mutation — readers
+// (GetRun/ListRuns) then never race with the engine.
+func cloneRun(run *model.Run) *model.Run {
+	data, err := json.Marshal(run)
+	if err != nil {
+		return run
+	}
+	var c model.Run
+	if err := json.Unmarshal(data, &c); err != nil {
+		return run
+	}
+	return &c
 }
 
 func (m *Memory) GetRun(id string) (*model.Run, error) {
