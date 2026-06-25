@@ -1,32 +1,53 @@
 # Configuration
 
-Janus is a single binary, `janus`, with three subcommands. All configuration is
-via flags (and a couple of environment fallbacks); there is no config file.
+Janus is a single binary, `janus`, with a few subcommands. The server
+(`janus serve`) is configured from four sources, applied in increasing order of
+precedence:
+
+```
+built-in defaults  <  --config YAML file  <  environment variables  <  CLI flags
+```
+
+So a flag always wins, but an unset flag never overrides a value from the file
+or environment with its default. A config file is optional — flags alone work.
 
 ## `janus serve`
 
 Runs the HTTP server: webhooks, manual trigger, JSON API, and dashboard.
 
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--addr` | `:8080` | HTTP listen address. |
-| `--data-dir` | _(empty)_ | Directory for persistent run history. **Empty = in-memory** (lost on restart). |
-| `--workspace-root` | `$TMPDIR/janus-workspaces` | Where per-run checkouts are created (and swept on startup). |
-| `--pipeline-path` | `.janus/ci.yml` | In-repo path to the pipeline file. |
-| `--max-parallel-jobs` | `4` | Max jobs running concurrently **within** one run. |
-| `--max-parallel-runs` | `4` | Max runs executing concurrently (excess runs queue as `pending`). |
-| `--step-timeout` | `0` | Fail any step running longer than this (e.g. `10m`). `0` disables. |
-| `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
-| `--gitlab-secret` | `$JANUS_GITLAB_SECRET` | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
-| `--api-token` | `$JANUS_API_TOKEN` | Bearer token for the API (see auth rules below). |
+### Config file
+
+`--config PATH` (or `$JANUS_CONFIG`) points at a YAML file. Unknown keys, a
+missing file, or a malformed value are **startup errors** — the server refuses
+to start rather than running with a misread config. See
+[janus.example.yml](janus.example.yml) for an annotated template.
+
+| YAML key | Flag | Default | Purpose |
+|----------|------|---------|---------|
+| `addr` | `--addr` | `:8080` | HTTP listen address. |
+| `data_dir` | `--data-dir` | _(empty)_ | Directory for persistent run history. **Empty = in-memory** (lost on restart). |
+| `workspace_root` | `--workspace-root` | `$TMPDIR/janus-workspaces` | Where per-run checkouts are created (and swept on startup). |
+| `pipeline_path` | `--pipeline-path` | `.janus/ci.yml` | In-repo path to the pipeline file. |
+| `max_parallel_jobs` | `--max-parallel-jobs` | `4` | Max jobs running concurrently **within** one run. |
+| `max_parallel_runs` | `--max-parallel-runs` | `4` | Max runs executing concurrently (excess runs queue as `pending`). |
+| `step_timeout` | `--step-timeout` | `0s` | Fail any step running longer than this (e.g. `"10m"`). `0` disables. |
+| `keep_workspaces` | `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
+| `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
+| `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
+
+In YAML, `step_timeout` is a string (`"10m"`, `"30s"`); on the flag it is a Go
+duration (`--step-timeout 10m`).
 
 Notes:
 
-- Without `--gitlab-secret`, `/webhooks/gitlab` returns `404` (disabled).
-- **`POST /api/trigger` always requires `--api-token`** — it runs code on the
+- Only the two secrets have environment fallbacks (`$JANUS_GITLAB_SECRET`,
+  `$JANUS_API_TOKEN`) so they can stay out of the file. Other settings are
+  file-or-flag. Keep a config file holding secrets `chmod 600`.
+- Without a GitLab secret, `/webhooks/gitlab` returns `404` (disabled).
+- **`POST /api/trigger` always requires an API token** — it runs code on the
   host, so without a token it is **disabled** (`403`). Read endpoints
   (`GET /api/runs…`) require the token only when one is configured.
-- The HTML dashboard (`/`, `/runs/{id}`) is **not** behind `--api-token`. Put a
+- The HTML dashboard (`/`, `/runs/{id}`) is **not** behind the API token. Put a
   reverse proxy in front if it must be protected.
 - On `SIGINT`/`SIGTERM`, Janus stops accepting requests and waits up to 30s for
   in-flight runs to finish.

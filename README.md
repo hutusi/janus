@@ -38,6 +38,10 @@ curl -s localhost:8080/healthz
 # Open the dashboard at http://localhost:8080/
 ```
 
+Settings can also come from a YAML config file (`--config janus.yml`); flags and
+env vars override it. See [docs/janus.example.yml](docs/janus.example.yml) and
+[docs/configuration.md](docs/configuration.md).
+
 Run a pipeline locally (logs stream to the terminal, prefixed by job):
 
 ```sh
