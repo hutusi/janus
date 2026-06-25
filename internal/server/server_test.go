@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -21,7 +20,10 @@ import (
 	"github.com/hutusi/janus/internal/store"
 )
 
-const testGitLabSecret = "shh-secret"
+const (
+	testGitLabSecret = "shh-secret"
+	testAPIToken     = "test-api-token"
+)
 
 // initGitRepo creates a repo containing .janus/ci.yml and returns its path + SHA.
 func initGitRepo(t *testing.T, pipeline string) (dir, sha string) {
@@ -57,10 +59,36 @@ func newTestServer(t *testing.T) *httptest.Server {
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithProvider(provider.GitLab{}, testGitLabSecret),
+		WithAPIToken(testAPIToken),
 	)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+// apiGet issues an authenticated GET (harmless on open routes).
+func apiGet(t *testing.T, url string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// postTrigger issues an authenticated POST /api/trigger.
+func postTrigger(t *testing.T, ts *httptest.Server, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("POST", ts.URL+"/api/trigger", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 func TestHealth(t *testing.T) {
@@ -90,10 +118,7 @@ jobs:
 
 	// Trigger.
 	body, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/heads/main", "branch": "main"})
-	resp, err := http.Post(ts.URL+"/api/trigger", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := postTrigger(t, ts, string(body))
 	if resp.StatusCode != http.StatusAccepted {
 		b, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
@@ -143,31 +168,55 @@ func TestAPIAuth(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	if code := statusOf(t, ts.URL+"/api/runs"); code != http.StatusUnauthorized {
-		t.Errorf("no token: status = %d, want 401", code)
-	}
-	if code := statusOf(t, ts.URL+"/healthz"); code != http.StatusOK {
-		t.Errorf("health should stay open: status = %d, want 200", code)
+	rawStatus := func(method, url, token string) int {
+		req, _ := http.NewRequest(method, url, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
 	}
 
-	req, _ := http.NewRequest("GET", ts.URL+"/api/runs", nil)
-	req.Header.Set("Authorization", "Bearer secret-token")
-	resp, err := http.DefaultClient.Do(req)
+	if code := rawStatus("GET", ts.URL+"/api/runs", ""); code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", code)
+	}
+	if code := rawStatus("GET", ts.URL+"/api/runs", "wrong"); code != http.StatusUnauthorized {
+		t.Errorf("wrong token: status = %d, want 401", code)
+	}
+	if code := rawStatus("GET", ts.URL+"/healthz", ""); code != http.StatusOK {
+		t.Errorf("health should stay open: status = %d, want 200", code)
+	}
+	if code := rawStatus("GET", ts.URL+"/api/runs", "secret-token"); code != http.StatusOK {
+		t.Errorf("valid token: status = %d, want 200", code)
+	}
+}
+
+func TestTriggerRequiresToken(t *testing.T) {
+	// A server with no API token disables /api/trigger entirely.
+	st := store.NewMemory()
+	eng := engine.New(st)
+	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false, 4)
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/trigger", "application/json", strings.NewReader(`{"repo_url":"x","ref":"refs/heads/main"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("valid token: status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 when no --api-token is configured", resp.StatusCode)
 	}
 }
 
 func TestTriggerValidation(t *testing.T) {
 	ts := newTestServer(t)
-	resp, err := http.Post(ts.URL+"/api/trigger", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := postTrigger(t, ts, `{}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for missing repo_url", resp.StatusCode)
@@ -178,10 +227,7 @@ func pollRun(t *testing.T, ts *httptest.Server, id string, timeout time.Duration
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		resp, err := http.Get(ts.URL + "/api/runs/" + id)
-		if err != nil {
-			t.Fatal(err)
-		}
+		resp := apiGet(t, ts.URL+"/api/runs/"+id)
 		var run model.Run
 		_ = json.NewDecoder(resp.Body).Decode(&run)
 		_ = resp.Body.Close()
@@ -206,10 +252,7 @@ func findJob(run *model.Run, name string) *model.JobRun {
 
 func getText(t *testing.T, url string) string {
 	t.Helper()
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := apiGet(t, url)
 	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	return string(b)
@@ -217,10 +260,7 @@ func getText(t *testing.T, url string) string {
 
 func statusOf(t *testing.T, url string) int {
 	t.Helper()
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp := apiGet(t, url)
+	_ = resp.Body.Close()
 	return resp.StatusCode
 }

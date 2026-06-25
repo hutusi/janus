@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
@@ -28,8 +29,10 @@ type Runner struct {
 	pipelinePath string
 	keepWS       bool
 
-	sem chan struct{}  // caps concurrently executing runs
-	wg  sync.WaitGroup // tracks in-flight runs for graceful shutdown
+	ctx    context.Context // root context for run execution; cancelled on Shutdown
+	cancel context.CancelFunc
+	sem    chan struct{}  // caps concurrently executing runs
+	wg     sync.WaitGroup // tracks in-flight runs for graceful shutdown
 }
 
 // Result reports the outcome of a trigger. Started is false (with a Reason)
@@ -48,12 +51,15 @@ func New(st store.Store, eng *engine.Engine, wsRoot, pipelinePath string, keepWS
 	if maxRuns <= 0 {
 		maxRuns = 4
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Runner{
 		store:        st,
 		engine:       eng,
 		wsRoot:       wsRoot,
 		pipelinePath: pipelinePath,
 		keepWS:       keepWS,
+		ctx:          ctx,
+		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
 	}
 }
@@ -72,15 +78,27 @@ func (r *Runner) Sweep() error {
 	return nil
 }
 
-// Wait blocks until all in-flight runs finish. Used for graceful shutdown.
-func (r *Runner) Wait() { r.wg.Wait() }
+// Shutdown stops accepting new run work and waits up to grace for in-flight
+// runs to finish; if they don't, it cancels them (killing their host
+// processes) and waits for the unwind. Call after the HTTP listener is closed.
+func (r *Runner) Shutdown(grace time.Duration) {
+	done := make(chan struct{})
+	go func() { r.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		r.cancel()
+	case <-time.After(grace):
+		r.cancel() // grace expired: cancel in-flight runs, then wait for unwind
+		<-done
+	}
+}
 
 // Trigger checks out the repo at ev's commit, parses the pipeline, and — if the
 // event matches — records and asynchronously executes a run. The workspace is
 // removed when the run finishes. Checkout/parse failures return an error; a
 // non-matching event returns Result{Started: false} with nil error.
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
-	if err := os.MkdirAll(r.wsRoot, 0o755); err != nil {
+	if err := os.MkdirAll(r.wsRoot, 0o700); err != nil {
 		return Result{}, err
 	}
 	wsDir, err := os.MkdirTemp(r.wsRoot, "run-*")
@@ -123,7 +141,8 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		// Wait for a run slot; the run stays Pending until one frees.
 		r.sem <- struct{}{}
 		defer func() { <-r.sem }()
-		r.engine.Execute(context.Background(), run, wf, ws.Dir)
+		// r.ctx is cancelled on Shutdown, so in-flight runs are stopped.
+		r.engine.Execute(r.ctx, run, wf, ws.Dir)
 	}()
 
 	return Result{RunID: run.ID, Started: true}, nil

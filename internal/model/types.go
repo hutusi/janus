@@ -111,8 +111,8 @@ type Run struct {
 	Status       Status    `json:"status"`
 	Jobs         []*JobRun `json:"jobs"`
 	CreatedAt    time.Time `json:"created_at"`
-	StartedAt    time.Time `json:"started_at,omitempty"`
-	FinishedAt   time.Time `json:"finished_at,omitempty"`
+	StartedAt    time.Time `json:"started_at,omitzero"`
+	FinishedAt   time.Time `json:"finished_at,omitzero"`
 	WorkspaceDir string    `json:"workspace_dir,omitempty"`
 }
 
@@ -122,8 +122,8 @@ type JobRun struct {
 	Needs      []string   `json:"needs,omitempty"`
 	Status     Status     `json:"status"`
 	Steps      []*StepRun `json:"steps"`
-	StartedAt  time.Time  `json:"started_at,omitempty"`
-	FinishedAt time.Time  `json:"finished_at,omitempty"`
+	StartedAt  time.Time  `json:"started_at,omitzero"`
+	FinishedAt time.Time  `json:"finished_at,omitzero"`
 }
 
 // StepRun is the runtime state of one step within a job. Logs are streamed to
@@ -133,6 +133,6 @@ type StepRun struct {
 	Command    string    `json:"command"`
 	Status     Status    `json:"status"`
 	ExitCode   int       `json:"exit_code"`
-	StartedAt  time.Time `json:"started_at,omitempty"`
-	FinishedAt time.Time `json:"finished_at,omitempty"`
+	StartedAt  time.Time `json:"started_at,omitzero"`
+	FinishedAt time.Time `json:"finished_at,omitzero"`
 }

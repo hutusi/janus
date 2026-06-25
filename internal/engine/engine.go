@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"io"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ type Engine struct {
 	maxJobs     int
 	stepTimeout time.Duration // 0 = no per-step timeout
 	tee         io.Writer     // optional: mirror all step output here (the CLI uses os.Stdout)
+	logger      *slog.Logger
 
 	// runJob executes one job's steps and returns its terminal status. It is a
 	// field (not just a method) so tests can drive the scheduler with a fake.
@@ -55,9 +57,19 @@ func WithStepTimeout(d time.Duration) Option {
 	}
 }
 
+// WithLogger sets the logger used for non-fatal diagnostics (e.g. persistence
+// errors during a run).
+func WithLogger(l *slog.Logger) Option {
+	return func(e *Engine) {
+		if l != nil {
+			e.logger = l
+		}
+	}
+}
+
 // New creates an Engine backed by st.
 func New(st store.Store, opts ...Option) *Engine {
-	e := &Engine{store: st, maxJobs: 4}
+	e := &Engine{store: st, maxJobs: 4, logger: slog.Default()}
 	e.runJob = e.executeJob
 	for _, o := range opts {
 		o(e)
@@ -76,8 +88,9 @@ type runState struct {
 	workDir string
 	store   store.Store
 
-	tee   io.Writer
-	teeMu *sync.Mutex // guards tee across parallel jobs
+	tee    io.Writer
+	teeMu  *sync.Mutex // guards tee across parallel jobs
+	logger *slog.Logger
 
 	mu sync.Mutex
 }
@@ -86,7 +99,9 @@ func (rs *runState) update(mutate func()) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	mutate()
-	_ = rs.store.UpdateRun(rs.run)
+	if err := rs.store.UpdateRun(rs.run); err != nil {
+		rs.logger.Warn("persisting run state failed", "run", rs.run.ID, "err", err)
+	}
 }
 
 type jobResult struct {
@@ -136,7 +151,7 @@ func (e *Engine) Run(ctx context.Context, wf *model.Workflow, ev model.Event, wo
 // blocking until every job reaches a terminal state. Status changes are
 // persisted via the store as they happen.
 func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow, workDir string) {
-	rs := &runState{run: run, wf: wf, event: run.Event, workDir: workDir, store: e.store, tee: e.tee}
+	rs := &runState{run: run, wf: wf, event: run.Event, workDir: workDir, store: e.store, tee: e.tee, logger: e.logger}
 	if rs.tee != nil {
 		rs.teeMu = &sync.Mutex{}
 	}

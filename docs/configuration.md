@@ -18,11 +18,14 @@ Runs the HTTP server: webhooks, manual trigger, JSON API, and dashboard.
 | `--step-timeout` | `0` | Fail any step running longer than this (e.g. `10m`). `0` disables. |
 | `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
 | `--gitlab-secret` | `$JANUS_GITLAB_SECRET` | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
-| `--api-token` | `$JANUS_API_TOKEN` | If set, require `Authorization: Bearer <token>` on `/api/*`. |
+| `--api-token` | `$JANUS_API_TOKEN` | Bearer token for the API (see auth rules below). |
 
 Notes:
 
 - Without `--gitlab-secret`, `/webhooks/gitlab` returns `404` (disabled).
+- **`POST /api/trigger` always requires `--api-token`** — it runs code on the
+  host, so without a token it is **disabled** (`403`). Read endpoints
+  (`GET /api/runs…`) require the token only when one is configured.
 - The HTML dashboard (`/`, `/runs/{id}`) is **not** behind `--api-token`. Put a
   reverse proxy in front if it must be protected.
 - On `SIGINT`/`SIGTERM`, Janus stops accepting requests and waits up to 30s for

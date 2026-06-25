@@ -38,7 +38,7 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 	if opt.SHA == "" && opt.Ref == "" {
 		return nil, fmt.Errorf("workspace: a SHA or Ref is required")
 	}
-	if err := os.MkdirAll(opt.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(opt.Dir, 0o700); err != nil {
 		return nil, err
 	}
 	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep}
@@ -53,13 +53,16 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 		}
 	}
 
-	fetched := false
+	// Prefer fetching the exact commit. If the server refuses fetch-by-SHA we
+	// fall back to the ref — but a shallow ref fetch only contains the ref tip,
+	// so we must then check out FETCH_HEAD, not the (possibly-absent) SHA.
+	fetchedSHA := false
 	if opt.SHA != "" {
 		if err := ws.git(ctx, "fetch", "--depth", "1", "origin", opt.SHA); err == nil {
-			fetched = true
+			fetchedSHA = true
 		}
 	}
-	if !fetched {
+	if !fetchedSHA {
 		if opt.Ref == "" {
 			_ = ws.Cleanup()
 			return nil, fmt.Errorf("workspace: fetch by SHA %q failed and no Ref to fall back to", opt.SHA)
@@ -70,9 +73,9 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 		}
 	}
 
-	target := opt.SHA
-	if target == "" {
-		target = "FETCH_HEAD"
+	target := "FETCH_HEAD"
+	if fetchedSHA {
+		target = opt.SHA
 	}
 	if err := ws.git(ctx, "checkout", "-q", "--detach", target); err != nil {
 		_ = ws.Cleanup()

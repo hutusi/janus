@@ -75,8 +75,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("POST /webhooks/{provider}", s.handleWebhook)
 
-	// JSON API: optionally bearer-protected.
-	s.mux.HandleFunc("POST /api/trigger", s.requireAuth(s.handleTrigger))
+	// /api/trigger executes code on the host, so it ALWAYS requires a token —
+	// if none is configured it is disabled (403) rather than left open.
+	s.mux.HandleFunc("POST /api/trigger", s.requireToken(s.handleTrigger))
+	// Read endpoints are optionally bearer-protected.
 	s.mux.HandleFunc("GET /api/runs", s.requireAuth(s.handleListRuns))
 	s.mux.HandleFunc("GET /api/runs/{id}", s.requireAuth(s.handleGetRun))
 	s.mux.HandleFunc("GET /api/runs/{id}/logs", s.requireAuth(s.handleLogs))
@@ -86,17 +88,39 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}", s.handleRunPage)
 }
 
-// requireAuth wraps a handler with bearer-token auth when an API token is set.
+// bearerOK reports whether the request carries the configured API token.
+func (s *Server) bearerOK(r *http.Request) bool {
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, prefix) {
+		return false
+	}
+	tok := strings.TrimPrefix(auth, prefix)
+	return subtle.ConstantTimeCompare([]byte(tok), []byte(s.apiToken)) == 1
+}
+
+// requireAuth enforces the bearer token only when one is configured.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiToken != "" {
-			const prefix = "Bearer "
-			auth := r.Header.Get("Authorization")
-			tok := strings.TrimPrefix(auth, prefix)
-			if !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare([]byte(tok), []byte(s.apiToken)) != 1 {
-				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
-				return
-			}
+		if s.apiToken != "" && !s.bearerOK(r) {
+			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// requireToken mandates a configured bearer token; without one the route is
+// disabled (used for the code-executing /api/trigger).
+func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.apiToken == "" {
+			writeError(w, http.StatusForbidden, "/api/trigger is disabled; start janus with --api-token to enable it")
+			return
+		}
+		if !s.bearerOK(r) {
+			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+			return
 		}
 		next(w, r)
 	}

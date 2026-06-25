@@ -68,8 +68,21 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, job *model.Job, jr *
 		sr.StartedAt = time.Now()
 	})
 
-	w, closeLog := rs.stepWriter(jr.Name, sr.Index)
-	defer closeLog()
+	w, closeLog, err := rs.stepWriter(jr.Name, sr.Index)
+	if err != nil {
+		rs.logger.Warn("opening log sink failed", "run", rs.run.ID, "job", jr.Name, "step", sr.Index, "err", err)
+		rs.update(func() {
+			sr.Status = model.StatusFailed
+			sr.ExitCode = -1
+			sr.FinishedAt = time.Now()
+		})
+		return model.StatusFailed
+	}
+	defer func() {
+		if cerr := closeLog(); cerr != nil {
+			rs.logger.Warn("closing log sink failed", "run", rs.run.ID, "job", jr.Name, "step", sr.Index, "err", cerr)
+		}
+	}()
 
 	cmdStr, dir, env, err := e.prepare(rs, job, step)
 	if err != nil {
@@ -207,24 +220,28 @@ func shortSHA(sha string) string {
 
 // stepWriter builds the combined-output writer for one step: the store's
 // append-only log sink, plus (if configured) a job-prefixed mirror to the tee.
-func (rs *runState) stepWriter(job string, stepIndex int) (io.Writer, func()) {
+// It errors if the log sink can't be opened, so a broken store fails the step
+// loudly rather than silently dropping output.
+func (rs *runState) stepWriter(job string, stepIndex int) (io.Writer, func() error, error) {
 	sink, err := rs.store.LogWriter(rs.run.ID, job, stepIndex)
-	var closers []io.Closer
-	var writers []io.Writer
 	if err != nil {
-		writers = append(writers, io.Discard)
-	} else {
-		writers = append(writers, sink)
-		closers = append(closers, sink)
+		return nil, nil, err
 	}
+	writers := []io.Writer{sink}
+	closers := []io.Closer{sink}
 	if rs.tee != nil {
 		lp := newLinePrefixer(&lockedWriter{mu: rs.teeMu, w: rs.tee}, "["+job+"] ")
 		writers = append(writers, lp)
 		closers = append(closers, lp)
 	}
-	return io.MultiWriter(writers...), func() {
+	closeFn := func() error {
+		var firstErr error
 		for _, c := range closers {
-			_ = c.Close()
+			if cerr := c.Close(); cerr != nil && firstErr == nil {
+				firstErr = cerr
+			}
 		}
+		return firstErr
 	}
+	return io.MultiWriter(writers...), closeFn, nil
 }

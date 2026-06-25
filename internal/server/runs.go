@@ -10,12 +10,20 @@ import (
 	"github.com/hutusi/janus/internal/model"
 )
 
+const maxListLimit = 500
+
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			limit = n
 		}
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
 	}
 	runs, err := s.store.ListRuns(limit)
 	if err != nil {
@@ -77,6 +85,7 @@ func (s *Server) writeRunLogs(w io.Writer, run *model.Run) {
 func (s *Server) readStep(runID, job string, step int) []byte {
 	rc, err := s.store.ReadLogs(runID, job, step)
 	if err != nil {
+		s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
 		return nil
 	}
 	defer func() { _ = rc.Close() }()
@@ -102,11 +111,21 @@ func (s *Server) streamStep(w http.ResponseWriter, r *http.Request, runID, job s
 			}
 		}
 	}
+	lookupErrs := 0
 	for {
 		flush()
-		if run, err := s.store.GetRun(runID); err == nil && stepTerminal(run, job, step) {
+		run, err := s.store.GetRun(runID)
+		switch {
+		case err == nil && stepTerminal(run, job, step):
 			flush()
 			return
+		case err != nil:
+			if lookupErrs++; lookupErrs >= 3 {
+				s.logger.Warn("stopping log stream; run lookup keeps failing", "run", runID, "err", err)
+				return
+			}
+		default:
+			lookupErrs = 0
 		}
 		select {
 		case <-r.Context().Done():

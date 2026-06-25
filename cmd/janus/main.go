@@ -112,7 +112,7 @@ func runServe(args []string) error {
 		st = store.NewMemory()
 	}
 
-	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithStepTimeout(*stepTimeout))
+	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithStepTimeout(*stepTimeout), engine.WithLogger(logger))
 	rn := runner.New(st, eng, *wsRoot, *pipelinePath, *keepWS, *maxRuns)
 	if err := rn.Sweep(); err != nil {
 		logger.Warn("workspace sweep failed", "err", err)
@@ -156,14 +156,8 @@ func runServe(args []string) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return err
 		}
-		// Give in-flight runs a bounded grace period to finish.
-		done := make(chan struct{})
-		go func() { rn.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			logger.Warn("timed out waiting for in-flight runs")
-		}
+		// Wait up to 30s for in-flight runs; cancel (kill processes) if they overrun.
+		rn.Shutdown(30 * time.Second)
 		return nil
 	}
 }

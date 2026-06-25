@@ -6,11 +6,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/hutusi/janus/internal/model"
 )
+
+// runIDRe constrains run IDs to a safe charset so a caller-supplied ID (e.g.
+// from a URL path) can never traverse outside the data directory.
+var runIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func checkRunID(id string) error {
+	if !runIDRe.MatchString(id) {
+		return fmt.Errorf("invalid run id %q", id)
+	}
+	return nil
+}
 
 // File is a flat-file Store. Each run lives in its own directory:
 //
@@ -25,7 +37,7 @@ type File struct {
 
 // NewFile creates a file-backed store rooted at dir, creating it if needed.
 func NewFile(dir string) (*File, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "runs"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "runs"), 0o700); err != nil {
 		return nil, err
 	}
 	return &File{root: dir}, nil
@@ -37,8 +49,11 @@ func (f *File) SaveRun(run *model.Run) error   { return f.writeRun(run) }
 func (f *File) UpdateRun(run *model.Run) error { return f.writeRun(run) }
 
 func (f *File) writeRun(run *model.Run) error {
+	if err := checkRunID(run.ID); err != nil {
+		return err
+	}
 	dir := f.runDir(run.ID)
-	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(run, "", "  ")
@@ -63,6 +78,9 @@ func (f *File) writeRun(run *model.Run) error {
 }
 
 func (f *File) GetRun(id string) (*model.Run, error) {
+	if err := checkRunID(id); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(filepath.Join(f.runDir(id), "run.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -108,14 +126,20 @@ func (f *File) logPath(runID, job string, stepIndex int) string {
 }
 
 func (f *File) LogWriter(runID, job string, stepIndex int) (io.WriteCloser, error) {
-	path := f.logPath(runID, job, stepIndex)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := checkRunID(runID); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	path := f.logPath(runID, job, stepIndex)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 }
 
 func (f *File) ReadLogs(runID, job string, stepIndex int) (io.ReadCloser, error) {
+	if err := checkRunID(runID); err != nil {
+		return nil, err
+	}
 	file, err := os.Open(f.logPath(runID, job, stepIndex))
 	if err != nil {
 		if os.IsNotExist(err) {
