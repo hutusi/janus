@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,9 +16,12 @@ import (
 
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
+	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
 	"github.com/hutusi/janus/internal/store"
 )
+
+const testGitLabSecret = "shh-secret"
 
 // initGitRepo creates a repo containing .janus/ci.yml and returns its path + SHA.
 func initGitRepo(t *testing.T, pipeline string) (dir, sha string) {
@@ -50,7 +54,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	st := store.NewMemory()
 	eng := engine.New(st)
 	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false)
-	ts := httptest.NewServer(New(st, rn, "test").Handler())
+	srv := New(st, rn, "test",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithProvider(provider.GitLab{}, testGitLabSecret),
+	)
+	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
 }

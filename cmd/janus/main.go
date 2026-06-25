@@ -26,6 +26,7 @@ import (
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/pipeline"
+	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
 	"github.com/hutusi/janus/internal/server"
 	"github.com/hutusi/janus/internal/store"
@@ -84,22 +85,44 @@ Run "janus <command> -h" for command-specific flags.
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", ":8080", "HTTP listen address")
+	dataDir := fs.String("data-dir", "", "directory for persistent run history (empty = in-memory, lost on restart)")
 	wsRoot := fs.String("workspace-root", filepath.Join(os.TempDir(), "janus-workspaces"), "directory for per-run workspaces")
 	pipelinePath := fs.String("pipeline-path", ".janus/ci.yml", "in-repo path to the pipeline file")
 	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently within a run")
 	keepWS := fs.Bool("keep-workspaces", false, "do not delete workspaces after runs (debugging)")
+	gitlabSecret := fs.String("gitlab-secret", os.Getenv("JANUS_GITLAB_SECRET"), "GitLab webhook secret token (enables /webhooks/gitlab)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	st := store.NewMemory()
+	var st store.Store
+	if *dataDir != "" {
+		fst, err := store.NewFile(*dataDir)
+		if err != nil {
+			return fmt.Errorf("data-dir: %w", err)
+		}
+		st = fst
+	} else {
+		logger.Warn("no --data-dir set; run history is in-memory and lost on restart")
+		st = store.NewMemory()
+	}
+
 	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs))
 	rn := runner.New(st, eng, *wsRoot, *pipelinePath, *keepWS)
+
+	opts := []server.Option{server.WithLogger(logger)}
+	if *gitlabSecret != "" {
+		opts = append(opts, server.WithProvider(provider.GitLab{}, *gitlabSecret))
+		logger.Info("gitlab webhook enabled at /webhooks/gitlab")
+	} else {
+		logger.Warn("no --gitlab-secret set; /webhooks/gitlab is disabled")
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           server.New(st, rn, version).Handler(),
+		Handler:           server.New(st, rn, version, opts...).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

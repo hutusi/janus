@@ -20,7 +20,7 @@ Built incrementally. Current capabilities are tracked per phase:
 - [x] **Phase 2** — DAG scheduler + host-process executor (`janus run`)
 - [x] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
 - [x] **Phase 4** — HTTP server, manual trigger, read-only dashboard
-- [ ] **Phase 5** — persistent run history + GitLab webhook
+- [x] **Phase 5** — persistent run history + GitLab webhook
 - [ ] **Phase 6** — hardening (process-group kill, timeouts, concurrency caps, auth)
 
 ## Quickstart
@@ -64,6 +64,18 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 curl -XPOST localhost:8080/api/trigger \
   -d '{"repo_url":"https://gitlab.com/acme/app.git","ref":"refs/heads/main","branch":"main"}'
 ```
+
+### GitLab webhooks
+
+Run with a secret and persistent storage, then point a GitLab webhook at it:
+
+```sh
+janus serve --data-dir /var/lib/janus --gitlab-secret "$(openssl rand -hex 24)"
+```
+
+Push and merge-request events trigger runs that are matched against each
+workflow's `on:` filters. With `--data-dir`, run history and logs survive
+restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
 
 ## Pipeline format (target)
 

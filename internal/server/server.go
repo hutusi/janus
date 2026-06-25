@@ -6,29 +6,58 @@ package server
 import (
 	"encoding/json"
 	"html/template"
+	"log/slog"
 	"net/http"
 
+	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
 	"github.com/hutusi/janus/internal/store"
 )
 
+// registeredProvider pairs a webhook provider with its configured secret.
+type registeredProvider struct {
+	provider provider.Provider
+	secret   string
+}
+
 // Server holds the dependencies shared by all handlers.
 type Server struct {
-	store   store.Store
-	runner  *runner.Runner
-	version string
-	mux     *http.ServeMux
-	tmpl    *template.Template
+	store     store.Store
+	runner    *runner.Runner
+	version   string
+	logger    *slog.Logger
+	providers map[string]registeredProvider
+	mux       *http.ServeMux
+	tmpl      *template.Template
+}
+
+// Option configures a Server.
+type Option func(*Server)
+
+// WithLogger sets the logger used for webhook/run diagnostics.
+func WithLogger(l *slog.Logger) Option { return func(s *Server) { s.logger = l } }
+
+// WithProvider registers a webhook provider and its secret, enabling
+// POST /webhooks/<provider.Name()>.
+func WithProvider(p provider.Provider, secret string) Option {
+	return func(s *Server) {
+		s.providers[p.Name()] = registeredProvider{provider: p, secret: secret}
+	}
 }
 
 // New builds a Server and registers its routes.
-func New(st store.Store, rn *runner.Runner, version string) *Server {
+func New(st store.Store, rn *runner.Runner, version string, opts ...Option) *Server {
 	s := &Server{
-		store:   st,
-		runner:  rn,
-		version: version,
-		mux:     http.NewServeMux(),
-		tmpl:    template.Must(template.New("").Funcs(templateFuncs).ParseFS(templateFS, "templates/*.html")),
+		store:     st,
+		runner:    rn,
+		version:   version,
+		logger:    slog.Default(),
+		providers: map[string]registeredProvider{},
+		mux:       http.NewServeMux(),
+		tmpl:      template.Must(template.New("").Funcs(templateFuncs).ParseFS(templateFS, "templates/*.html")),
+	}
+	for _, o := range opts {
+		o(s)
 	}
 	s.routes()
 	return s
@@ -37,6 +66,7 @@ func New(st store.Store, rn *runner.Runner, version string) *Server {
 func (s *Server) routes() {
 	// JSON API
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.mux.HandleFunc("POST /webhooks/{provider}", s.handleWebhook)
 	s.mux.HandleFunc("POST /api/trigger", s.handleTrigger)
 	s.mux.HandleFunc("GET /api/runs", s.handleListRuns)
 	s.mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)

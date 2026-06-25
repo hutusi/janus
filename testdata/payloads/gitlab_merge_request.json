@@ -1,0 +1,25 @@
+{
+  "object_kind": "merge_request",
+  "event_type": "merge_request",
+  "user": { "name": "John Smith" },
+  "project": {
+    "id": 15,
+    "name": "app",
+    "git_http_url": "https://gitlab.example.com/acme/app.git",
+    "git_ssh_url": "git@gitlab.example.com:acme/app.git",
+    "default_branch": "main"
+  },
+  "object_attributes": {
+    "id": 99,
+    "iid": 1,
+    "target_branch": "main",
+    "source_branch": "feature/login",
+    "title": "Add login form",
+    "state": "opened",
+    "action": "open",
+    "last_commit": {
+      "id": "9b5f7c3a2e1d4b6a8c0f2e4d6b8a0c2e4f6a8b0c",
+      "title": "Add login form"
+    }
+  }
+}

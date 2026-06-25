@@ -73,13 +73,13 @@ const (
 // provider (or manual call) created it. It is the value behind ${{ event }}
 // and supplies ${{ ref }}/${{ sha }}/${{ branch }}.
 type Event struct {
-	Provider string // "gitlab", "manual", ...
-	Kind     EventKind
-	RepoURL  string // clone URL
-	Ref      string // e.g. refs/heads/main
-	Branch   string // e.g. main
-	SHA      string // commit to check out
-	Title    string // commit/MR title, for display
+	Provider string    `json:"provider"`        // "gitlab", "manual", ...
+	Kind     EventKind `json:"kind"`            // normalized trigger type
+	RepoURL  string    `json:"repo_url"`        // clone URL
+	Ref      string    `json:"ref,omitempty"`   // e.g. refs/heads/main
+	Branch   string    `json:"branch"`          // e.g. main
+	SHA      string    `json:"sha,omitempty"`   // commit to check out
+	Title    string    `json:"title,omitempty"` // commit/MR title, for display
 }
 
 // Status is the lifecycle state of a run, job, or step.
