@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hutusi/janus/internal/allowlist"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/provider"
@@ -51,11 +52,23 @@ func initGitRepo(t *testing.T, pipeline string) (dir, sha string) {
 	return dir, git("rev-parse", "HEAD")
 }
 
+// newTestServer builds a server that allows all repos ("*"), so existing
+// end-to-end tests aren't gated by the allowlist.
 func newTestServer(t *testing.T) *httptest.Server {
+	return newTestServerAllow(t, "*")
+}
+
+// newTestServerAllow builds a server whose runner enforces the given allowlist
+// entries. Used by allowlist-specific tests with a narrow list.
+func newTestServerAllow(t *testing.T, entries ...string) *httptest.Server {
 	t.Helper()
 	st := store.NewMemory()
 	eng := engine.New(st)
-	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false, 4)
+	allow, err := allowlist.New(entries)
+	if err != nil {
+		t.Fatalf("allowlist.New: %v", err)
+	}
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow})
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithProvider(provider.GitLab{}, testGitLabSecret),
@@ -160,7 +173,8 @@ jobs:
 func TestAPIAuth(t *testing.T) {
 	st := store.NewMemory()
 	eng := engine.New(st)
-	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false, 4)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow})
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithAPIToken("secret-token"),
@@ -199,7 +213,8 @@ func TestTriggerRequiresToken(t *testing.T) {
 	// A server with no API token disables /api/trigger entirely.
 	st := store.NewMemory()
 	eng := engine.New(st)
-	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false, 4)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow})
 	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

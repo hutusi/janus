@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -31,6 +32,7 @@ type Config struct {
 	KeepWorkspaces  bool     `yaml:"keep_workspaces"`
 	GitLabSecret    string   `yaml:"gitlab_secret"`
 	APIToken        string   `yaml:"api_token"`
+	AllowRepos      []string `yaml:"allow_repos"`
 }
 
 // Defaults returns the built-in configuration used when nothing overrides it.
@@ -112,8 +114,22 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.GitLabSecret = g.Get().(string)
 		case "api-token":
 			c.APIToken = g.Get().(string)
+		case "allow-repos":
+			c.AllowRepos = splitCSV(g.Get().(string)) // replaces (does not merge) the file list
 		}
 	})
+}
+
+// splitCSV splits a comma-separated value, trimming and dropping empties.
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Duration wraps time.Duration so it decodes from a YAML string like "10m".

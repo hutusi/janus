@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/hutusi/janus/internal/provider"
+	"github.com/hutusi/janus/internal/runner"
 )
 
 // maxWebhookBody caps how much of a webhook payload we read.
@@ -48,6 +49,13 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := s.runner.Trigger(r.Context(), *ev)
+	if errors.Is(err, runner.ErrRepoNotAllowed) {
+		// A rejected repo is a policy decision (or an attack / misconfig) — a
+		// hard 403, distinct from the 2xx "no pipeline" case below.
+		s.logger.Warn("webhook rejected: repo not allowed", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch)
+		writeJSON(w, http.StatusForbidden, map[string]string{"status": "rejected", "reason": "repository not in allowlist"})
+		return
+	}
 	if err != nil {
 		// The push/MR is valid; a missing or invalid .janus/ci.yml (or a
 		// checkout problem) is the repository's concern. Stay 2xx, but log it.

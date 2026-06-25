@@ -60,8 +60,28 @@ not disable the hook). A started run returns `202` with `{"run_id"}`.
 | 202  | A run was started (`run_id` in the body). |
 | 200  | Event accepted but no run (ignored type, or branch didn't match). |
 | 200  | `{"status":"error"}` — the repo's `.janus/ci.yml` is missing/invalid, or checkout failed (logged server-side). |
+| 403  | `{"status":"rejected"}` — the repository is not in the allowlist (see below). |
 | 401  | Secret token mismatch. |
 | 404  | `gitlab` provider not configured (no `--gitlab-secret`). |
+
+## Restricting which repos can run
+
+Janus runs the triggered repo's pipeline as **host processes with no isolation**.
+Configure `allow_repos` so a leaked webhook secret can't be used to run an
+arbitrary repository:
+
+```yaml
+# janus.yml
+allow_repos:
+  - https://gitlab.example.com/acme   # only repos under the acme group
+```
+
+`allow_repos` is **deny-by-default**: with none set, every delivery is rejected
+with **403**. Use `"*"` to allow all. A rejected delivery returns 403, so a
+misconfigured allowlist surfaces immediately — confirm with GitLab's
+**Test → Push events** button after changing it. (Repeated 4xx can make GitLab
+auto-disable a webhook, so fix the allowlist rather than leaving it failing.)
+See [configuration.md](configuration.md#repository-allowlist) for matching rules.
 
 ## Notes & limits
 

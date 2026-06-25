@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hutusi/janus/internal/allowlist"
 	"github.com/hutusi/janus/internal/config"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
@@ -98,6 +99,7 @@ func runServe(args []string) error {
 	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
 	fs.String("gitlab-secret", "", "GitLab webhook secret token (overrides config/env; enables /webhooks/gitlab)")
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
+	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -111,6 +113,19 @@ func runServe(args []string) error {
 	cfg.OverlayFlags(fs)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	allow, err := allowlist.New(cfg.AllowRepos)
+	if err != nil {
+		return fmt.Errorf("allow_repos: %w", err)
+	}
+	switch {
+	case len(allow) == 0:
+		logger.Warn("no repos allowed; every webhook and manual trigger will be rejected — set allow_repos (use '*' to allow all)")
+	case containsWildcard(allow):
+		logger.Warn("allowing ALL repositories (allow_repos contains '*')")
+	default:
+		logger.Info("repo allowlist active", "entries", len(allow))
+	}
 
 	var st store.Store
 	if cfg.DataDir != "" {
@@ -129,7 +144,13 @@ func runServe(args []string) error {
 		engine.WithStepTimeout(time.Duration(cfg.StepTimeout)),
 		engine.WithLogger(logger),
 	)
-	rn := runner.New(st, eng, cfg.WorkspaceRoot, cfg.PipelinePath, cfg.KeepWorkspaces, cfg.MaxParallelRuns)
+	rn := runner.New(st, eng, runner.Options{
+		WSRoot:       cfg.WorkspaceRoot,
+		PipelinePath: cfg.PipelinePath,
+		KeepWS:       cfg.KeepWorkspaces,
+		MaxRuns:      cfg.MaxParallelRuns,
+		Allowlist:    allow,
+	})
 	if err := rn.Sweep(); err != nil {
 		logger.Warn("workspace sweep failed", "err", err)
 	}
@@ -283,6 +304,16 @@ func runRun(args []string) error {
 		return fmt.Errorf("run %s finished: %s", run.ID, run.Status)
 	}
 	return nil
+}
+
+// containsWildcard reports whether the allowlist has a "*" (allow-all) entry.
+func containsWildcard(a allowlist.Allowlist) bool {
+	for _, e := range a {
+		if e == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // printRunSummary writes a compact per-job/step status report.

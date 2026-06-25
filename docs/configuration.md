@@ -34,9 +34,12 @@ to start rather than running with a misread config. See
 | `keep_workspaces` | `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
+| `allow_repos` | `--allow-repos` (comma-separated) | _(empty)_ | Repositories permitted to run. See "Repository allowlist" below. |
 
 In YAML, `step_timeout` is a string (`"10m"`, `"30s"`); on the flag it is a Go
-duration (`--step-timeout 10m`).
+duration (`--step-timeout 10m`). `allow_repos` is a YAML list; the
+`--allow-repos` flag is a comma-separated string that **replaces** (not merges
+with) the file list.
 
 Notes:
 
@@ -51,6 +54,36 @@ Notes:
   reverse proxy in front if it must be protected.
 - On `SIGINT`/`SIGTERM`, Janus stops accepting requests and waits up to 30s for
   in-flight runs to finish.
+
+### Repository allowlist
+
+`allow_repos` controls which repositories a webhook or manual trigger may run.
+A triggered repo is cloned and its `.janus/ci.yml` runs as **host processes with
+no isolation**, so this is the guard against a leaked webhook secret / API token
+being used to run an attacker-controlled repo.
+
+- **Deny by default.** An empty or omitted `allow_repos` rejects every webhook
+  and manual trigger with **403** (the server still starts, logging a warning).
+- **`*` allows all.** A single `"*"` entry permits any repository — a deliberate,
+  greppable opt-out.
+- **Entries are scheme-aware URL prefixes with a path boundary.** An entry
+  matches a repo URL when they are equal or the URL continues after a `/`. So:
+  - `https://gitlab.example.com` → any repo on that host.
+  - `https://gitlab.example.com/acme` → any repo under the `acme` group, but
+    **not** `…/acmecorp` and **not** the look-alike host
+    `https://gitlab.example.com.evil.com/…`.
+  - A trailing `.git` and the default port (`:443`/`:80`/`:22`) are normalized,
+    and scheme + host are matched case-insensitively (paths are case-sensitive).
+- **Each scheme/host is explicit.** `http://` does not match an `https://` entry.
+  A bare host with no scheme (e.g. `gitlab.example.com`) is a **startup error**.
+- **Scope.** The allowlist gates `POST /api/trigger` and `/webhooks/*` only.
+  `janus run --repo` (local CLI) is **not** gated — it's operator-local.
+
+```yaml
+allow_repos:
+  - https://gitlab.example.com/acme
+  - https://gitlab.example.com/platform
+```
 
 ## `janus run [flags] <dir>` / `janus run --repo ...`
 

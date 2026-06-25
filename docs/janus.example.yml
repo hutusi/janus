@@ -17,3 +17,11 @@ keep_workspaces: false              # keep workspaces after runs (debugging)
 # Secrets — prefer the JANUS_GITLAB_SECRET / JANUS_API_TOKEN env vars over the file.
 gitlab_secret: ""                   # enables POST /webhooks/gitlab when set
 api_token: ""                       # bearer token for /api/* ; POST /api/trigger requires it
+
+# Repositories allowed to run. DENY BY DEFAULT: an empty/omitted list rejects
+# every webhook and manual trigger (403). Use a single "*" to allow all.
+# Entries are scheme-aware URL prefixes with a path boundary, so a host- or
+# group-level entry permits everything beneath it.
+allow_repos:
+  - "https://gitlab.example.com/acme"
+  # - "*"   # allow any repository
