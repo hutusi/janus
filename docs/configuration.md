@@ -4,7 +4,7 @@ Janus is a single binary, `janus`, with a few subcommands. The server
 (`janus serve`) is configured from four sources, applied in increasing order of
 precedence:
 
-```
+```text
 built-in defaults  <  --config YAML file  <  environment variables  <  CLI flags
 ```
 
