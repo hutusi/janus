@@ -82,17 +82,31 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, job *model.Job, jr *
 		return model.StatusFailed
 	}
 
-	cmd := exec.CommandContext(ctx, shell[0], append(shell[1:], cmdStr)...)
+	// A per-step timeout (if configured) cancels only this step; the run ctx
+	// stays live so other jobs keep running.
+	stepCtx := ctx
+	if e.stepTimeout > 0 {
+		var cancel context.CancelFunc
+		stepCtx, cancel = context.WithTimeout(ctx, e.stepTimeout)
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(stepCtx, shell[0], append(shell[1:], cmdStr)...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdout = w
 	cmd.Stderr = w
-	// On cancellation, CommandContext kills the shell; WaitDelay bounds how long
-	// Wait blocks for output to drain if a child still holds the pipe. Phase 6
-	// adds process-group kill so children are reaped too.
+	// Kill the step's whole process group on cancel/timeout; WaitDelay bounds
+	// how long Wait blocks draining output if a child still holds the pipe.
+	setProcessGroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 
-	code, status := classify(ctx, cmd.Run())
+	runErr := cmd.Run()
+	timedOut := e.stepTimeout > 0 && errors.Is(stepCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	if timedOut {
+		_, _ = fmt.Fprintf(w, "\njanus: step timed out after %s\n", e.stepTimeout)
+	}
+	code, status := classify(ctx, timedOut, runErr)
 	rs.update(func() {
 		sr.Status = status
 		sr.ExitCode = code
@@ -101,13 +115,17 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, job *model.Job, jr *
 	return status
 }
 
-// classify maps a command's run error to an exit code and status.
-func classify(ctx context.Context, runErr error) (int, model.Status) {
+// classify maps a command's run error to an exit code and status. A run-level
+// cancellation is Cancelled; a per-step timeout is a Failed step.
+func classify(runCtx context.Context, timedOut bool, runErr error) (int, model.Status) {
 	if runErr == nil {
 		return 0, model.StatusSuccess
 	}
-	if ctx.Err() != nil {
+	if runCtx.Err() != nil {
 		return -1, model.StatusCancelled
+	}
+	if timedOut {
+		return -1, model.StatusFailed
 	}
 	var ee *exec.ExitError
 	if errors.As(runErr, &ee) {

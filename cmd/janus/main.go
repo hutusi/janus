@@ -89,8 +89,11 @@ func runServe(args []string) error {
 	wsRoot := fs.String("workspace-root", filepath.Join(os.TempDir(), "janus-workspaces"), "directory for per-run workspaces")
 	pipelinePath := fs.String("pipeline-path", ".janus/ci.yml", "in-repo path to the pipeline file")
 	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently within a run")
+	maxRuns := fs.Int("max-parallel-runs", 4, "maximum runs to execute concurrently")
+	stepTimeout := fs.Duration("step-timeout", 0, "fail any step that runs longer than this (0 = no timeout)")
 	keepWS := fs.Bool("keep-workspaces", false, "do not delete workspaces after runs (debugging)")
 	gitlabSecret := fs.String("gitlab-secret", os.Getenv("JANUS_GITLAB_SECRET"), "GitLab webhook secret token (enables /webhooks/gitlab)")
+	apiToken := fs.String("api-token", os.Getenv("JANUS_API_TOKEN"), "if set, require this bearer token on /api/* routes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -109,8 +112,11 @@ func runServe(args []string) error {
 		st = store.NewMemory()
 	}
 
-	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs))
-	rn := runner.New(st, eng, *wsRoot, *pipelinePath, *keepWS)
+	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithStepTimeout(*stepTimeout))
+	rn := runner.New(st, eng, *wsRoot, *pipelinePath, *keepWS, *maxRuns)
+	if err := rn.Sweep(); err != nil {
+		logger.Warn("workspace sweep failed", "err", err)
+	}
 
 	opts := []server.Option{server.WithLogger(logger)}
 	if *gitlabSecret != "" {
@@ -118,6 +124,9 @@ func runServe(args []string) error {
 		logger.Info("gitlab webhook enabled at /webhooks/gitlab")
 	} else {
 		logger.Warn("no --gitlab-secret set; /webhooks/gitlab is disabled")
+	}
+	if *apiToken != "" {
+		opts = append(opts, server.WithAPIToken(*apiToken))
 	}
 
 	srv := &http.Server{
@@ -141,10 +150,21 @@ func runServe(args []string) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		logger.Info("shutting down")
+		logger.Info("shutting down; stopping listener and waiting for in-flight runs")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		// Give in-flight runs a bounded grace period to finish.
+		done := make(chan struct{})
+		go func() { rn.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			logger.Warn("timed out waiting for in-flight runs")
+		}
+		return nil
 	}
 }
 
@@ -184,6 +204,7 @@ func runRun(args []string) error {
 	file := fs.String("file", ".janus/ci.yml", "pipeline file, relative to the workspace")
 	branch := fs.String("branch", "", "value for ${{ branch }}")
 	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently")
+	stepTimeout := fs.Duration("step-timeout", 0, "fail any step that runs longer than this (0 = no timeout)")
 	repo := fs.String("repo", "", "git repo URL to check out (instead of using <dir>)")
 	sha := fs.String("sha", "", "commit SHA to check out (with --repo)")
 	ref := fs.String("ref", "", "git ref to fetch as a fallback (with --repo)")
@@ -242,7 +263,7 @@ func runRun(args []string) error {
 	}
 
 	st := store.NewMemory()
-	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithTee(os.Stdout))
+	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithStepTimeout(*stepTimeout), engine.WithTee(os.Stdout))
 	run, err := eng.Run(ctx, wf, ev, dir)
 	if err != nil {
 		return err

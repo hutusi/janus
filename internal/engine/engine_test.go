@@ -196,6 +196,31 @@ jobs:
 	}
 }
 
+func TestRunStepTimeout(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`)
+	st := store.NewMemory()
+	e := New(st, WithStepTimeout(200*time.Millisecond))
+
+	start := time.Now()
+	run, _ := e.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("step timeout took %v, expected prompt failure", elapsed)
+	}
+	if run.Status != model.StatusFailed {
+		t.Errorf("run status = %s, want failed", run.Status)
+	}
+	if got := jobRun(run, "build").Steps[0].Status; got != model.StatusFailed {
+		t.Errorf("step status = %s, want failed (timed out)", got)
+	}
+}
+
 // TestSchedulerParallelism drives the scheduler with a fake job runner so it can
 // measure real concurrency deterministically, independent of process execution.
 func TestSchedulerParallelism(t *testing.T) {

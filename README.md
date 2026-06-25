@@ -21,7 +21,7 @@ Built incrementally. Current capabilities are tracked per phase:
 - [x] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
 - [x] **Phase 4** — HTTP server, manual trigger, read-only dashboard
 - [x] **Phase 5** — persistent run history + GitLab webhook
-- [ ] **Phase 6** — hardening (process-group kill, timeouts, concurrency caps, auth)
+- [x] **Phase 6** — hardening (process-group kill, timeouts, concurrency caps, auth)
 
 ## Quickstart
 
@@ -29,12 +29,13 @@ Built incrementally. Current capabilities are tracked per phase:
 # Build the single binary
 make build
 
-# Start the server (serves /healthz today; webhooks/dashboard land in later phases)
-./janus serve --addr :8080
+# Start the server (webhooks, manual trigger, JSON API, dashboard)
+./janus serve --addr :8080 --data-dir ./janus-data
 
 # In another shell
 curl -s localhost:8080/healthz
 # {"status":"ok","version":"dev"}
+# Open the dashboard at http://localhost:8080/
 ```
 
 Run a pipeline locally (logs stream to the terminal, prefixed by job):
@@ -103,8 +104,12 @@ Variables are limited to `${{ env.VAR }}` plus `ref` / `sha` / `short_sha` /
 ## Design
 
 Single Go binary, standard library throughout; the only third-party module is
-`gopkg.in/yaml.v3`. See [docs/architecture.md](docs/architecture.md) for the
-package map, domain model, and execution lifecycle.
+`gopkg.in/yaml.v3`. Documentation:
+
+- [docs/architecture.md](docs/architecture.md) — package map, domain model, run lifecycle
+- [docs/pipeline-reference.md](docs/pipeline-reference.md) — full YAML grammar + what's rejected
+- [docs/configuration.md](docs/configuration.md) — all flags and the step environment
+- [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 
 ### Security model (read this before deploying)
 

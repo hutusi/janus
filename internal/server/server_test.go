@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	st := store.NewMemory()
 	eng := engine.New(st)
-	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false)
+	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false, 4)
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithProvider(provider.GitLab{}, testGitLabSecret),
@@ -129,6 +129,36 @@ jobs:
 	}
 	if code := statusOf(t, ts.URL+"/runs/"+tr.RunID); code != http.StatusOK {
 		t.Errorf("run page status = %d, want 200", code)
+	}
+}
+
+func TestAPIAuth(t *testing.T) {
+	st := store.NewMemory()
+	eng := engine.New(st)
+	rn := runner.New(st, eng, t.TempDir(), ".janus/ci.yml", false, 4)
+	srv := New(st, rn, "test",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithAPIToken("secret-token"),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	if code := statusOf(t, ts.URL+"/api/runs"); code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", code)
+	}
+	if code := statusOf(t, ts.URL+"/healthz"); code != http.StatusOK {
+		t.Errorf("health should stay open: status = %d, want 200", code)
+	}
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/runs", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("valid token: status = %d, want 200", resp.StatusCode)
 	}
 }
 

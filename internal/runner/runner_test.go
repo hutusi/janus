@@ -1,10 +1,35 @@
 package runner
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
+	"github.com/hutusi/janus/internal/store"
 )
+
+func TestSweepRemovesOrphanWorkspaces(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "run-abc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "keep-me"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMemory()
+	r := New(st, engine.New(st), root, ".janus/ci.yml", false, 1)
+	if err := r.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "run-abc")); !os.IsNotExist(err) {
+		t.Error("run-* workspace should be swept")
+	}
+	if _, err := os.Stat(filepath.Join(root, "keep-me")); err != nil {
+		t.Error("non run-* directory should be left alone")
+	}
+}
 
 func TestMatches(t *testing.T) {
 	pushMain := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{Branches: []string{"main"}}}}

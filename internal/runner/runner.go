@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
@@ -26,6 +27,9 @@ type Runner struct {
 	wsRoot       string
 	pipelinePath string
 	keepWS       bool
+
+	sem chan struct{}  // caps concurrently executing runs
+	wg  sync.WaitGroup // tracks in-flight runs for graceful shutdown
 }
 
 // Result reports the outcome of a trigger. Started is false (with a Reason)
@@ -38,10 +42,38 @@ type Result struct {
 }
 
 // New creates a Runner. wsRoot is where per-run workspaces are created;
-// pipelinePath is the in-repo path to the pipeline file (e.g. .janus/ci.yml).
-func New(st store.Store, eng *engine.Engine, wsRoot, pipelinePath string, keepWS bool) *Runner {
-	return &Runner{store: st, engine: eng, wsRoot: wsRoot, pipelinePath: pipelinePath, keepWS: keepWS}
+// pipelinePath is the in-repo path to the pipeline file (e.g. .janus/ci.yml);
+// maxRuns caps how many runs execute concurrently (<=0 means 4).
+func New(st store.Store, eng *engine.Engine, wsRoot, pipelinePath string, keepWS bool, maxRuns int) *Runner {
+	if maxRuns <= 0 {
+		maxRuns = 4
+	}
+	return &Runner{
+		store:        st,
+		engine:       eng,
+		wsRoot:       wsRoot,
+		pipelinePath: pipelinePath,
+		keepWS:       keepWS,
+		sem:          make(chan struct{}, maxRuns),
+	}
 }
+
+// Sweep removes leftover workspaces from a previous process (crash recovery).
+// Call once at startup, before serving. Only directories Janus created
+// (run-*) are removed.
+func (r *Runner) Sweep() error {
+	matches, err := filepath.Glob(filepath.Join(r.wsRoot, "run-*"))
+	if err != nil {
+		return err
+	}
+	for _, m := range matches {
+		_ = os.RemoveAll(m)
+	}
+	return nil
+}
+
+// Wait blocks until all in-flight runs finish. Used for graceful shutdown.
+func (r *Runner) Wait() { r.wg.Wait() }
 
 // Trigger checks out the repo at ev's commit, parses the pipeline, and — if the
 // event matches — records and asynchronously executes a run. The workspace is
@@ -84,8 +116,13 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		return Result{}, err
 	}
 
+	r.wg.Add(1)
 	go func() {
+		defer r.wg.Done()
 		defer func() { _ = ws.Cleanup() }()
+		// Wait for a run slot; the run stays Pending until one frees.
+		r.sem <- struct{}{}
+		defer func() { <-r.sem }()
 		r.engine.Execute(context.Background(), run, wf, ws.Dir)
 	}()
 

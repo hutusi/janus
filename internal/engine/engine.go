@@ -19,9 +19,10 @@ import (
 
 // Engine runs workflows against a workspace directory.
 type Engine struct {
-	store   store.Store
-	maxJobs int
-	tee     io.Writer // optional: mirror all step output here (the CLI uses os.Stdout)
+	store       store.Store
+	maxJobs     int
+	stepTimeout time.Duration // 0 = no per-step timeout
+	tee         io.Writer     // optional: mirror all step output here (the CLI uses os.Stdout)
 
 	// runJob executes one job's steps and returns its terminal status. It is a
 	// field (not just a method) so tests can drive the scheduler with a fake.
@@ -43,6 +44,15 @@ func WithMaxParallelJobs(n int) Option {
 // WithTee mirrors every step's combined output to w (used by `janus run`).
 func WithTee(w io.Writer) Option {
 	return func(e *Engine) { e.tee = w }
+}
+
+// WithStepTimeout fails any step that runs longer than d (0 = no timeout).
+func WithStepTimeout(d time.Duration) Option {
+	return func(e *Engine) {
+		if d > 0 {
+			e.stepTimeout = d
+		}
+	}
 }
 
 // New creates an Engine backed by st.

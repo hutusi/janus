@@ -4,10 +4,12 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"html/template"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
@@ -26,6 +28,7 @@ type Server struct {
 	runner    *runner.Runner
 	version   string
 	logger    *slog.Logger
+	apiToken  string // if set, /api/* requires this bearer token
 	providers map[string]registeredProvider
 	mux       *http.ServeMux
 	tmpl      *template.Template
@@ -36,6 +39,10 @@ type Option func(*Server)
 
 // WithLogger sets the logger used for webhook/run diagnostics.
 func WithLogger(l *slog.Logger) Option { return func(s *Server) { s.logger = l } }
+
+// WithAPIToken requires a `Authorization: Bearer <token>` header on /api/*
+// routes. Empty (the default) leaves the API open.
+func WithAPIToken(token string) Option { return func(s *Server) { s.apiToken = token } }
 
 // WithProvider registers a webhook provider and its secret, enabling
 // POST /webhooks/<provider.Name()>.
@@ -64,17 +71,35 @@ func New(st store.Store, rn *runner.Runner, version string, opts ...Option) *Ser
 }
 
 func (s *Server) routes() {
-	// JSON API
+	// Health and webhooks: open (webhooks authenticate via the provider secret).
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("POST /webhooks/{provider}", s.handleWebhook)
-	s.mux.HandleFunc("POST /api/trigger", s.handleTrigger)
-	s.mux.HandleFunc("GET /api/runs", s.handleListRuns)
-	s.mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
-	s.mux.HandleFunc("GET /api/runs/{id}/logs", s.handleLogs)
 
-	// Read-only HTML dashboard
+	// JSON API: optionally bearer-protected.
+	s.mux.HandleFunc("POST /api/trigger", s.requireAuth(s.handleTrigger))
+	s.mux.HandleFunc("GET /api/runs", s.requireAuth(s.handleListRuns))
+	s.mux.HandleFunc("GET /api/runs/{id}", s.requireAuth(s.handleGetRun))
+	s.mux.HandleFunc("GET /api/runs/{id}/logs", s.requireAuth(s.handleLogs))
+
+	// Read-only HTML dashboard (unauthenticated; put a proxy in front if needed).
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("GET /runs/{id}", s.handleRunPage)
+}
+
+// requireAuth wraps a handler with bearer-token auth when an API token is set.
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.apiToken != "" {
+			const prefix = "Bearer "
+			auth := r.Header.Get("Authorization")
+			tok := strings.TrimPrefix(auth, prefix)
+			if !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare([]byte(tok), []byte(s.apiToken)) != 1 {
+				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+				return
+			}
+		}
+		next(w, r)
+	}
 }
 
 // Handler returns the HTTP handler for the server.
