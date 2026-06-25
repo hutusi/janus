@@ -19,7 +19,7 @@ Built incrementally. Current capabilities are tracked per phase:
 - [x] **Phase 1** — pipeline parsing, strict validation, variable interpolation (`janus validate`)
 - [x] **Phase 2** — DAG scheduler + host-process executor (`janus run`)
 - [x] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
-- [ ] **Phase 4** — HTTP server, manual trigger, read-only dashboard
+- [x] **Phase 4** — HTTP server, manual trigger, read-only dashboard
 - [ ] **Phase 5** — persistent run history + GitLab webhook
 - [ ] **Phase 6** — hardening (process-group kill, timeouts, concurrency caps, auth)
 
@@ -45,6 +45,24 @@ janus run --branch main ./my-repo
 
 # Or check out a repository at a specific commit first (shallow fetch)
 janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads/main
+```
+
+### HTTP API & dashboard
+
+`janus serve` exposes:
+
+| Method & path                     | Purpose |
+|-----------------------------------|---------|
+| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref"}` → `202 {"run_id"}` |
+| `GET /api/runs`                   | List runs, newest first (`?limit=`) |
+| `GET /api/runs/{id}`              | Run detail (job/step statuses, exit codes) |
+| `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream |
+| `GET /healthz`                    | Health + version |
+| `GET /` and `/runs/{id}`          | Read-only HTML dashboard |
+
+```sh
+curl -XPOST localhost:8080/api/trigger \
+  -d '{"repo_url":"https://gitlab.com/acme/app.git","ref":"refs/heads/main","branch":"main"}'
 ```
 
 ## Pipeline format (target)

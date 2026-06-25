@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -83,43 +84,70 @@ type jobResult struct {
 	status model.Status
 }
 
-// Run executes wf against workDir for the given trigger event and returns the
-// completed Run. The returned run is also persisted via the store. Run blocks
-// until every job reaches a terminal state.
-func (e *Engine) Run(ctx context.Context, wf *model.Workflow, ev model.Event, workDir string) (*model.Run, error) {
-	g, err := buildGraph(wf)
-	if err != nil {
-		return nil, err
-	}
-
-	now := time.Now()
+// NewRun builds a pending run record for wf, with one JobRun per job and one
+// StepRun per step. It does not execute or persist anything; pass it to Execute.
+func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *model.Run {
 	run := &model.Run{
 		ID:           newRunID(),
 		WorkflowName: wf.Name,
 		Event:        ev,
-		Status:       model.StatusRunning,
-		CreatedAt:    now,
-		StartedAt:    now,
+		Status:       model.StatusPending,
+		CreatedAt:    time.Now(),
 		WorkspaceDir: workDir,
 	}
-	byName := make(map[string]*model.JobRun, len(wf.Jobs))
-	for _, name := range g.order {
+	names := make([]string, 0, len(wf.Jobs))
+	for name := range wf.Jobs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		job := wf.Jobs[name]
 		jr := &model.JobRun{Name: name, Needs: job.Needs, Status: model.StatusPending}
 		for i, s := range job.Steps {
 			jr.Steps = append(jr.Steps, &model.StepRun{Index: i, Command: s.Run, Status: model.StatusPending})
 		}
 		run.Jobs = append(run.Jobs, jr)
-		byName[name] = jr
 	}
+	return run
+}
+
+// Run is a synchronous convenience: it creates, persists, executes, and returns
+// a run for wf. Used by `janus run`.
+func (e *Engine) Run(ctx context.Context, wf *model.Workflow, ev model.Event, workDir string) (*model.Run, error) {
+	run := e.NewRun(wf, ev, workDir)
 	if err := e.store.SaveRun(run); err != nil {
 		return nil, err
 	}
+	e.Execute(ctx, run, wf, workDir)
+	return run, nil
+}
 
-	rs := &runState{run: run, wf: wf, event: ev, workDir: workDir, store: e.store, tee: e.tee}
+// Execute runs the scheduler over an already-saved run (built by NewRun),
+// blocking until every job reaches a terminal state. Status changes are
+// persisted via the store as they happen.
+func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow, workDir string) {
+	rs := &runState{run: run, wf: wf, event: run.Event, workDir: workDir, store: e.store, tee: e.tee}
 	if rs.tee != nil {
 		rs.teeMu = &sync.Mutex{}
 	}
+
+	g, err := buildGraph(wf)
+	if err != nil {
+		rs.update(func() {
+			run.Status = model.StatusFailed
+			run.FinishedAt = time.Now()
+		})
+		return
+	}
+
+	byName := make(map[string]*model.JobRun, len(run.Jobs))
+	for _, jr := range run.Jobs {
+		byName[jr.Name] = jr
+	}
+	rs.update(func() {
+		run.Status = model.StatusRunning
+		run.StartedAt = time.Now()
+	})
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -186,7 +214,6 @@ func (e *Engine) Run(ctx context.Context, wf *model.Workflow, ev model.Event, wo
 		}
 		run.FinishedAt = time.Now()
 	})
-	return run, nil
 }
 
 func newRunID() string {

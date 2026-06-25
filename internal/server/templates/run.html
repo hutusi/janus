@@ -1,0 +1,43 @@
+{{define "run.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{if .Refresh}}<meta http-equiv="refresh" content="2">{{end}}
+  <title>Janus — run {{shortID .Run.ID}}</title>
+  {{template "style"}}
+</head>
+<body>
+  <header>
+    <h1><a href="/">Janus</a> / run <code>{{shortID .Run.ID}}</code></h1>
+    <span class="status status-{{.Run.Status}}">{{.Run.Status}}</span>
+  </header>
+
+  <main>
+    <p class="muted">
+      workflow <strong>{{.Run.WorkflowName}}</strong> ·
+      {{.Run.Event.Kind}} on {{.Run.Event.Branch}} ·
+      created {{reltime .Run.CreatedAt}}
+      {{if .Refresh}}· <em>auto-refreshing…</em>{{end}}
+    </p>
+
+    <div class="jobs">
+      {{range .Run.Jobs}}
+      <div class="job">
+        <span class="status status-{{.Status}}">{{.Status}}</span> <strong>{{.Name}}</strong>
+        {{if .Needs}}<span class="muted">needs {{.Needs}}</span>{{end}}
+        <div class="steps">
+          {{range .Steps}}
+          <div><span class="status status-{{.Status}}">{{.Status}}</span>
+            <code>{{.Command}}</code> {{if ne .ExitCode 0}}<span class="muted">exit {{.ExitCode}}</span>{{end}}</div>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </div>
+
+    <h2>Logs</h2>
+    <pre>{{.Logs}}</pre>
+  </main>
+</body>
+</html>{{end}}

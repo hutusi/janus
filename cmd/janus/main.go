@@ -26,6 +26,8 @@ import (
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/pipeline"
+	"github.com/hutusi/janus/internal/runner"
+	"github.com/hutusi/janus/internal/server"
 	"github.com/hutusi/janus/internal/store"
 	"github.com/hutusi/janus/internal/workspace"
 )
@@ -77,24 +79,27 @@ Run "janus <command> -h" for command-specific flags.
 `)
 }
 
-// runServe starts the HTTP server and blocks until interrupted.
+// runServe wires the store, engine, runner, and HTTP server together and serves
+// until interrupted.
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", ":8080", "HTTP listen address")
+	wsRoot := fs.String("workspace-root", filepath.Join(os.TempDir(), "janus-workspaces"), "directory for per-run workspaces")
+	pipelinePath := fs.String("pipeline-path", ".janus/ci.yml", "in-repo path to the pipeline file")
+	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently within a run")
+	keepWS := fs.Bool("keep-workspaces", false, "do not delete workspaces after runs (debugging)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, fmt.Sprintf("{\"status\":\"ok\",\"version\":%q}\n", version))
-	})
-
+	st := store.NewMemory()
+	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs))
+	rn := runner.New(st, eng, *wsRoot, *pipelinePath, *keepWS)
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           server.New(st, rn, version).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -103,7 +108,7 @@ func runServe(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("janus listening", "addr", *addr, "version", version)
+		logger.Info("janus listening", "addr", *addr, "version", version, "workspace_root", *wsRoot)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -235,11 +240,4 @@ func printRunSummary(run *model.Run) {
 			fmt.Printf("    step %d [%s] exit=%d: %s\n", sr.Index, sr.Status, sr.ExitCode, sr.Command)
 		}
 	}
-}
-
-// writeJSON writes a JSON body with the given status code.
-func writeJSON(w http.ResponseWriter, status int, body string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_, _ = io.WriteString(w, body)
 }
