@@ -1,0 +1,16 @@
+# Janus's own pipeline — Janus describes its CI in its own format.
+# Validated in CI (`janus validate`) and runnable with `janus run .`.
+name: ci
+on:
+  push: { branches: [main] }
+  merge_request: { branches: [main] }
+env:
+  CI: "true"
+jobs:
+  build:
+    steps:
+      - run: make build
+  test:
+    needs: [build]
+    steps:
+      - run: make test

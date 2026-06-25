@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-formatted:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+
+      - name: test (race + coverage)
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: build
+        run: CGO_ENABLED=0 go build ./cmd/janus
+
+      - name: validate dogfood pipeline
+        run: |
+          if [ -f .janus/ci.yml ]; then
+            go run ./cmd/janus validate .janus/ci.yml
+          else
+            echo "no .janus/ci.yml yet (added in a later phase)"
+          fi
