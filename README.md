@@ -1,1 +1,89 @@
-# janus
+# Janus
+
+**Janus** is a minimal, self-hosted CI/CD service in a single dependency-free
+binary. It runs CI pipelines **directly as host processes** (no containers, no
+VMs), triggered by **git-server webhooks** (GitLab push & merge request) or a
+**manual trigger**. Pipelines are a small, GitHub-Actions-flavored YAML stored
+in the repository at `.janus/ci.yml`.
+
+> **Guiding rule: minimal beats complete.** The pipeline YAML describes *what
+> runs and in what order* — it is not a programming language. Anything beyond
+> the supported keys (expressions, `if:`, matrix, `uses:`, templating) is a
+> **validation error**, not a feature.
+
+## Status
+
+Built incrementally. Current capabilities are tracked per phase:
+
+- [x] **Phase 0** — project skeleton, quality gate (lint/test/CI), `janus serve` with `/healthz`
+- [ ] **Phase 1** — pipeline parsing, strict validation, variable interpolation (`janus validate`)
+- [ ] **Phase 2** — DAG scheduler + host-process executor (`janus run`)
+- [ ] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
+- [ ] **Phase 4** — HTTP server, manual trigger, read-only dashboard
+- [ ] **Phase 5** — persistent run history + GitLab webhook
+- [ ] **Phase 6** — hardening (process-group kill, timeouts, concurrency caps, auth)
+
+## Quickstart
+
+```sh
+# Build the single binary
+make build
+
+# Start the server (serves /healthz today; webhooks/dashboard land in later phases)
+./janus serve --addr :8080
+
+# In another shell
+curl -s localhost:8080/healthz
+# {"status":"ok","version":"dev"}
+```
+
+## Pipeline format (target)
+
+```yaml
+name: ci
+on:
+  push: { branches: [main] }
+  merge_request: { branches: [main] }   # GitLab term; normalized internally
+env: { CI: "true" }                      # also per-job and per-step
+jobs:
+  build:
+    steps:
+      - run: npm ci
+        working-directory: ./app         # optional
+  test:
+    needs: [build]                        # DAG
+    steps:
+      - run: npm test
+```
+
+Variables are limited to `${{ env.VAR }}` plus `ref` / `sha` / `short_sha` /
+`branch` / `event`. See [docs/pipeline-reference.md](docs/pipeline-reference.md)
+(added in Phase 1) for the full grammar and the list of rejected constructs.
+
+## Design
+
+Single Go binary, standard library throughout; the only third-party module is
+`gopkg.in/yaml.v3`. See [docs/architecture.md](docs/architecture.md) for the
+package map, domain model, and execution lifecycle.
+
+### Security model (read this before deploying)
+
+Jobs run as **host processes with no isolation** from the machine Janus runs on.
+A pipeline can do anything the `janus` user can. Run Janus as a dedicated,
+unprivileged user on a host you control. Container/VM isolation is intentionally
+out of scope.
+
+## Out of scope
+
+containers/VMs · matrix · `uses:` / third-party actions · `if:` / expressions ·
+distributed runners · artifact storage · caching · secrets beyond host env ·
+Windows. Node/Go/Python are assumed to be installed on the host.
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). TL;DR: `make ci` runs the full gate
+(format check, vet, lint, race tests).
+
+## License
+
+TBD.

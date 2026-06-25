@@ -1,0 +1,17 @@
+# Compiled binary
+/janus
+/bin/
+
+# Runtime state (created by `janus serve`)
+/data/
+/workspaces/
+
+# Test & coverage output
+*.out
+coverage.*
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
