@@ -38,6 +38,12 @@ curl -s localhost:8080/healthz
 # Open the dashboard at http://localhost:8080/
 ```
 
+Settings can also come from a YAML config file. Run `janus init` to scaffold a
+commented `janus.yml`, then `janus serve` (it auto-loads `./janus.yml`, or pass
+`--config PATH`). Flags and env vars override the file. See
+[the example](internal/config/example.yml) and
+[docs/configuration.md](docs/configuration.md).
+
 Run a pipeline locally (logs stream to the terminal, prefixed by job):
 
 ```sh
@@ -54,7 +60,7 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 
 | Method & path                     | Purpose |
 |-----------------------------------|---------|
-| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref"}` → `202 {"run_id"}` (requires `--api-token`) |
+| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist) |
 | `GET /api/runs`                   | List runs, newest first (`?limit=`) |
 | `GET /api/runs/{id}`              | Run detail (job/step statuses, exit codes) |
 | `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream |
@@ -110,7 +116,7 @@ Single Go binary, standard library throughout; the only third-party module is
 
 - [docs/architecture.md](docs/architecture.md) — package map, domain model, run lifecycle
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — full YAML grammar + what's rejected
-- [docs/configuration.md](docs/configuration.md) — all flags and the step environment
+- [docs/configuration.md](docs/configuration.md) — config file, all settings, the allowlist
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 
 ### Security model (read this before deploying)
@@ -119,6 +125,14 @@ Jobs run as **host processes with no isolation** from the machine Janus runs on.
 A pipeline can do anything the `janus` user can. Run Janus as a dedicated,
 unprivileged user on a host you control. Container/VM isolation is intentionally
 out of scope.
+
+Because a triggered repo's pipeline executes on the host, restrict which repos
+can run with the **`allow_repos` allowlist** — it's defense-in-depth against a
+leaked webhook secret or API token being used to point Janus at an
+attacker-controlled repository. It is **deny-by-default**: with nothing
+configured every webhook and manual trigger is rejected (403); set `allow_repos`
+to the hosts/groups you trust, or `"*"` to allow all. See
+[docs/configuration.md](docs/configuration.md#repository-allowlist).
 
 ## Out of scope
 

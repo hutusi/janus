@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hutusi/janus/internal/allowlist"
+	"github.com/hutusi/janus/internal/config"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/pipeline"
@@ -47,6 +49,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = runServe(args)
+	case "init":
+		err = runInit(args)
 	case "validate":
 		err = runValidate(args)
 	case "run":
@@ -72,6 +76,7 @@ func usage(w io.Writer) {
 
 Usage:
   janus serve [flags]     Start the HTTP server (webhooks, manual trigger, dashboard)
+  janus init [flags]      Write a starter janus.yml config file
   janus validate <file>   Validate a .janus/ci.yml pipeline file
   janus run <dir>         Run a pipeline locally against a directory
   janus version           Print the version
@@ -81,56 +86,96 @@ Run "janus <command> -h" for command-specific flags.
 }
 
 // runServe wires the store, engine, runner, and HTTP server together and serves
-// until interrupted.
+// until interrupted. Settings come from defaults, an optional --config YAML
+// file, environment variables, and flags — in increasing order of precedence.
 func runServe(args []string) error {
+	def := config.Defaults()
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	addr := fs.String("addr", ":8080", "HTTP listen address")
-	dataDir := fs.String("data-dir", "", "directory for persistent run history (empty = in-memory, lost on restart)")
-	wsRoot := fs.String("workspace-root", filepath.Join(os.TempDir(), "janus-workspaces"), "directory for per-run workspaces")
-	pipelinePath := fs.String("pipeline-path", ".janus/ci.yml", "in-repo path to the pipeline file")
-	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently within a run")
-	maxRuns := fs.Int("max-parallel-runs", 4, "maximum runs to execute concurrently")
-	stepTimeout := fs.Duration("step-timeout", 0, "fail any step that runs longer than this (0 = no timeout)")
-	keepWS := fs.Bool("keep-workspaces", false, "do not delete workspaces after runs (debugging)")
-	gitlabSecret := fs.String("gitlab-secret", os.Getenv("JANUS_GITLAB_SECRET"), "GitLab webhook secret token (enables /webhooks/gitlab)")
-	apiToken := fs.String("api-token", os.Getenv("JANUS_API_TOKEN"), "if set, require this bearer token on /api/* routes")
+	configPath := fs.String("config", os.Getenv("JANUS_CONFIG"), "path to a YAML config file (default: ./janus.yml if present)")
+	fs.String("addr", def.Addr, "HTTP listen address")
+	fs.String("data-dir", def.DataDir, "directory for persistent run history (empty = in-memory, lost on restart)")
+	fs.String("workspace-root", def.WorkspaceRoot, "directory for per-run workspaces")
+	fs.String("pipeline-path", def.PipelinePath, "in-repo path to the pipeline file")
+	fs.Int("max-parallel-jobs", def.MaxParallelJobs, "maximum jobs to run concurrently within a run")
+	fs.Int("max-parallel-runs", def.MaxParallelRuns, "maximum runs to execute concurrently")
+	fs.Duration("step-timeout", time.Duration(def.StepTimeout), "fail any step that runs longer than this (0 = no timeout)")
+	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
+	fs.String("gitlab-secret", "", "GitLab webhook secret token (overrides config/env; enables /webhooks/gitlab)")
+	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
+	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
+	// Precedence: defaults < config file < env < flags. With no --config, fall
+	// back to ./janus.yml if it exists.
+	cfgPath := config.Resolve(*configPath)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	cfg.OverlayEnv()
+	cfg.OverlayFlags(fs)
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if cfgPath != "" {
+		logger.Info("loaded config", "path", cfgPath)
+	}
+
+	allow, err := allowlist.New(cfg.AllowRepos)
+	if err != nil {
+		return fmt.Errorf("allow_repos: %w", err)
+	}
+	switch {
+	case len(allow) == 0:
+		logger.Warn("no repos allowed; every webhook and manual trigger will be rejected — set allow_repos (use '*' to allow all)")
+	case containsWildcard(allow):
+		logger.Warn("allowing ALL repositories (allow_repos contains '*')")
+	default:
+		logger.Info("repo allowlist active", "entries", len(allow))
+	}
 
 	var st store.Store
-	if *dataDir != "" {
-		fst, err := store.NewFile(*dataDir)
+	if cfg.DataDir != "" {
+		fst, err := store.NewFile(cfg.DataDir)
 		if err != nil {
 			return fmt.Errorf("data-dir: %w", err)
 		}
 		st = fst
 	} else {
-		logger.Warn("no --data-dir set; run history is in-memory and lost on restart")
+		logger.Warn("no data-dir set; run history is in-memory and lost on restart")
 		st = store.NewMemory()
 	}
 
-	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithStepTimeout(*stepTimeout), engine.WithLogger(logger))
-	rn := runner.New(st, eng, *wsRoot, *pipelinePath, *keepWS, *maxRuns)
+	eng := engine.New(st,
+		engine.WithMaxParallelJobs(cfg.MaxParallelJobs),
+		engine.WithStepTimeout(time.Duration(cfg.StepTimeout)),
+		engine.WithLogger(logger),
+	)
+	rn := runner.New(st, eng, runner.Options{
+		WSRoot:       cfg.WorkspaceRoot,
+		PipelinePath: cfg.PipelinePath,
+		KeepWS:       cfg.KeepWorkspaces,
+		MaxRuns:      cfg.MaxParallelRuns,
+		Allowlist:    allow,
+	})
 	if err := rn.Sweep(); err != nil {
 		logger.Warn("workspace sweep failed", "err", err)
 	}
 
 	opts := []server.Option{server.WithLogger(logger)}
-	if *gitlabSecret != "" {
-		opts = append(opts, server.WithProvider(provider.GitLab{}, *gitlabSecret))
+	if cfg.GitLabSecret != "" {
+		opts = append(opts, server.WithProvider(provider.GitLab{}, cfg.GitLabSecret))
 		logger.Info("gitlab webhook enabled at /webhooks/gitlab")
 	} else {
-		logger.Warn("no --gitlab-secret set; /webhooks/gitlab is disabled")
+		logger.Warn("no gitlab-secret set; /webhooks/gitlab is disabled")
 	}
-	if *apiToken != "" {
-		opts = append(opts, server.WithAPIToken(*apiToken))
+	if cfg.APIToken != "" {
+		opts = append(opts, server.WithAPIToken(cfg.APIToken))
 	}
 
 	srv := &http.Server{
-		Addr:              *addr,
+		Addr:              cfg.Addr,
 		Handler:           server.New(st, rn, version, opts...).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -140,7 +185,7 @@ func runServe(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("janus listening", "addr", *addr, "version", version, "workspace_root", *wsRoot)
+		logger.Info("janus listening", "addr", cfg.Addr, "version", version, "workspace_root", cfg.WorkspaceRoot)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -160,6 +205,26 @@ func runServe(args []string) error {
 		rn.Shutdown(30 * time.Second)
 		return nil
 	}
+}
+
+// runInit writes a starter config file, refusing to overwrite unless --force.
+func runInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	out := fs.String("config", config.DefaultPath, "path to write the config file")
+	force := fs.Bool("force", false, "overwrite an existing file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*force {
+		if _, err := os.Stat(*out); err == nil {
+			return fmt.Errorf("%s already exists (use --force to overwrite)", *out)
+		}
+	}
+	if err := os.WriteFile(*out, []byte(config.ExampleYAML), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s — edit it, then run: janus serve --config %s\n", *out, *out)
+	return nil
 }
 
 // runValidate parses a pipeline file and reports whether it is valid.
@@ -267,6 +332,16 @@ func runRun(args []string) error {
 		return fmt.Errorf("run %s finished: %s", run.ID, run.Status)
 	}
 	return nil
+}
+
+// containsWildcard reports whether the allowlist has a "*" (allow-all) entry.
+func containsWildcard(a allowlist.Allowlist) bool {
+	for _, e := range a {
+		if e == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // printRunSummary writes a compact per-job/step status report.

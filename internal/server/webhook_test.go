@@ -117,3 +117,29 @@ func TestWebhookUnknownProvider(t *testing.T) {
 		t.Fatalf("status = %d, want 404 for unconfigured provider", resp.StatusCode)
 	}
 }
+
+func TestWebhookDisallowedRepoForbidden(t *testing.T) {
+	// Allowlist permits only a different host; the (local fixture) repo is denied.
+	ts := newTestServerAllow(t, "https://allowed.example.com")
+	resp := gitlabPush(t, ts, "https://gitlab.example.com/acme/app.git", "deadbeef", "main", testGitLabSecret)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Status != "rejected" {
+		t.Errorf("status = %q, want rejected", body.Status)
+	}
+}
+
+func TestTriggerDisallowedRepoForbidden(t *testing.T) {
+	ts := newTestServerAllow(t, "https://allowed.example.com")
+	resp := postTrigger(t, ts, `{"repo_url":"https://gitlab.example.com/acme/app.git","ref":"refs/heads/main"}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}

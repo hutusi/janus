@@ -8,18 +8,24 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/hutusi/janus/internal/allowlist"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/pipeline"
 	"github.com/hutusi/janus/internal/store"
 	"github.com/hutusi/janus/internal/workspace"
 )
+
+// ErrRepoNotAllowed is returned by Trigger when the event's repository URL is
+// not permitted by the configured allowlist. Handlers map it to HTTP 403.
+var ErrRepoNotAllowed = errors.New("repository not allowed")
 
 // Runner coordinates checkout → parse → match → execute.
 type Runner struct {
@@ -28,11 +34,21 @@ type Runner struct {
 	wsRoot       string
 	pipelinePath string
 	keepWS       bool
+	allow        allowlist.Allowlist
 
 	ctx    context.Context // root context for run execution; cancelled on Shutdown
 	cancel context.CancelFunc
 	sem    chan struct{}  // caps concurrently executing runs
 	wg     sync.WaitGroup // tracks in-flight runs for graceful shutdown
+}
+
+// Options configures a Runner.
+type Options struct {
+	WSRoot       string              // where per-run workspaces are created
+	PipelinePath string              // in-repo path to the pipeline file
+	KeepWS       bool                // keep workspaces after runs (debugging)
+	MaxRuns      int                 // max concurrent runs (<=0 means 4)
+	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
 }
 
 // Result reports the outcome of a trigger. Started is false (with a Reason)
@@ -44,10 +60,9 @@ type Result struct {
 	Reason  string
 }
 
-// New creates a Runner. wsRoot is where per-run workspaces are created;
-// pipelinePath is the in-repo path to the pipeline file (e.g. .janus/ci.yml);
-// maxRuns caps how many runs execute concurrently (<=0 means 4).
-func New(st store.Store, eng *engine.Engine, wsRoot, pipelinePath string, keepWS bool, maxRuns int) *Runner {
+// New creates a Runner from opts.
+func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
+	maxRuns := opts.MaxRuns
 	if maxRuns <= 0 {
 		maxRuns = 4
 	}
@@ -55,9 +70,10 @@ func New(st store.Store, eng *engine.Engine, wsRoot, pipelinePath string, keepWS
 	return &Runner{
 		store:        st,
 		engine:       eng,
-		wsRoot:       wsRoot,
-		pipelinePath: pipelinePath,
-		keepWS:       keepWS,
+		wsRoot:       opts.WSRoot,
+		pipelinePath: opts.PipelinePath,
+		keepWS:       opts.KeepWS,
+		allow:        opts.Allowlist,
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
@@ -95,9 +111,13 @@ func (r *Runner) Shutdown(grace time.Duration) {
 
 // Trigger checks out the repo at ev's commit, parses the pipeline, and — if the
 // event matches — records and asynchronously executes a run. The workspace is
-// removed when the run finishes. Checkout/parse failures return an error; a
-// non-matching event returns Result{Started: false} with nil error.
+// removed when the run finishes. A repo not on the allowlist returns
+// ErrRepoNotAllowed (before any disk work); checkout/parse failures return an
+// error; a non-matching event returns Result{Started: false} with nil error.
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
+	if !r.allow.Allows(ev.RepoURL) {
+		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
+	}
 	if err := os.MkdirAll(r.wsRoot, 0o700); err != nil {
 		return Result{}, err
 	}

@@ -2,10 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/hutusi/janus/internal/model"
+	"github.com/hutusi/janus/internal/runner"
 )
 
 type triggerRequest struct {
@@ -45,6 +47,11 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := s.runner.Trigger(r.Context(), ev)
+	if errors.Is(err, runner.ErrRepoNotAllowed) {
+		s.logger.Warn("trigger rejected: repo not allowed", "repo", ev.RepoURL)
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

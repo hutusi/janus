@@ -1,10 +1,13 @@
 package runner
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/hutusi/janus/internal/allowlist"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/store"
@@ -19,7 +22,7 @@ func TestSweepRemovesOrphanWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := store.NewMemory()
-	r := New(st, engine.New(st), root, ".janus/ci.yml", false, 1)
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1})
 	if err := r.Sweep(); err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +31,27 @@ func TestSweepRemovesOrphanWorkspaces(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "keep-me")); err != nil {
 		t.Error("non run-* directory should be left alone")
+	}
+}
+
+func TestTriggerRejectsDisallowedRepo(t *testing.T) {
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"https://allowed.example.com"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	_, err := r.Trigger(context.Background(), model.Event{
+		Kind:    model.EventManual,
+		RepoURL: "https://evil.example.com/x.git",
+		Ref:     "refs/heads/main",
+	})
+	if !errors.Is(err, ErrRepoNotAllowed) {
+		t.Fatalf("err = %v, want ErrRepoNotAllowed", err)
+	}
+	// Rejected before touching disk: no run-* workspace was created.
+	entries, _ := filepath.Glob(filepath.Join(root, "run-*"))
+	if len(entries) != 0 {
+		t.Errorf("a workspace was created for a disallowed repo: %v", entries)
 	}
 }
 
