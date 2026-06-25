@@ -2,9 +2,11 @@
 /janus
 /bin/
 
-# Runtime state (created by `janus serve`)
-/data/
-/workspaces/
+# Runtime state (the example config's data_dir / workspace_root)
+/janus-data/
+
+# Locally-generated dev config (`janus init`)
+/janus.yml
 
 # Test & coverage output
 *.out
