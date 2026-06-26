@@ -2,6 +2,9 @@
 /janus
 /bin/
 
+# Cross-compiled release binaries (`make`-style dry run / the release workflow)
+/dist/
+
 # Runtime state (the example config's data_dir / workspace_root)
 /janus-data/
 
