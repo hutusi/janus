@@ -137,14 +137,15 @@ Single Go binary, standard library throughout; the only third-party module is
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — full YAML grammar + what's rejected
 - [docs/configuration.md](docs/configuration.md) — config file, all settings, the allowlist
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
+- [docs/deployment.md](docs/deployment.md) — run as a hardened systemd service on Linux
 - [CHANGELOG.md](CHANGELOG.md) — notable changes
 
 ### Security model (read this before deploying)
 
 Jobs run as **host processes with no isolation** from the machine Janus runs on.
 A pipeline can do anything the `janus` user can. Run Janus as a dedicated,
-unprivileged user on a host you control. Container/VM isolation is intentionally
-out of scope.
+unprivileged user on a host you control — see [docs/deployment.md](docs/deployment.md)
+for a hardened systemd unit. Container/VM isolation is intentionally out of scope.
 
 Because a triggered repo's pipeline executes on the host, restrict which repos
 can run with the **`allow_repos` allowlist** — it's defense-in-depth against a

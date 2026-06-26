@@ -1,0 +1,52 @@
+# Janus CI/CD server — systemd unit.
+#
+# Install:
+#   sudo install -m644 deploy/janus.service /etc/systemd/system/janus.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now janus
+#
+# See docs/deployment.md for the full walkthrough (binary, user, config, secrets).
+
+[Unit]
+Description=Janus CI/CD server
+Documentation=https://github.com/hutusi/janus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=janus
+Group=janus
+ExecStart=/usr/local/bin/janus serve --config /etc/janus/janus.yml
+
+# Secrets (JANUS_API_TOKEN, JANUS_GITLAB_SECRET). systemd reads this file as root
+# and injects the variables, so the janus user never needs to read it.
+EnvironmentFile=/etc/janus/janus.env
+
+Restart=on-failure
+RestartSec=5
+
+# Janus drains in-flight runs itself on SIGTERM (~10s HTTP + up to 30s per run),
+# killing each step's process group. Send SIGTERM to the main process only and
+# let it do that orderly shutdown; SIGKILL the whole cgroup only if it overruns.
+# (The default KillMode=control-group would SIGTERM the step children directly,
+# bypassing Janus's own shutdown.)
+KillMode=mixed
+TimeoutStopSec=60
+
+# /var/lib/janus is created and owned by the service user (0700) and stays
+# writable under the sandbox below — used for data_dir and workspace_root.
+StateDirectory=janus
+StateDirectoryMode=0700
+
+# Balanced hardening. Jobs run as host processes with NO isolation, so this
+# narrows the blast radius without the read-only-root / syscall filtering that
+# would break typical build pipelines.
+NoNewPrivileges=true        # also blocks `sudo` inside pipeline steps
+ProtectSystem=full          # /usr, /boot, /etc mounted read-only
+ProtectHome=true            # hide /home, /root, /run/user (HOME is /var/lib/janus)
+PrivateTmp=true             # private /tmp and /var/tmp for the service
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

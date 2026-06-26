@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Linux deployment** — a hardened `systemd` unit ([`deploy/janus.service`](deploy/janus.service)) and secret template ([`deploy/janus.env.example`](deploy/janus.env.example)), plus a [deployment guide](docs/deployment.md) for running Janus as a dedicated-user service.
+
 ## [0.1.0] - 2026-06-26
 
 ### Added

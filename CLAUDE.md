@@ -34,4 +34,5 @@ Single binary (`cmd/janus`); all logic under `internal/`, depending inward on `i
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — supported YAML grammar + what's rejected and why
 - [docs/configuration.md](docs/configuration.md) — config file, precedence (defaults < file < env < flags), the repo allowlist
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
+- [docs/deployment.md](docs/deployment.md) — Linux systemd deployment (`deploy/janus.service`, dedicated user, balanced sandbox)
 - `README.md` — overview, quickstart, security model
