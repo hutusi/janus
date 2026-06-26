@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **YAML config file** — `--config` (and auto-load of `./janus.yml`) covering all `janus serve` settings, with precedence defaults < file < env < flags. `janus init` scaffolds an annotated `janus.yml`.
 - **Repository allowlist** (`allow_repos`) — deny-by-default with a `*` allow-all escape hatch; a repo not on the list is rejected with `403` before any checkout. Defense-in-depth against a leaked webhook secret or API token.
 - **`CLAUDE.md`** — concise guidance for AI coding agents.
+- **MIT license.**
 
 ### Changed
 

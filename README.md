@@ -136,4 +136,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). TL;DR: `make ci` runs the full gate
 
 ## License
 
-TBD.
+Janus is released under the MIT License — see [LICENSE](LICENSE).
