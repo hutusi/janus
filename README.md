@@ -11,6 +11,37 @@ in the repository at `.janus/ci.yml`.
 > the supported keys (expressions, `if:`, matrix, `uses:`, templating) is a
 > **validation error**, not a feature.
 
+## Install
+
+### Prebuilt binary (recommended)
+
+Download the static binary for your platform from the
+[latest release](https://github.com/hutusi/janus/releases/latest):
+
+```sh
+# Linux x86_64 — swap in janus-linux-arm64 / janus-darwin-amd64 / janus-darwin-arm64
+curl -fsSL -o janus \
+  https://github.com/hutusi/janus/releases/latest/download/janus-linux-amd64
+chmod +x janus
+./janus version   # janus v0.1.0
+```
+
+Verify the download against `checksums.txt` from the same release:
+
+```sh
+sha256sum -c checksums.txt --ignore-missing
+```
+
+Janus targets unix hosts; Windows is out of scope (see [Out of scope](#out-of-scope)).
+
+### Build from source
+
+Requires Go (see [`go.mod`](go.mod)). The version is baked in from the git tag:
+
+```sh
+make build   # produces ./janus
+```
+
 ## Quickstart
 
 ```sh
