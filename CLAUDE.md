@@ -24,7 +24,7 @@ CLI subcommands: `janus init` (scaffold `janus.yml`), `janus serve` (auto-loads 
 
 - Branch per feature off `main` (`<type>/<topic>`); never commit to `main`. Push and open PRs only when asked.
 - Conventional Commits; each commit green under `make ci`; the body explains the why. No `Co-Authored-By` or AI-attribution trailers on commits or PR descriptions.
-- Update the relevant `docs/` page in the same change as the behavior.
+- Ship docs with the change: update the relevant `docs/` page and add a `CHANGELOG.md` (Unreleased) entry in the same commit as the behavior.
 
 ## Architecture & docs
 

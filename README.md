@@ -11,18 +11,6 @@ in the repository at `.janus/ci.yml`.
 > the supported keys (expressions, `if:`, matrix, `uses:`, templating) is a
 > **validation error**, not a feature.
 
-## Status
-
-Built incrementally. Current capabilities are tracked per phase:
-
-- [x] **Phase 0** — project skeleton, quality gate (lint/test/CI), `janus serve` with `/healthz`
-- [x] **Phase 1** — pipeline parsing, strict validation, variable interpolation (`janus validate`)
-- [x] **Phase 2** — DAG scheduler + host-process executor (`janus run`)
-- [x] **Phase 3** — per-run git workspace (shallow checkout of the triggering SHA)
-- [x] **Phase 4** — HTTP server, manual trigger, read-only dashboard
-- [x] **Phase 5** — persistent run history + GitLab webhook
-- [x] **Phase 6** — hardening (process-group kill, timeouts, concurrency caps, auth)
-
 ## Quickstart
 
 ```sh
@@ -107,7 +95,7 @@ jobs:
 
 Variables are limited to `${{ env.VAR }}` plus `ref` / `sha` / `short_sha` /
 `branch` / `event`. See [docs/pipeline-reference.md](docs/pipeline-reference.md)
-(added in Phase 1) for the full grammar and the list of rejected constructs.
+for the full grammar and the list of rejected constructs.
 
 ## Design
 
@@ -118,6 +106,7 @@ Single Go binary, standard library throughout; the only third-party module is
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — full YAML grammar + what's rejected
 - [docs/configuration.md](docs/configuration.md) — config file, all settings, the allowlist
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
+- [CHANGELOG.md](CHANGELOG.md) — notable changes
 
 ### Security model (read this before deploying)
 
