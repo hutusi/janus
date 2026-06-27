@@ -50,3 +50,10 @@ jobs:
           else
             echo "no .janus/ci.yml yet (added in a later phase)"
           fi
+
+      - name: validate example pipelines
+        run: |
+          for f in examples/*.yml; do
+            [ -f "$f" ] || continue
+            go run ./cmd/janus validate "$f"
+          done

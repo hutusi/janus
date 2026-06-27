@@ -1,0 +1,61 @@
+# Release pipeline — build, then publish the output to a separate "pages" repo.
+#
+# Same trigger and build job as build.yml, plus a deploy job. All jobs in a run share
+# one workspace directory, so `deploy` sees the `out/` produced by `build`.
+#
+# Auth: Janus forwards only PATH/HOME/LANG/LC_ALL/TZ/TMPDIR to steps (no secrets, no
+# SSH_AUTH_SOCK). Configure a passphraseless SSH deploy key for the Janus host user
+# (~/.ssh) with push access to PAGES_REPO_URL. The URL/branch below are not secrets.
+# The PAGES_BRANCH must already exist in the pages repo.
+name: release
+on:
+  push:
+    branches: [master]
+env:
+  OUT_DIR: out
+  PAGES_REPO_URL: "git@gitlab.example.com:your-group/your-pages.git"
+  PAGES_BRANCH: "main"
+  GIT_USER_NAME: "Janus CI"
+  GIT_USER_EMAIL: "ci@example.com"
+jobs:
+  build:
+    steps:
+      # Update master to the latest (see build.yml for why fetch+reset, not checkout/pull).
+      - run: |
+          set -e
+          git fetch --depth 1 origin master
+          git reset --hard FETCH_HEAD
+      # Install dependencies and build.
+      - run: npm install && npm run build
+      # Verify the build output exists and is non-empty.
+      - run: |
+          set -e
+          test -d "$OUT_DIR"
+          [ -n "$(ls -A "$OUT_DIR")" ]
+  deploy:
+    needs: [build]
+    steps:
+      # Update the pages repo: a fresh shallow clone of the target branch.
+      - run: |
+          set -e
+          rm -rf .pages-repo
+          git clone --depth 1 --branch "$PAGES_BRANCH" "$PAGES_REPO_URL" .pages-repo
+          git -C .pages-repo config user.name "$GIT_USER_NAME"
+          git -C .pages-repo config user.email "$GIT_USER_EMAIL"
+      # Copy the build output in, overwriting existing content (including deletions).
+      - run: |
+          set -e
+          find .pages-repo -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+          if [ -e "$OUT_DIR/.git" ]; then
+            echo "refusing to deploy: $OUT_DIR/.git would clobber the pages repo metadata" >&2
+            exit 1
+          fi
+          cp -R "$OUT_DIR"/. .pages-repo/
+      # Commit the changes (skip cleanly if nothing changed).
+      - run: |
+          set -e
+          git -C .pages-repo add -A
+          git -C .pages-repo diff --cached --quiet || \
+            git -C .pages-repo commit -m "Deploy ${{ short_sha }} from ${{ branch }}"
+      # Push to the pages repo.
+      - run: git -C .pages-repo push origin HEAD:"$PAGES_BRANCH"
