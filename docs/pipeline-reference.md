@@ -105,4 +105,5 @@ These produce a clear validation error rather than running:
 - On the first job failure the run is **fail-fast**: in-flight processes are
   cancelled and not-yet-started jobs are marked skipped.
 
-See [architecture.md](architecture.md) for the full lifecycle.
+See [architecture.md](architecture.md) for the full lifecycle. Runnable sample
+pipelines live in [examples/](../examples/).

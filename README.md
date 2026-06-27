@@ -138,6 +138,7 @@ Single Go binary, standard library throughout; the only third-party module is
 - [docs/configuration.md](docs/configuration.md) — config file, all settings, the allowlist
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 - [docs/deployment.md](docs/deployment.md) — run as a hardened systemd service on Linux
+- [examples/](examples/) — ready-to-copy sample pipelines (build, release)
 - [CHANGELOG.md](CHANGELOG.md) — notable changes
 
 ### Security model (read this before deploying)

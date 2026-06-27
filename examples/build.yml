@@ -1,0 +1,28 @@
+# Build pipeline — runs on every update to master (e.g. a merged merge request).
+#
+# Janus ignores the GitLab MR "merge" action and fires on the resulting push, so the
+# trigger is `push`, not `merge_request`. Janus can't tell a merge-commit push from a
+# direct push to master — enforce "merged MR only" with branch protection on master.
+name: build
+on:
+  push:
+    branches: [master]
+env:
+  OUT_DIR: out            # build output directory to verify
+jobs:
+  build:
+    steps:
+      # Update master to the latest. Janus checks out the triggering commit as a
+      # shallow, detached HEAD — already the master tip for a push — so `git checkout
+      # master` / `git pull` would fail. Re-fetch the tip to guarantee the very latest.
+      - run: |
+          set -e
+          git fetch --depth 1 origin master
+          git reset --hard FETCH_HEAD
+      # Install dependencies and build.
+      - run: npm install && npm run build
+      # Verify the build output exists and is non-empty.
+      - run: |
+          set -e
+          test -d "$OUT_DIR"
+          [ -n "$(ls -A "$OUT_DIR")" ]
