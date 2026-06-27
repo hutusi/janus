@@ -59,7 +59,8 @@ the Janus service runs as (see [docs/deployment.md](../docs/deployment.md)):
 2. Place the private key in the Janus user's `~/.ssh/` and add the host to
    `~/.ssh/known_hosts` (a passphraseless key works without an agent).
 3. Set the knobs in `release.yml`'s `env:` — `PAGES_REPO_URL` (an SSH `git@…` URL),
-   `PAGES_BRANCH` (must already exist), and the commit identity. These are not secrets.
+   `PAGES_BRANCH` (must already exist), and the commit identity (`GIT_USER_NAME` /
+   `GIT_USER_EMAIL`). These are not secrets.
 
 The deploy job mirrors `out/` into the pages repo (overwriting, including deletions),
 commits only if something changed, and pushes.
