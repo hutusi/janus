@@ -19,6 +19,32 @@ page only covers turning those into a running service.
   first: jobs run with no isolation, so the dedicated user and the `allow_repos`
   allowlist below are not optional extras.
 
+## Quick install (scripted)
+
+If you just want it running, [`deploy/install.sh`](../deploy/install.sh) automates
+steps 1–5 below from a checkout:
+
+```sh
+git clone https://github.com/hutusi/janus && cd janus
+sudo ./deploy/install.sh --allow-repo https://gitlab.example.com/your-group
+```
+
+It detects your architecture, downloads and **checksum-verifies** the latest
+release binary, creates the `janus` user, writes `/etc/janus/janus.yml` and a
+`janus.env` with **freshly generated secrets (printed once)**, installs the unit,
+and starts the service. It is **idempotent** — an existing config or secrets file
+is kept, never overwritten — so it is safe to re-run. Useful flags:
+
+- `--dry-run` — print every action without changing anything (needs no root).
+- `--version vX.Y.Z` — pin a release instead of `latest`.
+- `--no-gen-secrets` — leave `janus.env` blank to fill in yourself.
+- `sudo ./deploy/install.sh upgrade` — re-download + verify the binary and
+  restart, leaving the user, config and secrets untouched (see [step 8](#8-upgrading)).
+
+Run `./deploy/install.sh --help` for the full list. The script stops at a running
+service; **TLS (step 6) and the GitLab webhook (step 7) remain manual**. Prefer to
+understand or customise each step? Follow the manual walkthrough below instead.
+
 ## 1. Install the binary
 
 Download the release binary for your architecture, verify it, and place it on the

@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test race cover fmt fmt-check vet lint ci clean
+.PHONY: build test race cover fmt fmt-check vet lint lint-sh lint-unit ci clean
 
 ## build: compile the single static binary
 build:
@@ -47,8 +47,23 @@ lint:
 		echo "golangci-lint not installed locally; skipping (CI runs it)"; \
 	fi
 
+## lint-sh: run shellcheck on shell scripts if installed (CI always runs it)
+lint-sh:
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck deploy/*.sh; \
+	else \
+		echo "shellcheck not installed locally; skipping (CI runs it)"; \
+	fi
+
+## lint-unit: reject systemd directives with trailing inline comments (silently ignored)
+lint-unit:
+	@if grep -nE '^[A-Za-z][A-Za-z0-9]*=.*[[:space:]]#' deploy/*.service; then \
+		echo "systemd directives must not have trailing inline comments — move them to their own line"; \
+		exit 1; \
+	fi
+
 ## ci: the full local gate — what CI enforces
-ci: fmt-check vet lint race
+ci: fmt-check vet lint lint-sh lint-unit race
 
 ## clean: remove build artifacts
 clean:
