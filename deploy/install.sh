@@ -287,6 +287,13 @@ verify_service() {
 		printf "+ curl -fsS --noproxy '*' %s\n" "$url"
 		return
 	fi
+	# curl is optional for a --binary (offline) install, so it may be absent.
+	# is-active above is the primary signal; skip the HTTP probe rather than
+	# loop for 10s and warn misleadingly as if the service failed to start.
+	if ! command -v curl >/dev/null 2>&1; then
+		log "curl not present — skipping the HTTP health check; verify once up with: curl -s $url"
+		return 0
+	fi
 	# --noproxy '*': the bind is loopback, so never route the check through an
 	# http_proxy the host may have set (it would 502 a perfectly healthy service).
 	i=0
