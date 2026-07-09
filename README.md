@@ -26,7 +26,8 @@ chmod +x janus
 ./janus version   # janus v0.1.0
 ```
 
-Verify the download against `checksums.txt` from the same release:
+Verify the download against `checksums.txt` from the same release (integrity, not
+provenance — see [Security model](#security-model-read-this-before-deploying)):
 
 ```sh
 sha256sum -c checksums.txt --ignore-missing
@@ -159,6 +160,14 @@ attacker-controlled repository. It is **deny-by-default**: with nothing
 configured every webhook and manual trigger is rejected (403); set `allow_repos`
 to the hosts/groups you trust, or `"*"` to allow all. See
 [docs/configuration.md](docs/configuration.md#repository-allowlist).
+
+**Binary integrity vs. provenance.** The release `checksums.txt` verifies a
+downloaded binary's **integrity** — that it wasn't corrupted or truncated — but
+not its **provenance**: it ships from the same GitHub release as the binary and
+is not separately signed, so the trust root is simply HTTPS and that release.
+Building from source (`make build`) doesn't change that root, but lets you audit
+what you run instead of trusting an opaque binary; the installer can then deploy
+your own build with `deploy/install.sh --binary ./janus` (no download step).
 
 ## Out of scope
 
