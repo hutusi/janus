@@ -44,9 +44,10 @@ git fetch --depth 1 origin master
 git reset --hard FETCH_HEAD
 ```
 
-Each step runs from the workspace root via `/bin/sh -c`. The filesystem persists across
-steps, but shell state (current directory, variables) does **not** — that's why the
-deploy steps use `git -C .pages-repo …` instead of `cd`.
+Each step runs from the workspace root via the step shell — `/bin/sh -c` by default
+on unix (these examples are POSIX; on Windows set `shell: sh`, or write cmd/PowerShell).
+The filesystem persists across steps, but shell state (current directory, variables)
+does **not** — that's why the deploy steps use `git -C .pages-repo …` instead of `cd`.
 
 ## Releasing to the pages repo (SSH)
 

@@ -19,7 +19,7 @@ Download the static binary for your platform from the
 [latest release](https://github.com/hutusi/janus/releases/latest):
 
 ```sh
-# Linux x86_64 — swap in janus-linux-arm64 / janus-darwin-amd64 / janus-darwin-arm64
+# Linux x86_64 — swap in janus-linux-arm64 / janus-darwin-{amd64,arm64} / janus-windows-{amd64,arm64}.exe
 curl -fsSL -o janus \
   https://github.com/hutusi/janus/releases/latest/download/janus-linux-amd64
 chmod +x janus
@@ -33,7 +33,11 @@ provenance — see [Security model](#security-model-read-this-before-deploying))
 sha256sum -c checksums.txt --ignore-missing
 ```
 
-Janus targets unix hosts; Windows is out of scope (see [Out of scope](#out-of-scope)).
+Janus runs on Linux, macOS, and **Windows**. On Windows, pipeline steps run under
+`cmd` by default (or `powershell` / `pwsh` / `sh` via a step's
+[`shell:`](docs/pipeline-reference.md#step-shell)); you run `janus serve` /
+`janus run` from a console — the systemd unit and `deploy/install.sh` below are
+Linux-only.
 
 To run Janus as a Linux systemd service, [`deploy/install.sh`](deploy/install.sh)
 does the whole thing (binary, dedicated user, config, secrets, unit) in one
@@ -172,8 +176,10 @@ your own build with `deploy/install.sh --binary ./janus` (no download step).
 ## Out of scope
 
 containers/VMs · matrix · `uses:` / third-party actions · `if:` / expressions ·
-distributed runners · artifact storage · caching · secrets beyond host env ·
-Windows. Node/Go/Python are assumed to be installed on the host.
+distributed runners · artifact storage · caching · secrets beyond host env · a
+Windows service installer (the binary runs on Windows, but only the systemd unit
+and `deploy/install.sh` are provided). Node/Go/Python are assumed to be installed
+on the host.
 
 ## Development
 

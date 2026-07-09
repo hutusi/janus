@@ -124,11 +124,13 @@ descriptive error. Exit code is non-zero on invalid input.
 
 ## Step environment
 
-Each step runs via `/bin/sh -c` with a **curated** environment, not the Janus
-daemon's full environment:
+Each step runs via the step's shell — the host default (`/bin/sh -c` on unix,
+`cmd /C` on Windows) or the step's [`shell:`](pipeline-reference.md#step-shell) —
+with a **curated** environment, not the Janus daemon's full environment:
 
 - Passed through from the host (if set): `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`,
-  `TMPDIR`.
+  `TMPDIR`, plus the Windows equivalents (`SystemRoot`, `ComSpec`, `PATHEXT`,
+  `USERPROFILE`, `TEMP`/`TMP`, …).
 - Injected: `CI=true`, `JANUS_RUN_ID`, `JANUS_EVENT`, `JANUS_REF`, `JANUS_SHA`,
   `JANUS_BRANCH`.
 - Overlaid (later wins): workflow `env` → job `env` → step `env`.
