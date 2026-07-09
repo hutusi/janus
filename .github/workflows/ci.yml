@@ -43,6 +43,9 @@ jobs:
       - name: build
         run: CGO_ENABLED=0 go build ./cmd/janus
 
+      - name: shellcheck
+        run: shellcheck deploy/*.sh
+
       - name: validate dogfood pipeline
         run: |
           if [ -f .janus/ci.yml ]; then
