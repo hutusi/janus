@@ -36,6 +36,7 @@ type rawJob struct {
 type rawStep struct {
 	Run        string            `yaml:"run"`
 	WorkingDir string            `yaml:"working-directory"`
+	Shell      string            `yaml:"shell"`
 	Env        map[string]string `yaml:"env"`
 }
 
@@ -56,7 +57,7 @@ func (r *rawWorkflow) toModel() *model.Workflow {
 	for name, rj := range r.Jobs {
 		steps := make([]model.Step, len(rj.Steps))
 		for i, rs := range rj.Steps {
-			steps[i] = model.Step{Run: rs.Run, WorkingDir: rs.WorkingDir, Env: rs.Env}
+			steps[i] = model.Step{Run: rs.Run, WorkingDir: rs.WorkingDir, Shell: rs.Shell, Env: rs.Env}
 		}
 		wf.Jobs[name] = &model.Job{
 			Name:  name,

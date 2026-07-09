@@ -1,3 +1,8 @@
+//go:build unix
+
+// These execution tests drive real steps through /bin/sh and use POSIX commands
+// (sleep, true, `;`, 1>&2). Windows equivalents live in engine_windows_test.go;
+// OS-agnostic scheduling/DAG tests live in dag_test.go.
 package engine
 
 import (
