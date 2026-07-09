@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scripted install** — [`deploy/install.sh`](deploy/install.sh) provisions Janus as a systemd service in one command: it detects the architecture, downloads and checksum-verifies the release binary, creates the `janus` user, writes an idempotent config plus a `janus.env` with generated secrets, and enables the unit. Supports `--allow-repo`, `--version`, `--dry-run`, and an `upgrade` mode; linted by `shellcheck` in CI.
 - **Linux deployment** — a hardened `systemd` unit ([`deploy/janus.service`](deploy/janus.service)) and secret template ([`deploy/janus.env.example`](deploy/janus.env.example)), plus a [deployment guide](docs/deployment.md) for running Janus as a dedicated-user service.
 - **Example pipelines** — [`examples/build.yml`](examples/build.yml) (build on every master update) and [`examples/release.yml`](examples/release.yml) (build, then publish the output to a separate pages repo), with an [`examples/README.md`](examples/README.md) covering the push-vs-MR-merge trigger, the shallow checkout, and host SSH auth. Validated in CI.
 

@@ -34,6 +34,10 @@ sha256sum -c checksums.txt --ignore-missing
 
 Janus targets unix hosts; Windows is out of scope (see [Out of scope](#out-of-scope)).
 
+To run Janus as a Linux systemd service, [`deploy/install.sh`](deploy/install.sh)
+does the whole thing (binary, dedicated user, config, secrets, unit) in one
+command — see the [deployment guide](docs/deployment.md#quick-install-scripted).
+
 ### Build from source
 
 Requires Go (see [`go.mod`](go.mod)). The version is baked in from the git tag:
