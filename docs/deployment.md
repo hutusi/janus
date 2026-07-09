@@ -37,6 +37,8 @@ is kept, never overwritten — so it is safe to re-run. Useful flags:
 
 - `--dry-run` — print every action without changing anything (needs no root).
 - `--version vX.Y.Z` — pin a release instead of `latest`.
+- `--binary <path>` — install a locally-built binary with **no network access at
+  all** (air-gapped hosts); see [Offline install](#offline--air-gapped-install) below.
 - `--no-gen-secrets` — leave `janus.env` blank to fill in yourself.
 - `sudo ./deploy/install.sh upgrade` — re-download + verify the binary and
   restart, leaving the user, config and secrets untouched (see [step 8](#8-upgrading)).
@@ -44,6 +46,27 @@ is kept, never overwritten — so it is safe to re-run. Useful flags:
 Run `./deploy/install.sh --help` for the full list. The script stops at a running
 service; **TLS (step 6) and the GitLab webhook (step 7) remain manual**. Prefer to
 understand or customise each step? Follow the manual walkthrough below instead.
+
+### Offline / air-gapped install
+
+The only thing `install.sh` fetches from the internet is the release binary. On a
+host with no internet, build the binary yourself and hand it to the installer with
+`--binary` — it then skips the download **and** the remote checksum, so the whole
+install runs entirely from local files (the unit and secret templates already come
+from the checkout, and secrets are generated with `openssl`):
+
+```sh
+# On the air-gapped host (needs Go and this checkout):
+make build                                       # produces ./janus
+sudo ./deploy/install.sh --binary ./janus \
+  --allow-repo https://gitlab.internal/your-group
+```
+
+`upgrade` takes it too — rebuild, then
+`sudo ./deploy/install.sh upgrade --binary ./janus`. If the target has no Go,
+cross-compile on a connected box with `GOOS=linux GOARCH=amd64 make build` (use
+`GOARCH=arm64` for aarch64 hosts) and copy the resulting `janus` plus the `deploy/`
+directory over before running the installer.
 
 ## 1. Install the binary
 

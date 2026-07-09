@@ -6,12 +6,16 @@
 # installs the config + secret templates (idempotently — never clobbers existing
 # ones), installs the systemd unit, and enables the service.
 #
+# For an air-gapped host, build the binary first (`make build`) and pass it with
+# --binary <path>; the install then makes no network access at all.
+#
 # TLS/reverse-proxy (deployment.md step 6) and the GitLab webhook (step 7) stay
 # manual and are pointed to at the end.
 #
 # Usage:
 #   sudo ./deploy/install.sh [install|upgrade] [options]
-#   ./deploy/install.sh --dry-run            # preview, no root or Linux needed
+#   sudo ./deploy/install.sh --binary ./janus   # offline: install a local build
+#   ./deploy/install.sh --dry-run               # preview, no root or Linux needed
 # Run --help for the option list, or read docs/deployment.md for the walkthrough.
 
 set -eu
@@ -37,6 +41,7 @@ GEN_SECRETS=1
 DRY_RUN=0
 ALLOW_REPOS=""   # newline-separated, built up from repeated --allow-repo
 ARCH=""
+BINARY=""        # local binary to install (offline); empty = download a release
 
 # --- helpers ---------------------------------------------------------------
 log()  { printf '==> %s\n' "$*"; }
@@ -60,6 +65,8 @@ Usage: sudo ./deploy/install.sh [install|upgrade] [options]
 
 Options:
   --allow-repo <url>   allow a repo/group URL prefix (repeatable; seeds allow_repos)
+  --binary <path>      install this local binary and make no network access at all
+                       (build it first with 'make build'); skips --version
   --version <vX.Y.Z>   install a specific release (default: latest)
   --addr <host:port>   listen address (default: 127.0.0.1:8080)
   --prefix <dir>       install the binary here (default: /usr/local/bin)
@@ -105,7 +112,13 @@ check_preconditions() {
 	[ "$(id -u)" = "0" ] || err "must run as root — re-run with: sudo $0 $MODE ..."
 	[ -d /run/systemd/system ] || err "systemd not detected (/run/systemd/system is missing)"
 
-	require_tools curl sha256sum install systemctl
+	# curl/sha256sum are only needed to download + verify a release; a local
+	# --binary install needs neither, keeping air-gapped hosts happy.
+	if [ -n "$BINARY" ]; then
+		require_tools install systemctl
+	else
+		require_tools curl sha256sum install systemctl
+	fi
 	if [ "$MODE" = "install" ]; then
 		require_tools useradd
 		if [ "$GEN_SECRETS" -eq 1 ] && ! command -v openssl >/dev/null 2>&1; then
@@ -115,6 +128,21 @@ check_preconditions() {
 		command -v git >/dev/null 2>&1 ||
 			warn "git not found — Janus shells out to git to check out commits; install it before running pipelines"
 	fi
+}
+
+# Put the janus binary in place: from a local --binary (offline) or, by default,
+# by downloading and checksum-verifying a release.
+provision_binary() {
+	if [ -n "$BINARY" ]; then
+		if [ "$DRY_RUN" -eq 0 ] && [ ! -f "$BINARY" ]; then
+			err "--binary not found or not a regular file: $BINARY"
+		fi
+		log "installing local binary (offline, no download): $BINARY"
+		run install -m755 "$BINARY" "$PREFIX/janus"
+		log "installed $PREFIX/janus"
+		return
+	fi
+	download_binary
 }
 
 download_binary() {
@@ -259,6 +287,13 @@ verify_service() {
 		printf "+ curl -fsS --noproxy '*' %s\n" "$url"
 		return
 	fi
+	# curl is optional for a --binary (offline) install, so it may be absent.
+	# is-active above is the primary signal; skip the HTTP probe rather than
+	# loop for 10s and warn misleadingly as if the service failed to start.
+	if ! command -v curl >/dev/null 2>&1; then
+		log "curl not present — skipping the HTTP health check; verify once up with: curl -s $url"
+		return 0
+	fi
 	# --noproxy '*': the bind is loopback, so never route the check through an
 	# http_proxy the host may have set (it would 502 a perfectly healthy service).
 	i=0
@@ -309,6 +344,11 @@ while [ "$#" -gt 0 ]; do
 $1"
 		fi
 		;;
+	--binary)
+		shift
+		[ "$#" -gt 0 ] || err "--binary requires a path"
+		BINARY="$1"
+		;;
 	--version)
 		shift
 		[ "$#" -gt 0 ] || err "--version requires a value"
@@ -336,13 +376,17 @@ $1"
 done
 
 # --- main ------------------------------------------------------------------
+if [ -n "$BINARY" ] && [ "$VERSION" != "latest" ]; then
+	err "--binary and --version are mutually exclusive (--version only selects a download)"
+fi
+
 check_preconditions
 
 if [ "$PREFIX" != "/usr/local/bin" ]; then
 	warn "the shipped unit runs /usr/local/bin/janus; with --prefix $PREFIX you must edit ExecStart in $UNIT_PATH"
 fi
 
-download_binary
+provision_binary
 
 if [ "$MODE" = "upgrade" ]; then
 	install_unit
