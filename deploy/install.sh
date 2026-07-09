@@ -256,12 +256,14 @@ verify_service() {
 	run systemctl is-active janus || true
 	url="http://$ADDR/healthz"
 	if [ "$DRY_RUN" -eq 1 ]; then
-		printf '+ curl -fsS %s\n' "$url"
+		printf "+ curl -fsS --noproxy '*' %s\n" "$url"
 		return
 	fi
+	# --noproxy '*': the bind is loopback, so never route the check through an
+	# http_proxy the host may have set (it would 502 a perfectly healthy service).
 	i=0
 	while [ "$i" -lt 10 ]; do
-		if out=$(curl -fsS "$url" 2>/dev/null); then
+		if out=$(curl -fsS --noproxy '*' "$url" 2>/dev/null); then
 			log "healthz: $out"
 			return 0
 		fi
