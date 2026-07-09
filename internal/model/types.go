@@ -52,10 +52,13 @@ type Job struct {
 }
 
 // Step is a single shell command, optionally with its own working directory
-// (relative to the workspace) and environment overlay.
+// (relative to the workspace), shell, and environment overlay. Shell is empty
+// for the OS default (/bin/sh on unix, cmd on Windows); the pipeline validator
+// restricts it to the closed set the engine knows how to run.
 type Step struct {
 	Run        string
 	WorkingDir string
+	Shell      string
 	Env        map[string]string
 }
 

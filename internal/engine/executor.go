@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -16,14 +17,42 @@ import (
 	"github.com/hutusi/janus/internal/pipeline"
 )
 
-// shell is how each step's `run` string is executed. Using a shell is
-// deliberate: pipelines expect `npm ci && npm test`, pipes, and globbing.
-var shell = []string{"/bin/sh", "-c"}
+// shellArgv returns the argv prefix used to run a step's `run` string. Using a
+// shell is deliberate: pipelines expect `npm ci && npm test`, pipes, and
+// globbing. An empty stepShell selects the OS default — /bin/sh on unix, cmd on
+// Windows. The pipeline validator restricts stepShell to this closed set, so the
+// mapping here must stay in sync with pipeline.allowedShells.
+func shellArgv(stepShell string) []string {
+	switch stepShell {
+	case "sh":
+		return []string{"sh", "-c"}
+	case "bash":
+		return []string{"bash", "-c"}
+	case "cmd":
+		return []string{"cmd", "/C"}
+	case "powershell":
+		return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command"}
+	case "pwsh":
+		return []string{"pwsh", "-NoProfile", "-NonInteractive", "-Command"}
+	default: // "" → OS default
+		if runtime.GOOS == "windows" {
+			return []string{"cmd", "/C"}
+		}
+		return []string{"/bin/sh", "-c"}
+	}
+}
 
 // hostEnvAllow is the curated set of host environment variables passed through
 // to jobs. The Janus daemon's own environment is otherwise NOT inherited, so
-// its configuration/secrets never leak into builds.
-var hostEnvAllow = []string{"PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR"}
+// its configuration/secrets never leak into builds. It lists both unix and
+// Windows names; os.LookupEnv skips those absent on the current host.
+var hostEnvAllow = []string{
+	// unix
+	"PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR",
+	// windows (needed for cmd/powershell steps to find system tools)
+	"SystemRoot", "ComSpec", "PATHEXT", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+	"TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
+}
 
 // executeJob runs a job's steps sequentially and returns the job's terminal
 // status. The first failing step fails the job and skips the rest.
@@ -104,7 +133,8 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, job *model.Job, jr *
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(stepCtx, shell[0], append(shell[1:], cmdStr)...)
+	argv := shellArgv(step.Shell)
+	cmd := exec.CommandContext(stepCtx, argv[0], append(argv[1:], cmdStr)...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdout = w

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Windows support** — pipeline steps can run on native Windows. The step shell now depends on the host (`/bin/sh` on unix, `cmd` on Windows) and is overridable with a new step [`shell:`](docs/pipeline-reference.md#step-shell) key (`sh`/`bash`/`cmd`/`powershell`/`pwsh`). A `janus-windows-<arch>.exe` binary is published, and a `windows-latest` CI job guards execution (process-tree kill uses the built-in `taskkill`, so no new dependency). Pipelines are no longer portable across OSes; the systemd unit and `deploy/install.sh` remain Linux-only.
 - **Scripted install** — [`deploy/install.sh`](deploy/install.sh) provisions Janus as a systemd service in one command: it detects the architecture, downloads and checksum-verifies the release binary, creates the `janus` user, writes an idempotent config plus a `janus.env` with generated secrets, and enables the unit. Supports `--allow-repo`, `--version`, `--dry-run`, and an `upgrade` mode; linted by `shellcheck` in CI.
 - **Offline install** — `deploy/install.sh --binary <path>` installs a locally-built binary and makes no network access at all (no release download or remote checksum), for air-gapped hosts. `upgrade` accepts it too.
 - **Linux deployment** — a hardened `systemd` unit ([`deploy/janus.service`](deploy/janus.service)) and secret template ([`deploy/janus.env.example`](deploy/janus.env.example)), plus a [deployment guide](docs/deployment.md) for running Janus as a dedicated-user service.

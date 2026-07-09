@@ -30,7 +30,8 @@ jobs:                                     # required: at least one job
     env:                                  # optional; job-level variables
       STAGE: build
     steps:
-      - run: npm ci                       # required: the command (via /bin/sh -c)
+      - run: npm ci                       # required: the command
+        shell: sh                         # optional; default: /bin/sh (unix), cmd (Windows)
         working-directory: ./app          # optional; relative to the workspace
         env:                              # optional; step-level variables
           NODE_ENV: production
@@ -50,10 +51,30 @@ jobs:                                     # required: at least one job
 | `env`                      | top / job / step | —        | Environment variables, merged in that order. |
 | `jobs.<id>`                | top level        | yes      | A job; the map key is the job name. |
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
-| `jobs.<id>.steps[].run`    | step             | yes      | Command to run on the host via `/bin/sh -c`. |
+| `jobs.<id>.steps[].run`    | step             | yes      | Command to run on the host via the step shell. |
+| `jobs.<id>.steps[].shell`  | step             | —        | Shell for `run`: `sh`/`bash`/`cmd`/`powershell`/`pwsh`. Default: `/bin/sh` (unix), `cmd` (Windows). |
 | `jobs.<id>.steps[].working-directory` | step  | —        | Directory (relative to the workspace) to run in. |
 
 At least one of `on.push` / `on.merge_request` must be present.
+
+### Step shell
+
+Each step's `run` string is handed to a shell. With `shell:` omitted, the shell
+is the host default — **`/bin/sh -c`** on unix, **`cmd /C`** on Windows. Override
+it per step with a value from a closed set (anything else is a validation error):
+
+| `shell:`     | Command |
+|--------------|---------|
+| `sh`         | `sh -c` |
+| `bash`       | `bash -c` |
+| `cmd`        | `cmd /C` |
+| `powershell` | `powershell -NoProfile -NonInteractive -Command` |
+| `pwsh`       | `pwsh -NoProfile -NonInteractive -Command` |
+
+The chosen shell (or `git`) must be installed on the host. **Pipelines are not
+portable across OSes:** a POSIX `run:` script (`set -e`, `test -d`, pipes) needs
+`sh`/`bash`, which is not the Windows default — set `shell: sh` (e.g. with Git for
+Windows on `PATH`), or write cmd/PowerShell for Windows hosts.
 
 ## Variable interpolation
 
@@ -94,7 +115,7 @@ These produce a clear validation error rather than running:
 - `uses:` / `with:` — no third-party actions; steps run host commands only.
 - `runs-on:`, `container:`, `services:` — jobs run as host processes.
 - `secrets:` — use host environment variables.
-- `cache:`, `permissions:`, `concurrency:`, `outputs:`, step `id:`/`name:`/`shell:`.
+- `cache:`, `permissions:`, `concurrency:`, `outputs:`, step `id:`/`name:`.
 - Any other unknown key (caught structurally), and cyclic / unknown `needs`.
 
 ## Execution model (summary)

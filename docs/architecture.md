@@ -61,7 +61,8 @@ trigger (webhook / manual / CLI)
           jobs with indegree 0 launch; bounded by --max-parallel-jobs
           on completion, decrement dependents; newly-ready jobs launch
           fail-fast: first non-success cancels the run ctx and stops launching
-        per job (executor): steps run sequentially via /bin/sh -c
+        per job (executor): steps run sequentially via the step shell
+                            (default /bin/sh on unix, cmd on Windows; or shell:)
           env merge (curated base → workflow → job → step), ${{...}} interpolation
           combined stdout+stderr streamed to store.LogWriter (+ CLI tee)
           process group per step; cancel/timeout kills the whole group

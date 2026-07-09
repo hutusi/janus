@@ -9,6 +9,18 @@ import (
 	"github.com/hutusi/janus/internal/model"
 )
 
+// allowedShells is the closed set of step `shell:` values. "" selects the OS
+// default (/bin/sh on unix, cmd on Windows); the engine (shellArgv) maps each
+// name to an argv prefix and must stay in sync with this set.
+var allowedShells = map[string]bool{
+	"":           true,
+	"sh":         true,
+	"bash":       true,
+	"cmd":        true,
+	"powershell": true,
+	"pwsh":       true,
+}
+
 // validate performs all semantic checks on an already-decoded workflow. Jobs are
 // visited in sorted order so error messages are deterministic.
 func validate(wf *model.Workflow) error {
@@ -30,6 +42,9 @@ func validate(wf *model.Workflow) error {
 		for i, s := range job.Steps {
 			if strings.TrimSpace(s.Run) == "" {
 				return fmt.Errorf("job %q step %d: `run` is required and cannot be empty", name, i+1)
+			}
+			if !allowedShells[s.Shell] {
+				return fmt.Errorf("job %q step %d: unsupported `shell` %q (allowed: sh, bash, cmd, powershell, pwsh)", name, i+1, s.Shell)
 			}
 		}
 		seen := make(map[string]bool, len(job.Needs))

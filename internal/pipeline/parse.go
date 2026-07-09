@@ -46,7 +46,6 @@ var forbiddenKeyHelp = map[string]string{
 	"permissions": "`permissions:` is not supported",
 	"concurrency": "`concurrency:` is not supported",
 	"outputs":     "`outputs:` are not supported",
-	"shell":       "`shell:` is not supported — steps run via /bin/sh",
 	"id":          "step `id:` is not supported",
 	"name":        "step `name:` is not supported — use `run`",
 }
