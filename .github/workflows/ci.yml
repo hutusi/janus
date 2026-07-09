@@ -88,7 +88,9 @@ jobs:
         run: go vet ./...
 
       - name: build
-        run: CGO_ENABLED=0 go build ./cmd/janus
+        env:
+          CGO_ENABLED: "0" # env key, not an inline prefix: this job's shell is PowerShell
+        run: go build ./cmd/janus
 
       - name: test (engine + pipeline + pure packages)
         run: go test ./internal/engine/ ./internal/pipeline/ ./internal/config/ ./internal/store/ ./internal/allowlist/ ./internal/provider/
