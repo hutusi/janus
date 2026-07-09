@@ -40,11 +40,17 @@ StateDirectoryMode=0700
 
 # Balanced hardening. Jobs run as host processes with NO isolation, so this
 # narrows the blast radius without the read-only-root / syscall filtering that
-# would break typical build pipelines.
-NoNewPrivileges=true        # also blocks `sudo` inside pipeline steps
-ProtectSystem=full          # /usr, /boot, /etc mounted read-only
-ProtectHome=true            # hide /home, /root, /run/user (HOME is /var/lib/janus)
-PrivateTmp=true             # private /tmp and /var/tmp for the service
+# would break typical build pipelines. NOTE: systemd does not accept trailing
+# inline comments on directive lines — it parses them as part of the value and
+# silently ignores the whole setting — so every note here is on its own line.
+# also blocks `sudo` inside pipeline steps:
+NoNewPrivileges=true
+# /usr, /boot, /etc mounted read-only:
+ProtectSystem=full
+# hide /home, /root, /run/user (HOME is /var/lib/janus):
+ProtectHome=true
+# private /tmp and /var/tmp for the service:
+PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 

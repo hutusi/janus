@@ -46,6 +46,13 @@ jobs:
       - name: shellcheck
         run: shellcheck deploy/*.sh
 
+      - name: validate systemd unit
+        run: |
+          if grep -nE '^[A-Za-z][A-Za-z0-9]*=.*[[:space:]]#' deploy/*.service; then
+            echo "systemd directives must not have trailing inline comments — systemd parses them into the value and silently ignores the setting; move the comment to its own line" >&2
+            exit 1
+          fi
+
       - name: validate dogfood pipeline
         run: |
           if [ -f .janus/ci.yml ]; then
