@@ -67,3 +67,28 @@ jobs:
             [ -f "$f" ] || continue
             go run ./cmd/janus validate "$f"
           done
+
+  # Proves execution works on native Windows: the per-OS shell resolution,
+  # cmd/powershell steps, and the taskkill process-tree kill. The exec-heavy
+  # server/workspace/runner suites carry unix output assumptions and are left to
+  # the ubuntu job for now (broadening them to Windows is a follow-up).
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./cmd/janus
+
+      - name: test (engine + pipeline + pure packages)
+        run: go test ./internal/engine/ ./internal/pipeline/ ./internal/config/ ./internal/store/ ./internal/allowlist/ ./internal/provider/
