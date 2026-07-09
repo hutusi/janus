@@ -62,7 +62,10 @@ jobs:
       - run: echo should-not-run
 `)
 	st := store.NewMemory()
-	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	run, err := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if run.Status != model.StatusFailed {
 		t.Fatalf("run status = %s, want failed", run.Status)
 	}
@@ -91,7 +94,10 @@ jobs:
         shell: powershell
 `)
 	st := store.NewMemory()
-	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual, Branch: "main"}, t.TempDir())
+	run, err := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual, Branch: "main"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if run.Status != model.StatusSuccess {
 		t.Fatalf("run status = %s, want success", run.Status)
 	}
@@ -114,7 +120,10 @@ jobs:
 	st := store.NewMemory()
 	e := New(st, WithStepTimeout(300*time.Millisecond))
 	start := time.Now()
-	run, _ := e.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	run, err := e.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("step timeout took %v, expected prompt failure (taskkill)", elapsed)
 	}
@@ -143,7 +152,10 @@ jobs:
 		cancel()
 	}()
 	start := time.Now()
-	run, _ := New(st).Run(ctx, wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	run, err := New(st).Run(ctx, wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("cancellation took %v, expected prompt return", elapsed)
 	}

@@ -88,7 +88,7 @@ jobs:
         run: go vet ./...
 
       - name: build
-        run: go build ./cmd/janus
+        run: CGO_ENABLED=0 go build ./cmd/janus
 
       - name: test (engine + pipeline + pure packages)
         run: go test ./internal/engine/ ./internal/pipeline/ ./internal/config/ ./internal/store/ ./internal/allowlist/ ./internal/provider/

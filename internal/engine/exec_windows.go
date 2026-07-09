@@ -3,8 +3,10 @@
 package engine
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
+	"time"
 )
 
 // setProcessGroup arranges for the step's whole process tree to be killed on
@@ -20,7 +22,12 @@ func setProcessGroup(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return nil
 		}
-		kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
+		// Bound taskkill: unlike the unix kill() syscall it is a spawned
+		// process, and Cmd.WaitDelay only starts after Cancel returns — so a
+		// hung taskkill would otherwise hang the step's cancellation forever.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		kill := exec.CommandContext(ctx, "taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
 		return kill.Run()
 	}
 }
