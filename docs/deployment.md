@@ -223,6 +223,37 @@ sudo ./deploy/install.sh uninstall --purge
 
 Both variants support `--dry-run` to preview every action first.
 
+## Troubleshooting
+
+### git "dubious ownership" when triggering a local repository
+
+A trigger whose `repo_url` is a **local path** can fail with:
+
+```
+exit status 128
+fatal: detected dubious ownership in repository at '...'
+fatal: Could not read from remote repository.
+```
+
+The service runs as the dedicated `janus` user, and git refuses to read a
+repository owned by a different user (CVE-2022-24765) — the "remote" error is
+just how the local-transport fetch surfaces that refusal. The exception git
+suggests must be added **as the service user** (it lives in that user's
+`~/.gitconfig`, i.e. `/var/lib/janus/.gitconfig`), not as root or the repo owner:
+
+```sh
+sudo -u janus -H git config --global --add safe.directory /path/to/repo
+# a linked worktree resolves into the parent repo — add the gitdir git names too:
+sudo -u janus -H git config --global --add safe.directory '/path/to/repo/.git/worktrees/<name>'
+# or, blanket for the janus user only (the repo allowlist still gates triggers):
+sudo -u janus -H git config --global --add safe.directory '*'
+```
+
+The `janus` user also needs plain read/traverse permission on the path, and
+repositories under `/home` are unreachable regardless — the unit's
+`ProtectHome` blocks them by design. Triggering via the git server URL instead
+of a local path avoids all of this.
+
 ## Hardening notes
 
 The shipped unit applies a **balanced** sandbox (`NoNewPrivileges`,
