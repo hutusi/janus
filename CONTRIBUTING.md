@@ -39,6 +39,10 @@ testdata/         # YAML fixtures + captured webhook payloads
 
 Run **`make ci`** before every commit; it must be green.
 
+On Windows the make targets require Git Bash with GNU Make; alternatively run
+the underlying commands directly (`gofmt -l .`, `go vet ./...`,
+`go test -race ./...`).
+
 ## Testing philosophy
 
 - The pure core (`internal/pipeline`, `internal/engine/dag.go`) is developed

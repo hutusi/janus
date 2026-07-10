@@ -51,6 +51,14 @@ Requires Go (see [`go.mod`](go.mod)). The version is baked in from the git tag:
 make build   # produces ./janus
 ```
 
+On Windows, build with plain `go build` — the Makefile needs a POSIX shell
+(`make build` only works under Git Bash with GNU Make, and writes an
+extensionless `janus`). `CGO_ENABLED=0` is already the Go default there:
+
+```powershell
+go build -trimpath -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty)" -o janus.exe ./cmd/janus
+```
+
 ## Quickstart
 
 ```sh
