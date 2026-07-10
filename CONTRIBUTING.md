@@ -31,6 +31,7 @@ testdata/         # YAML fixtures + captured webhook payloads
 | `make install`    | Install the built binary to `$(PREFIX)/bin` (default `/usr/local/bin`) |
 | `make uninstall`  | Remove the installed binary                        |
 | `make install-service` | Provision the systemd service from the local build (Linux; wraps `deploy/install.sh --binary`) |
+| `make uninstall-service` | Stop and remove the systemd service; keeps config/state unless `INSTALL_FLAGS="--purge"` |
 | `make test`       | Run all tests                                       |
 | `make race`       | Run all tests under the race detector              |
 | `make cover`      | Tests with coverage + total                        |
