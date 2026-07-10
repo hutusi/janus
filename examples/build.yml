@@ -1,23 +1,25 @@
-# Build pipeline — runs on every update to master (e.g. a merged merge request).
+# Build pipeline — runs on every push to any branch except master.
 #
-# Janus ignores the GitLab MR "merge" action and fires on the resulting push, so the
-# trigger is `push`, not `merge_request`. Janus can't tell a merge-commit push from a
-# direct push to master — enforce "merged MR only" with branch protection on master.
+# GitLab sends a Push Hook for each pushed branch, so `push` with
+# `branches-ignore` covers every feature branch with no list to maintain.
+# master is excluded because release.yml owns it (build + publish); with this
+# file as the repo's only pipeline, a push to master starts no run at all.
 name: build
 on:
   push:
-    branches: [master]
+    branches-ignore: [master]
 env:
   OUT_DIR: out            # build output directory to verify
 jobs:
   build:
     steps:
-      # Update master to the latest. Janus checks out the triggering commit as a
-      # shallow, detached HEAD — already the master tip for a push — so `git checkout
-      # master` / `git pull` would fail. Re-fetch the tip to guarantee the very latest.
+      # Update the pushed branch to its latest tip. Janus checks out the
+      # triggering commit as a shallow, detached HEAD — `git checkout <branch>`
+      # / `git pull` would fail (the branch isn't in the shallow clone) — so
+      # re-fetch the tip to guarantee the very latest.
       - run: |
           set -e
-          git fetch --depth 1 origin master
+          git fetch --depth 1 origin "${{ branch }}"
           git reset --hard FETCH_HEAD
       # Install dependencies and build.
       - run: npm install && npm run build

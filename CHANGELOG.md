@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Linux deployment** — a hardened `systemd` unit ([`deploy/janus.service`](deploy/janus.service)) and secret template ([`deploy/janus.env.example`](deploy/janus.env.example)), plus a [deployment guide](docs/deployment.md) for running Janus as a dedicated-user service.
 - **Example pipelines** — [`examples/build.yml`](examples/build.yml) (build on every master update) and [`examples/release.yml`](examples/release.yml) (build, then publish the output to a separate pages repo), with an [`examples/README.md`](examples/README.md) covering the push-vs-MR-merge trigger, the shallow checkout, and host SSH auth. Validated in CI.
 
+### Changed
+
+- **Example pipelines** — [`examples/build.yml`](examples/build.yml) now triggers on every push except `master` (`branches-ignore`) and builds the pushed branch via `git fetch --depth 1 origin "${{ branch }}"`; [`examples/release.yml`](examples/release.yml) keeps publishing `master`. The examples README's manual-release command uses the correct `janus run --file` flag.
+
 ### Fixed
 
 - **systemd hardening now actually applies** — the balanced sandbox in [`deploy/janus.service`](deploy/janus.service) had trailing inline comments on its directive lines, which systemd parses as part of the value and silently ignores. `NoNewPrivileges`, `ProtectSystem`, `ProtectHome` and `PrivateTmp` were all being dropped (confirmed via `systemctl show`); the comments moved to their own lines so every protection takes effect. CI now rejects inline-comment directives in `deploy/*.service`.
