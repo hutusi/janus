@@ -62,6 +62,10 @@ sudo ./deploy/install.sh --binary ./janus \
   --allow-repo https://gitlab.internal/your-group
 ```
 
+`make install-service` is shorthand for the same thing —
+`make build && make install-service INSTALL_FLAGS="--allow-repo https://gitlab.internal/your-group"`.
+(For just the binary on PATH with no service, use `make install`.)
+
 `upgrade` takes it too — rebuild, then
 `sudo ./deploy/install.sh upgrade --binary ./janus`. If the target has no Go,
 cross-compile on a connected box with `GOOS=linux GOARCH=amd64 make build` (use

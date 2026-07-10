@@ -51,6 +51,17 @@ Requires Go (see [`go.mod`](go.mod)). The version is baked in from the git tag:
 make build   # produces ./janus
 ```
 
+Install it (unix):
+
+```sh
+make build && sudo make install          # binary only → /usr/local/bin/janus (PREFIX= to relocate)
+make build && make install-service       # Linux: full systemd provision via deploy/install.sh --binary
+```
+
+`make install` places just the binary; the service install (dedicated user,
+config, secrets, unit) is [`deploy/install.sh`](deploy/install.sh) — see the
+[deployment guide](docs/deployment.md).
+
 On Windows, build with plain `go build` — the Makefile needs a POSIX shell
 (`make build` only works under Git Bash with GNU Make, and writes an
 extensionless `janus`). `CGO_ENABLED=0` is already the Go default there:
