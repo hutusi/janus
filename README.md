@@ -96,7 +96,7 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 
 | Method & path                     | Purpose |
 |-----------------------------------|---------|
-| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist) |
+| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref","pipeline_path"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist; `pipeline_path` optionally picks a committed pipeline file other than the configured default) |
 | `GET /api/runs`                   | List runs, newest first (`?limit=`) |
 | `GET /api/runs/{id}`              | Run detail (job/step statuses, exit codes) |
 | `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream |
@@ -108,6 +108,11 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 curl -XPOST localhost:8080/api/trigger \
   -H "Authorization: Bearer $JANUS_API_TOKEN" \
   -d '{"repo_url":"https://gitlab.com/acme/app.git","ref":"refs/heads/main","branch":"main"}'
+
+# Optional pipeline_path runs a different committed file for this trigger only
+curl -XPOST localhost:8080/api/trigger \
+  -H "Authorization: Bearer $JANUS_API_TOKEN" \
+  -d '{"repo_url":"https://gitlab.com/acme/app.git","ref":"refs/heads/main","branch":"main","pipeline_path":".janus/release.yml"}'
 ```
 
 ### GitLab webhooks

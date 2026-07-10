@@ -51,7 +51,8 @@ are rejected.
 trigger (webhook / manual / CLI)
   → runner.Trigger:
       workspace.Checkout  (shallow fetch of the SHA, detached checkout)
-      read + pipeline.Parse(.janus/ci.yml from the checkout)
+      read + pipeline.Parse  (pipeline_path from the checkout; a manual
+                              trigger's pipeline_path field overrides it)
       match event against on:  (manual always matches)
       engine.NewRun + store.SaveRun  → return run id (202)
   → async (bounded by --max-parallel-runs):

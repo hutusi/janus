@@ -55,6 +55,39 @@ func TestTriggerRejectsDisallowedRepo(t *testing.T) {
 	}
 }
 
+func TestPipelineFile(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "evil.yml")
+	tests := []struct {
+		name     string
+		override string
+		want     string
+		wantErr  bool
+	}{
+		{"empty falls back to default", "", filepath.FromSlash(".janus/ci.yml"), false},
+		{"override wins", ".janus/release.yml", filepath.FromSlash(".janus/release.yml"), false},
+		{"parent escape rejected", "../evil.yml", "", true},
+		{"nested parent escape rejected", "../../etc/evil.yml", "", true},
+		{"absolute path rejected", abs, "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := pipelineFile(".janus/ci.yml", model.Event{PipelinePath: tc.override})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("pipelineFile(%q) = %q, want error", tc.override, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("pipelineFile(%q): %v", tc.override, err)
+			}
+			if got != tc.want {
+				t.Errorf("pipelineFile(%q) = %q, want %q", tc.override, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMatches(t *testing.T) {
 	pushMain := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{Branches: []string{"main"}}}}
 	mrMain := &model.Workflow{On: model.Triggers{MergeRequest: &model.BranchFilter{Branches: []string{"main"}}}}

@@ -83,6 +83,10 @@ type Event struct {
 	Branch   string    `json:"branch"`          // e.g. main
 	SHA      string    `json:"sha,omitempty"`   // commit to check out
 	Title    string    `json:"title,omitempty"` // commit/MR title, for display
+
+	// PipelinePath overrides the server-wide pipeline file for this trigger
+	// (manual API only; empty means the configured default).
+	PipelinePath string `json:"pipeline_path,omitempty"`
 }
 
 // Status is the lifecycle state of a run, job, or step.
