@@ -44,10 +44,12 @@ Click **Add webhook**, then **Test → Push events** to verify connectivity.
 
 The event is matched against the workflow's `on:` filters:
 
-- **push** matches when `on.push` is declared and the **pushed branch** is in
-  `on.push.branches` (an empty/omitted list matches all branches).
+- **push** matches when `on.push` is declared and the **pushed branch** passes
+  its filter — in `on.push.branches` (an empty/omitted list matches all
+  branches), or not in `on.push.branches-ignore`.
 - **merge_request** matches against the **target branch** — so
-  `on.merge_request.branches: [main]` runs for MRs landing on `main`. For merge
+  `on.merge_request.branches: [main]` runs for MRs landing on `main`, and
+  `branches-ignore: [main]` runs for MRs landing anywhere else. For merge
   requests, `${{ branch }}` is the target branch.
 
 A non-matching event returns `200` with `{"status":"ignored"}` (so GitLab does

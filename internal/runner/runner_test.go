@@ -98,6 +98,7 @@ func TestMatches(t *testing.T) {
 	pushMain := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{Branches: []string{"main"}}}}
 	mrMain := &model.Workflow{On: model.Triggers{MergeRequest: &model.BranchFilter{Branches: []string{"main"}}}}
 	pushAny := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{}}}
+	pushIgnoreMain := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{Ignore: []string{"main"}}}}
 
 	tests := []struct {
 		name string
@@ -112,6 +113,8 @@ func TestMatches(t *testing.T) {
 		{"MR on target branch", mrMain, model.Event{Kind: model.EventMergeRequest, Branch: "main"}, true},
 		{"MR on other branch", mrMain, model.Event{Kind: model.EventMergeRequest, Branch: "dev"}, false},
 		{"empty filter matches any branch", pushAny, model.Event{Kind: model.EventPush, Branch: "whatever"}, true},
+		{"push to non-ignored branch", pushIgnoreMain, model.Event{Kind: model.EventPush, Branch: "dev"}, true},
+		{"push to ignored branch", pushIgnoreMain, model.Event{Kind: model.EventPush, Branch: "main"}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

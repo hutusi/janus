@@ -20,7 +20,7 @@ on:                                       # required: at least one trigger
   push:
     branches: [main]                      # optional; omit/empty = all branches
   merge_request:                          # GitLab term; normalized internally
-    branches: [main]
+    branches-ignore: [wip]                # optional; every branch except these
 
 env:                                      # optional; workflow-wide variables
   CI: "true"
@@ -47,7 +47,9 @@ jobs:                                     # required: at least one job
 |----------------------------|------------------|----------|---------|
 | `name`                     | top level        | yes      | Workflow name. |
 | `on.push.branches`         | top level        | —        | Run on push to these branches (empty = all). |
+| `on.push.branches-ignore`  | top level        | —        | Run on push to every branch **except** these. Mutually exclusive with `branches`. |
 | `on.merge_request.branches`| top level        | —        | Run on merge requests targeting these branches. |
+| `on.merge_request.branches-ignore` | top level | —       | Run on merge requests except those **targeting** these branches. Mutually exclusive with `branches`. |
 | `env`                      | top / job / step | —        | Environment variables, merged in that order. |
 | `jobs.<id>`                | top level        | yes      | A job; the map key is the job name. |
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
@@ -55,7 +57,9 @@ jobs:                                     # required: at least one job
 | `jobs.<id>.steps[].shell`  | step             | —        | Shell for `run`: `sh`/`bash`/`cmd`/`powershell`/`pwsh`. Default: `/bin/sh` (unix), `cmd` (Windows). |
 | `jobs.<id>.steps[].working-directory` | step  | —        | Directory (relative to the workspace) to run in. |
 
-At least one of `on.push` / `on.merge_request` must be present.
+At least one of `on.push` / `on.merge_request` must be present. Branch names in
+both lists are **exact string matches** (no globs). A trigger may declare
+`branches` (allowlist) or `branches-ignore` (denylist), but not both.
 
 ### Step shell
 
@@ -110,6 +114,8 @@ into builds.
 
 These produce a clear validation error rather than running:
 
+- `branches` together with `branches-ignore` on the same trigger — pick an
+  allowlist or a denylist.
 - `if:` / conditionals / expressions — no expression language.
 - `strategy:` / `matrix:` — no matrix builds.
 - `uses:` / `with:` — no third-party actions; steps run host commands only.

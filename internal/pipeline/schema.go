@@ -25,6 +25,7 @@ type rawTriggers struct {
 
 type rawBranchFilter struct {
 	Branches []string `yaml:"branches"`
+	Ignore   []string `yaml:"branches-ignore"`
 }
 
 type rawJob struct {
@@ -49,10 +50,10 @@ func (r *rawWorkflow) toModel() *model.Workflow {
 		Jobs: make(map[string]*model.Job, len(r.Jobs)),
 	}
 	if r.On.Push != nil {
-		wf.On.Push = &model.BranchFilter{Branches: r.On.Push.Branches}
+		wf.On.Push = &model.BranchFilter{Branches: r.On.Push.Branches, Ignore: r.On.Push.Ignore}
 	}
 	if r.On.MergeRequest != nil {
-		wf.On.MergeRequest = &model.BranchFilter{Branches: r.On.MergeRequest.Branches}
+		wf.On.MergeRequest = &model.BranchFilter{Branches: r.On.MergeRequest.Branches, Ignore: r.On.MergeRequest.Ignore}
 	}
 	for name, rj := range r.Jobs {
 		steps := make([]model.Step, len(rj.Steps))

@@ -22,15 +22,24 @@ type Triggers struct {
 	MergeRequest *BranchFilter
 }
 
-// BranchFilter restricts a trigger to a set of branches. An empty (or nil)
-// Branches slice matches every branch.
+// BranchFilter restricts a trigger to a set of branches. Branches is an
+// allowlist (empty or nil matches every branch); Ignore is a denylist that
+// wins over the allowlist. Validation rejects declaring both in the YAML;
+// slice nil-ness (key absent vs present-but-empty) is preserved from the YAML
+// so that check can tell them apart.
 type BranchFilter struct {
 	Branches []string
+	Ignore   []string
 }
 
-// Matches reports whether branch is allowed by the filter. A filter with no
-// branches matches everything.
+// Matches reports whether branch is allowed by the filter: never when branch
+// is in Ignore, otherwise when Branches is empty or contains it.
 func (f *BranchFilter) Matches(branch string) bool {
+	for _, b := range f.Ignore {
+		if b == branch {
+			return false
+		}
+	}
 	if len(f.Branches) == 0 {
 		return true
 	}

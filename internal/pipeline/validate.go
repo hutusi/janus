@@ -30,6 +30,17 @@ func validate(wf *model.Workflow) error {
 	if wf.On.Push == nil && wf.On.MergeRequest == nil {
 		return errors.New("`on` must declare at least one of `push` or `merge_request`")
 	}
+	// A trigger takes `branches` (allowlist) or `branches-ignore` (denylist),
+	// never both. Slice nil-ness survives toModel, so nil vs non-nil
+	// distinguishes "key absent" from "key present" (even `branches: []`).
+	for _, tr := range []struct {
+		key string
+		f   *model.BranchFilter
+	}{{"push", wf.On.Push}, {"merge_request", wf.On.MergeRequest}} {
+		if tr.f != nil && tr.f.Branches != nil && tr.f.Ignore != nil {
+			return fmt.Errorf("`on.%s` cannot set both `branches` and `branches-ignore`", tr.key)
+		}
+	}
 	if len(wf.Jobs) == 0 {
 		return errors.New("at least one job is required under `jobs`")
 	}

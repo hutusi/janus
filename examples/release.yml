@@ -1,7 +1,12 @@
-# Release pipeline — build, then publish the output to a separate "pages" repo.
+# Release pipeline — on every update to master (e.g. a merged merge request),
+# build, then publish the output to a separate "pages" repo.
 #
-# Same trigger and build job as build.yml, plus a deploy job. All jobs in a run share
-# one workspace directory, so `deploy` sees the `out/` produced by `build`.
+# Janus ignores the GitLab MR "merge" action and fires on the resulting push, so the
+# trigger is `push`, not `merge_request`. Janus can't tell a merge-commit push from a
+# direct push to master — enforce "merged MR only" with branch protection on master.
+#
+# Same build job as build.yml, pinned to master, plus a deploy job. All jobs in a run
+# share one workspace directory, so `deploy` sees the `out/` produced by `build`.
 #
 # Auth: Janus forwards only PATH/HOME/LANG/LC_ALL/TZ/TMPDIR to steps (no secrets, no
 # SSH_AUTH_SOCK). Configure a passphraseless SSH deploy key for the Janus host user
