@@ -100,6 +100,7 @@ func runServe(args []string) error {
 	fs.Int("max-parallel-runs", def.MaxParallelRuns, "maximum runs to execute concurrently")
 	fs.Duration("step-timeout", time.Duration(def.StepTimeout), "fail any step that runs longer than this (0 = no timeout)")
 	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
+	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run) or "persistent" (one reusable dir per repo)`)
 	fs.String("gitlab-secret", "", "GitLab webhook secret token (overrides config/env; enables /webhooks/gitlab)")
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
 	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
@@ -116,6 +117,9 @@ func runServe(args []string) error {
 	}
 	cfg.OverlayEnv()
 	cfg.OverlayFlags(fs)
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if cfgPath != "" {
@@ -158,7 +162,11 @@ func runServe(args []string) error {
 		KeepWS:       cfg.KeepWorkspaces,
 		MaxRuns:      cfg.MaxParallelRuns,
 		Allowlist:    allow,
+		Persistent:   cfg.WorkspaceStrategy == "persistent",
 	})
+	if cfg.WorkspaceStrategy == "persistent" {
+		logger.Info("persistent workspaces enabled; builds reuse per-repo directories (not hermetic)")
+	}
 	if err := rn.Sweep(); err != nil {
 		logger.Warn("workspace sweep failed", "err", err)
 	}

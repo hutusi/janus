@@ -46,30 +46,43 @@ func Resolve(explicit string) string {
 
 // Config is the full set of `janus serve` settings.
 type Config struct {
-	Addr            string   `yaml:"addr"`
-	DataDir         string   `yaml:"data_dir"`
-	WorkspaceRoot   string   `yaml:"workspace_root"`
-	PipelinePath    string   `yaml:"pipeline_path"`
-	MaxParallelJobs int      `yaml:"max_parallel_jobs"`
-	MaxParallelRuns int      `yaml:"max_parallel_runs"`
-	StepTimeout     Duration `yaml:"step_timeout"`
-	KeepWorkspaces  bool     `yaml:"keep_workspaces"`
-	GitLabSecret    string   `yaml:"gitlab_secret"`
-	APIToken        string   `yaml:"api_token"`
-	AllowRepos      []string `yaml:"allow_repos"`
+	Addr              string   `yaml:"addr"`
+	DataDir           string   `yaml:"data_dir"`
+	WorkspaceRoot     string   `yaml:"workspace_root"`
+	PipelinePath      string   `yaml:"pipeline_path"`
+	MaxParallelJobs   int      `yaml:"max_parallel_jobs"`
+	MaxParallelRuns   int      `yaml:"max_parallel_runs"`
+	StepTimeout       Duration `yaml:"step_timeout"`
+	KeepWorkspaces    bool     `yaml:"keep_workspaces"`
+	WorkspaceStrategy string   `yaml:"workspace_strategy"`
+	GitLabSecret      string   `yaml:"gitlab_secret"`
+	APIToken          string   `yaml:"api_token"`
+	AllowRepos        []string `yaml:"allow_repos"`
 }
 
 // Defaults returns the built-in configuration used when nothing overrides it.
 func Defaults() Config {
 	return Config{
-		Addr:            ":8080",
-		DataDir:         "",
-		WorkspaceRoot:   filepath.Join(os.TempDir(), "janus-workspaces"),
-		PipelinePath:    ".janus/ci.yml",
-		MaxParallelJobs: 4,
-		MaxParallelRuns: 4,
-		StepTimeout:     0,
-		KeepWorkspaces:  false,
+		Addr:              ":8080",
+		DataDir:           "",
+		WorkspaceRoot:     filepath.Join(os.TempDir(), "janus-workspaces"),
+		PipelinePath:      ".janus/ci.yml",
+		MaxParallelJobs:   4,
+		MaxParallelRuns:   4,
+		StepTimeout:       0,
+		KeepWorkspaces:    false,
+		WorkspaceStrategy: "fresh",
+	}
+}
+
+// Validate rejects setting values that decoding cannot catch structurally.
+// Call it after all overlays so flag- and env-supplied values are checked too.
+func (c Config) Validate() error {
+	switch c.WorkspaceStrategy {
+	case "", "fresh", "persistent": // "" = fresh
+		return nil
+	default:
+		return fmt.Errorf("workspace_strategy: %q is not valid (use \"fresh\" or \"persistent\")", c.WorkspaceStrategy)
 	}
 }
 
@@ -134,6 +147,8 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.StepTimeout = Duration(g.Get().(time.Duration))
 		case "keep-workspaces":
 			c.KeepWorkspaces = g.Get().(bool)
+		case "workspace-strategy":
+			c.WorkspaceStrategy = g.Get().(string)
 		case "gitlab-secret":
 			c.GitLabSecret = g.Get().(string)
 		case "api-token":

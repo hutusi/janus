@@ -89,6 +89,50 @@ func newTestServerAllow(t *testing.T, entries ...string) *httptest.Server {
 	return ts
 }
 
+// newTestServerPersistent builds an allow-all server whose runner reuses one
+// workspace per repo (workspace_strategy: persistent).
+func newTestServerPersistent(t *testing.T) *httptest.Server {
+	t.Helper()
+	st := store.NewMemory()
+	eng := engine.New(st)
+	allow, err := allowlist.New([]string{"*"})
+	if err != nil {
+		t.Fatalf("allowlist.New: %v", err)
+	}
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow, Persistent: true})
+	srv := New(st, rn, "test",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithAPIToken(testAPIToken),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// commitFileIn writes path/content in the repo at dir and commits it,
+// returning the new HEAD SHA.
+func commitFileIn(t *testing.T, dir, path, content string) (sha string) {
+	t.Helper()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	full := filepath.Join(dir, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "update "+path)
+	return git("rev-parse", "HEAD")
+}
+
 // apiGet issues an authenticated GET (harmless on open routes).
 func apiGet(t *testing.T, url string) *http.Response {
 	t.Helper()
@@ -329,6 +373,73 @@ func TestTriggerPipelinePathRejected(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("pipeline_path %q: status = %d, want 400", p, resp.StatusCode)
 		}
+	}
+}
+
+func TestPersistentWorkspaceEndToEnd(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha1 := initGitRepo(t, `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: echo "build v1"
+`)
+	ts := newTestServerPersistent(t)
+
+	trigger := func(sha string) *model.Run {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/heads/main", "branch": "main"})
+		resp := postTrigger(t, ts, string(body))
+		if resp.StatusCode != http.StatusAccepted {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			t.Fatalf("trigger status = %d, want 202; body=%s", resp.StatusCode, b)
+		}
+		var tr struct {
+			RunID string `json:"run_id"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&tr)
+		_ = resp.Body.Close()
+		return pollRun(t, ts, tr.RunID, 15*time.Second)
+	}
+
+	run1 := trigger(sha1)
+	if run1.Status != model.StatusSuccess {
+		t.Fatalf("run1 status = %s, want success", run1.Status)
+	}
+	if base := filepath.Base(run1.WorkspaceDir); !strings.HasPrefix(base, "persist-") {
+		t.Fatalf("run1 workspace = %q, want a persist-* dir", run1.WorkspaceDir)
+	}
+	// Simulate a build cache: an untracked file in the persistent workspace.
+	marker := filepath.Join(run1.WorkspaceDir, "node_modules_marker")
+	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// New commit in the source repo; the next run must land it in the SAME dir.
+	sha2 := commitFileIn(t, repo, ".janus/ci.yml", `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: echo "build v2"
+`)
+	run2 := trigger(sha2)
+	if run2.Status != model.StatusSuccess {
+		t.Fatalf("run2 status = %s, want success", run2.Status)
+	}
+	if run2.WorkspaceDir != run1.WorkspaceDir {
+		t.Errorf("run2 workspace = %q, want reuse of %q", run2.WorkspaceDir, run1.WorkspaceDir)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("untracked cache marker should survive between runs: %v", err)
+	}
+	logs := getText(t, ts.URL+"/api/runs/"+run2.ID+"/logs")
+	if !strings.Contains(logs, "build v2") {
+		t.Errorf("run2 logs = %q, want the updated pipeline's output (fetch+reset landed)", logs)
 	}
 }
 

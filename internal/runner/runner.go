@@ -9,6 +9,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -36,12 +38,16 @@ type Runner struct {
 	wsRoot       string
 	pipelinePath string
 	keepWS       bool
+	persistent   bool
 	allow        allowlist.Allowlist
 
 	ctx    context.Context // root context for run execution; cancelled on Shutdown
 	cancel context.CancelFunc
 	sem    chan struct{}  // caps concurrently executing runs
 	wg     sync.WaitGroup // tracks in-flight runs for graceful shutdown
+
+	locksMu sync.Mutex             // guards locks
+	locks   map[string]*sync.Mutex // per-repo workspace locks (persistent strategy)
 }
 
 // Options configures a Runner.
@@ -49,6 +55,7 @@ type Options struct {
 	WSRoot       string              // where per-run workspaces are created
 	PipelinePath string              // in-repo path to the pipeline file (an event may override it)
 	KeepWS       bool                // keep workspaces after runs (debugging)
+	Persistent   bool                // one reusable workspace per repo, updated in place (workspace_strategy: persistent)
 	MaxRuns      int                 // max concurrent runs (<=0 means 4)
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
 }
@@ -75,16 +82,41 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		wsRoot:       opts.WSRoot,
 		pipelinePath: opts.PipelinePath,
 		keepWS:       opts.KeepWS,
+		persistent:   opts.Persistent,
 		allow:        opts.Allowlist,
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
+		locks:        make(map[string]*sync.Mutex),
 	}
 }
 
+// repoLock returns the mutex serializing the persistent workspace of repoURL.
+func (r *Runner) repoLock(repoURL string) *sync.Mutex {
+	r.locksMu.Lock()
+	defer r.locksMu.Unlock()
+	mu, ok := r.locks[repoURL]
+	if !ok {
+		mu = &sync.Mutex{}
+		r.locks[repoURL] = mu
+	}
+	return mu
+}
+
+// persistDirName is the stable directory name for a repo's persistent
+// workspace. Hex-only, so it is safe on every filesystem. It is keyed on the
+// exact repo URL string — the same string that keys the repo lock, so URL
+// variants of one repo get separate (duplicated) caches, never a shared
+// unlocked directory.
+func persistDirName(repoURL string) string {
+	sum := sha256.Sum256([]byte(repoURL))
+	return "persist-" + hex.EncodeToString(sum[:8])
+}
+
 // Sweep removes leftover workspaces from a previous process (crash recovery).
-// Call once at startup, before serving. Only directories Janus created
-// (run-*) are removed.
+// Call once at startup, before serving. Only per-run directories (run-*) are
+// removed; persistent per-repo workspaces (persist-*) deliberately survive
+// restarts — their caches are the point.
 func (r *Runner) Sweep() error {
 	matches, err := filepath.Glob(filepath.Join(r.wsRoot, "run-*"))
 	if err != nil {
@@ -113,10 +145,13 @@ func (r *Runner) Shutdown(grace time.Duration) {
 
 // Trigger checks out the repo at ev's commit, parses the pipeline (the
 // configured path, or ev.PipelinePath when set), and — if the event matches —
-// records and asynchronously executes a run. The workspace is removed when the
-// run finishes. A repo not on the allowlist returns ErrRepoNotAllowed (before
-// any disk work); an invalid pipeline path and checkout/parse failures return
-// an error; a non-matching event returns Result{Started: false} with nil error.
+// records and asynchronously executes a run. Fresh workspaces are removed when
+// the run finishes; under the persistent strategy the repo's reusable
+// workspace is updated in place and kept (a concurrent run of the same repo
+// falls back to a fresh workspace). A repo not on the allowlist returns
+// ErrRepoNotAllowed (before any disk work); an invalid pipeline path and
+// checkout/parse failures return an error; a non-matching event returns
+// Result{Started: false} with nil error.
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
@@ -128,43 +163,67 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if err := os.MkdirAll(r.wsRoot, 0o700); err != nil {
 		return Result{}, err
 	}
-	wsDir, err := os.MkdirTemp(r.wsRoot, "run-*")
-	if err != nil {
-		return Result{}, err
+
+	// Workspace selection. Under the persistent strategy each repo has one
+	// reusable directory, serialized by a per-repo try-lock; if another run of
+	// the same repo holds it, this run falls back to a fresh per-run dir —
+	// occasionally slower, never blocking the caller.
+	var wsDir string
+	reuse := false
+	unlock := func() {}
+	if r.persistent {
+		if mu := r.repoLock(ev.RepoURL); mu.TryLock() {
+			unlock = mu.Unlock
+			reuse = true
+			wsDir = filepath.Join(r.wsRoot, persistDirName(ev.RepoURL))
+		}
 	}
+	if !reuse {
+		var err error
+		if wsDir, err = os.MkdirTemp(r.wsRoot, "run-*"); err != nil {
+			return Result{}, err
+		}
+	}
+
 	ws, err := workspace.Checkout(ctx, workspace.Options{
-		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref, Keep: r.keepWS,
+		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref,
+		Keep: r.keepWS || reuse, Reuse: reuse,
 	})
 	if err != nil {
+		unlock()
 		return Result{}, fmt.Errorf("checkout: %w", err)
 	}
+	// Every pre-execution exit must release both the workspace and the lock —
+	// a leaked repo lock would silently wedge the repo onto the fallback path.
+	abort := func() { _ = ws.Cleanup(); unlock() }
 
 	data, err := os.ReadFile(filepath.Join(ws.Dir, pipelinePath))
 	if err != nil {
-		_ = ws.Cleanup()
+		abort()
 		return Result{}, fmt.Errorf("read %s: %w", pipelinePath, err)
 	}
 	wf, err := pipeline.Parse(data)
 	if err != nil {
-		_ = ws.Cleanup()
+		abort()
 		return Result{}, fmt.Errorf("pipeline %s: %w", pipelinePath, err)
 	}
 
 	if !matches(wf, ev) {
-		_ = ws.Cleanup()
+		abort()
 		return Result{Started: false, Reason: fmt.Sprintf("event %s on %q does not match the workflow's on:", ev.Kind, ev.Branch)}, nil
 	}
 
 	run := r.engine.NewRun(wf, ev, ws.Dir)
 	if err := r.store.SaveRun(run); err != nil {
-		_ = ws.Cleanup()
+		abort()
 		return Result{}, err
 	}
 
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		defer func() { _ = ws.Cleanup() }()
+		defer unlock()                      // after cleanup: dir settled before the next run can claim it
+		defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
 		// Wait for a run slot; the run stays Pending until one frees.
 		r.sem <- struct{}{}
 		defer func() { <-r.sem }()
