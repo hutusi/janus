@@ -66,14 +66,14 @@ func TestPipelineFile(t *testing.T) {
 		wantErr  bool
 	}{
 		{"empty falls back to default", def, "", filepath.FromSlash(".janus/ci.yml"), false},
-		{"override in the pipeline dir", def, ".janus/release.yml", filepath.FromSlash(".janus/release.yml"), false},
-		{"override in a subdirectory", def, ".janus/nightly/build.yml", filepath.FromSlash(".janus/nightly/build.yml"), false},
-		{"override outside the pipeline dir rejected", def, "examples/build.yml", "", true},
-		{"dot-dot escape from the pipeline dir rejected", def, ".janus/../examples/evil.yml", "", true},
-		{"parent escape rejected", def, "../evil.yml", "", true},
-		{"nested parent escape rejected", def, "../../etc/evil.yml", "", true},
+		{"bare name resolves in the pipeline dir", def, "release.yml", filepath.FromSlash(".janus/release.yml"), false},
+		{"subdirectory resolves in the pipeline dir", def, "nightly/build.yml", filepath.FromSlash(".janus/nightly/build.yml"), false},
+		{"full path resolves under the dir, not from the root", def, ".janus/release.yml", filepath.FromSlash(".janus/.janus/release.yml"), false},
+		{"escape from the pipeline dir rejected", def, "../examples/evil.yml", "", true},
+		{"nested escape rejected", def, "../../etc/evil.yml", "", true},
+		{"the directory itself rejected", def, ".", "", true},
 		{"absolute path rejected", def, abs, "", true},
-		{"root-level default allows any repo path", "janus.yml", "ci/other.yml", filepath.FromSlash("ci/other.yml"), false},
+		{"root-level default resolves from the root", "janus.yml", "ci/other.yml", filepath.FromSlash("ci/other.yml"), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

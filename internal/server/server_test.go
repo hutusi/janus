@@ -291,15 +291,15 @@ jobs:
 		return pollRun(t, ts, tr.RunID, 15*time.Second)
 	}
 
-	// pipeline_path selects the alternate file.
-	run := trigger(".janus/release.yml")
+	// pipeline_path selects the alternate file, relative to the pipeline dir.
+	run := trigger("release.yml")
 	if run.Status != model.StatusSuccess {
 		t.Fatalf("run status = %s, want success", run.Status)
 	}
 	if run.WorkflowName != "release" {
 		t.Errorf("workflow = %q, want %q", run.WorkflowName, "release")
 	}
-	if run.Event.PipelinePath != ".janus/release.yml" {
+	if run.Event.PipelinePath != "release.yml" {
 		t.Errorf("event pipeline_path = %q, want the override recorded", run.Event.PipelinePath)
 	}
 	if jr := findJob(run, "publish"); jr == nil || jr.Status != model.StatusSuccess {
@@ -322,7 +322,7 @@ jobs:
 func TestTriggerPipelinePathRejected(t *testing.T) {
 	ts := newTestServer(t)
 	// Rejection happens before checkout, so no git repo is needed.
-	for _, p := range []string{"../evil.yml", "examples/build.yml", filepath.Join(t.TempDir(), "evil.yml")} {
+	for _, p := range []string{"../evil.yml", filepath.Join(t.TempDir(), "evil.yml")} {
 		body, _ := json.Marshal(map[string]string{"repo_url": "/nonexistent/repo", "sha": "deadbeef", "pipeline_path": p})
 		resp := postTrigger(t, ts, string(body))
 		_ = resp.Body.Close()

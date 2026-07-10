@@ -84,8 +84,10 @@ type Event struct {
 	SHA      string    `json:"sha,omitempty"`   // commit to check out
 	Title    string    `json:"title,omitempty"` // commit/MR title, for display
 
-	// PipelinePath overrides the server-wide pipeline file for this trigger
-	// (manual API only; empty means the configured default).
+	// PipelinePath overrides the pipeline file for this trigger, relative to
+	// the configured file's directory, e.g. "release.yml" for
+	// .janus/release.yml (manual API only; empty means the configured
+	// default).
 	PipelinePath string `json:"pipeline_path,omitempty"`
 }
 
