@@ -28,6 +28,9 @@ testdata/         # YAML fixtures + captured webhook payloads
 | Target            | Purpose                                            |
 |-------------------|----------------------------------------------------|
 | `make build`      | Compile the single static binary                   |
+| `make install`    | Install the built binary to `$(PREFIX)/bin` (default `/usr/local/bin`) |
+| `make uninstall`  | Remove the installed binary                        |
+| `make install-service` | Provision the systemd service from the local build (Linux; wraps `deploy/install.sh --binary`) |
 | `make test`       | Run all tests                                       |
 | `make race`       | Run all tests under the race detector              |
 | `make cover`      | Tests with coverage + total                        |

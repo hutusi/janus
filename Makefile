@@ -2,14 +2,31 @@ BINARY  := janus
 PKG     := ./...
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test race cover fmt fmt-check vet lint lint-sh lint-unit ci clean
+.PHONY: build install uninstall install-service test race cover fmt fmt-check vet lint lint-sh lint-unit ci clean
 
 ## build: compile the single static binary
 build:
 	CGO_ENABLED=0 go build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/janus
+
+## install: install the built binary to $(BINDIR) (run `make build` first; sudo as needed)
+install:
+	@test -x $(BINARY) || { echo "no ./$(BINARY) binary — run 'make build' first"; exit 1; }
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 0755 $(BINARY) $(DESTDIR)$(BINDIR)/$(BINARY)
+
+## uninstall: remove the installed binary from $(BINDIR)
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/$(BINARY)
+
+## install-service: provision the systemd service from the local build (Linux; wraps deploy/install.sh)
+install-service:
+	@test -x $(BINARY) || { echo "no ./$(BINARY) binary — run 'make build' first"; exit 1; }
+	sudo deploy/install.sh --binary ./$(BINARY) $(INSTALL_FLAGS)
 
 ## test: run all tests
 test:
