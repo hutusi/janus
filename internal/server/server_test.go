@@ -322,7 +322,7 @@ jobs:
 func TestTriggerPipelinePathRejected(t *testing.T) {
 	ts := newTestServer(t)
 	// Rejection happens before checkout, so no git repo is needed.
-	for _, p := range []string{"../evil.yml", filepath.Join(t.TempDir(), "evil.yml")} {
+	for _, p := range []string{"../evil.yml", "examples/build.yml", filepath.Join(t.TempDir(), "evil.yml")} {
 		body, _ := json.Marshal(map[string]string{"repo_url": "/nonexistent/repo", "sha": "deadbeef", "pipeline_path": p})
 		resp := postTrigger(t, ts, string(body))
 		_ = resp.Body.Close()

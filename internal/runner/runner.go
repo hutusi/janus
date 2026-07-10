@@ -178,7 +178,10 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 // pipelineFile resolves the effective in-repo pipeline path for ev — its
 // override when set, otherwise def. The value must stay inside the (not yet
 // created) checkout, so absolute paths, Windows drive-relative paths, and
-// `..` escapes are rejected before any disk work.
+// `..` escapes are rejected before any disk work. An override is further
+// confined to def's directory (default .janus/): only YAML deliberately
+// placed with the pipelines is runnable, not every committed file that
+// happens to parse as one.
 func pipelineFile(def string, ev model.Event) (string, error) {
 	p := ev.PipelinePath
 	if p == "" {
@@ -188,6 +191,13 @@ func pipelineFile(def string, ev model.Event) (string, error) {
 	if filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" ||
 		clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("pipeline path %q must be a relative path inside the repository", p)
+	}
+	if ev.PipelinePath != "" {
+		dir := filepath.Dir(filepath.Clean(def))
+		rel, err := filepath.Rel(dir, clean)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("pipeline path %q must be inside %q, the configured pipeline file's directory", p, dir)
+		}
 	}
 	return clean, nil
 }

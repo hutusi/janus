@@ -15,7 +15,7 @@ type triggerRequest struct {
 	Branch       string `json:"branch"`
 	SHA          string `json:"sha"`
 	Ref          string `json:"ref"`
-	PipelinePath string `json:"pipeline_path"` // optional; default: the configured pipeline_path
+	PipelinePath string `json:"pipeline_path"` // optional; must be in the configured pipeline file's directory
 }
 
 // handleTrigger starts a run manually. It builds a normalized manual Event and

@@ -57,32 +57,38 @@ func TestTriggerRejectsDisallowedRepo(t *testing.T) {
 
 func TestPipelineFile(t *testing.T) {
 	abs := filepath.Join(t.TempDir(), "evil.yml")
+	def := ".janus/ci.yml"
 	tests := []struct {
 		name     string
+		def      string
 		override string
 		want     string
 		wantErr  bool
 	}{
-		{"empty falls back to default", "", filepath.FromSlash(".janus/ci.yml"), false},
-		{"override wins", ".janus/release.yml", filepath.FromSlash(".janus/release.yml"), false},
-		{"parent escape rejected", "../evil.yml", "", true},
-		{"nested parent escape rejected", "../../etc/evil.yml", "", true},
-		{"absolute path rejected", abs, "", true},
+		{"empty falls back to default", def, "", filepath.FromSlash(".janus/ci.yml"), false},
+		{"override in the pipeline dir", def, ".janus/release.yml", filepath.FromSlash(".janus/release.yml"), false},
+		{"override in a subdirectory", def, ".janus/nightly/build.yml", filepath.FromSlash(".janus/nightly/build.yml"), false},
+		{"override outside the pipeline dir rejected", def, "examples/build.yml", "", true},
+		{"dot-dot escape from the pipeline dir rejected", def, ".janus/../examples/evil.yml", "", true},
+		{"parent escape rejected", def, "../evil.yml", "", true},
+		{"nested parent escape rejected", def, "../../etc/evil.yml", "", true},
+		{"absolute path rejected", def, abs, "", true},
+		{"root-level default allows any repo path", "janus.yml", "ci/other.yml", filepath.FromSlash("ci/other.yml"), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := pipelineFile(".janus/ci.yml", model.Event{PipelinePath: tc.override})
+			got, err := pipelineFile(tc.def, model.Event{PipelinePath: tc.override})
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("pipelineFile(%q) = %q, want error", tc.override, got)
+					t.Fatalf("pipelineFile(%q, %q) = %q, want error", tc.def, tc.override, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("pipelineFile(%q): %v", tc.override, err)
+				t.Fatalf("pipelineFile(%q, %q): %v", tc.def, tc.override, err)
 			}
 			if got != tc.want {
-				t.Errorf("pipelineFile(%q) = %q, want %q", tc.override, got, tc.want)
+				t.Errorf("pipelineFile(%q, %q) = %q, want %q", tc.def, tc.override, got, tc.want)
 			}
 		})
 	}

@@ -32,7 +32,7 @@ existing file without `--force`); see the
 | `addr` | `--addr` | `:8080` | HTTP listen address. |
 | `data_dir` | `--data-dir` | _(empty)_ | Directory for persistent run history. **Empty = in-memory** (lost on restart). |
 | `workspace_root` | `--workspace-root` | `$TMPDIR/janus-workspaces` | Where per-run checkouts are created (and swept on startup). |
-| `pipeline_path` | `--pipeline-path` | `.janus/ci.yml` | In-repo path to the pipeline file. A manual trigger may override it per run via the request's `pipeline_path` field; the value must stay inside the checkout (relative, no `..` escape), so callers can only select **committed** files. Webhooks always use the configured path. |
+| `pipeline_path` | `--pipeline-path` | `.janus/ci.yml` | In-repo path to the pipeline file. A manual trigger may override it per run via the request's `pipeline_path` field; the override must live in the configured file's **directory** (`.janus/` by default, subdirectories included), so only files deliberately placed with the pipelines are runnable — not every committed YAML that happens to parse as one. Webhooks always use the configured path. |
 | `max_parallel_jobs` | `--max-parallel-jobs` | `4` | Max jobs running concurrently **within** one run. |
 | `max_parallel_runs` | `--max-parallel-runs` | `4` | Max runs executing concurrently (excess runs queue as `pending`). |
 | `step_timeout` | `--step-timeout` | `0s` | Fail any step running longer than this (e.g. `"10m"`). `0` disables. |
