@@ -106,8 +106,36 @@ func TestExampleYAMLParses(t *testing.T) {
 	// The shipped starter config must satisfy the strict decoder, so `janus
 	// init` never produces a file that `janus serve` then rejects.
 	path := writeFile(t, ExampleYAML)
-	if _, err := Load(path); err != nil {
+	cfg, err := Load(path)
+	if err != nil {
 		t.Fatalf("embedded example.yml does not parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("embedded example.yml does not validate: %v", err)
+	}
+}
+
+func TestValidateWorkspaceStrategy(t *testing.T) {
+	tests := []struct {
+		value   string
+		wantErr bool
+	}{
+		{"", false},
+		{"fresh", false},
+		{"persistent", false},
+		{"Persistent", true}, // case-sensitive, like every other enum value
+		{"incremental", true},
+	}
+	for _, tc := range tests {
+		cfg := Defaults()
+		cfg.WorkspaceStrategy = tc.value
+		err := cfg.Validate()
+		if tc.wantErr && err == nil {
+			t.Errorf("Validate(%q) = nil, want error", tc.value)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("Validate(%q) = %v, want nil", tc.value, err)
+		}
 	}
 }
 
@@ -131,7 +159,8 @@ func TestOverlayFlagsOnlyAppliesSetFlags(t *testing.T) {
 	fs.Int("max-parallel-jobs", 4, "")
 	fs.Duration("step-timeout", 0, "")
 	fs.String("data-dir", "", "")
-	if err := fs.Parse([]string{"--addr", ":7777", "--step-timeout", "5s"}); err != nil {
+	fs.String("workspace-strategy", "fresh", "")
+	if err := fs.Parse([]string{"--addr", ":7777", "--step-timeout", "5s", "--workspace-strategy", "persistent"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -151,5 +180,8 @@ func TestOverlayFlagsOnlyAppliesSetFlags(t *testing.T) {
 	}
 	if cfg.MaxParallelJobs != 9 {
 		t.Errorf("max_parallel_jobs = %d, want 9 (unset flag preserved)", cfg.MaxParallelJobs)
+	}
+	if cfg.WorkspaceStrategy != "persistent" {
+		t.Errorf("workspace_strategy = %q, want persistent (flag wins)", cfg.WorkspaceStrategy)
 	}
 }

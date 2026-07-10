@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/hutusi/janus/internal/allowlist"
 	"github.com/hutusi/janus/internal/engine"
@@ -13,12 +16,59 @@ import (
 	"github.com/hutusi/janus/internal/store"
 )
 
+// initGitRepo creates a repo containing .janus/ci.yml and returns its path +
+// HEAD SHA. (Small enough that runner, workspace, and server tests each keep
+// their own copy rather than sharing a test utility package.)
+func initGitRepo(t *testing.T, pipeline string) (dir, sha string) {
+	t.Helper()
+	dir = t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "user.email", "t@e.com")
+	git("config", "user.name", "T")
+	if err := os.MkdirAll(filepath.Join(dir, ".janus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".janus", "ci.yml"), []byte(pipeline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "init")
+	return dir, git("rev-parse", "HEAD")
+}
+
+// waitRun polls the store until run id reaches a terminal status.
+func waitRun(t *testing.T, st store.Store, id string, timeout time.Duration) *model.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		run, err := st.GetRun(id)
+		if err == nil && run.Status.Terminal() {
+			return run
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s did not finish within %s", id, timeout)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestSweepRemovesOrphanWorkspaces(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "run-abc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "keep-me"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "persist-abc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	st := store.NewMemory()
@@ -31,6 +81,107 @@ func TestSweepRemovesOrphanWorkspaces(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "keep-me")); err != nil {
 		t.Error("non run-* directory should be left alone")
+	}
+	if _, err := os.Stat(filepath.Join(root, "persist-abc")); err != nil {
+		t.Error("persist-* workspace should survive the sweep")
+	}
+}
+
+const echoPipeline = `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: echo building
+`
+
+func TestTriggerPersistentUsesRepoDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Persistent: true})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	res, err := r.Trigger(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if base := filepath.Base(run.WorkspaceDir); !strings.HasPrefix(base, "persist-") {
+		t.Fatalf("workspace dir = %q, want a persist-* dir", run.WorkspaceDir)
+	}
+	if _, err := os.Stat(run.WorkspaceDir); err != nil {
+		t.Fatalf("persistent workspace should survive the run: %v", err)
+	}
+
+	// A second trigger reuses the same directory, and untracked files survive.
+	marker := filepath.Join(run.WorkspaceDir, "marker")
+	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := r.Trigger(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	run2 := waitRun(t, st, res2.RunID, 15*time.Second)
+	if run2.WorkspaceDir != run.WorkspaceDir {
+		t.Errorf("second run dir = %q, want the same %q", run2.WorkspaceDir, run.WorkspaceDir)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("untracked marker should survive between runs: %v", err)
+	}
+}
+
+func TestTriggerPersistentContentionFallsBackToFresh(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Persistent: true})
+
+	// Simulate a run of the same repo holding the persistent workspace.
+	mu := r.repoLock(repo)
+	mu.Lock()
+	defer mu.Unlock()
+
+	res, err := r.Trigger(context.Background(), model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger under contention: %v", err)
+	}
+	// Completes without ever blocking on the held lock, in a fresh run-* dir.
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if base := filepath.Base(run.WorkspaceDir); !strings.HasPrefix(base, "run-") {
+		t.Errorf("workspace dir = %q, want a fresh run-* dir under contention", run.WorkspaceDir)
+	}
+	// Fresh fallback dirs are cleaned up after the run as usual.
+	waitGone(t, run.WorkspaceDir, 5*time.Second)
+}
+
+// waitGone polls until path no longer exists (cleanup is async after Execute).
+func waitGone(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still exists after %s", path, timeout)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 

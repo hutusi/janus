@@ -12,7 +12,7 @@ internal/
   model              domain types: spec (Workflow/Job/Step), Event, runtime (Run/JobRun/StepRun)
   pipeline           YAML parse + strict validation + interpolation   (pure, no I/O)
   engine             DAG build, scheduler, host-process executor
-  workspace          per-run shallow git checkout + cleanup
+  workspace          per-run shallow git checkout + cleanup, or in-place reuse
   provider           webhook providers (GitLab) -> normalized Event
   runner             checkout -> parse -> match -> execute coordinator
   store              run/log persistence: Memory and File
@@ -78,7 +78,11 @@ trigger (webhook / manual / CLI)
   serializes a consistent snapshot. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
 - Workspaces are per-run and removed on completion; a startup **sweep** clears
-  orphans left by a crash.
+  orphans left by a crash. Under `workspace_strategy: persistent`, each repo
+  instead gets one reusable `persist-*` directory, updated by fetch +
+  hard-reset and serialized by a per-repo **try-lock** — a concurrent trigger
+  for the same repo falls back to a fresh per-run dir rather than blocking.
+  `persist-*` dirs deliberately survive restarts and the sweep.
 - **No isolation:** jobs are host processes and can do anything the `janus` user
   can. Run as a dedicated unprivileged user. Containers are out of scope.
 

@@ -37,6 +37,7 @@ existing file without `--force`); see the
 | `max_parallel_runs` | `--max-parallel-runs` | `4` | Max runs executing concurrently (excess runs queue as `pending`). |
 | `step_timeout` | `--step-timeout` | `0s` | Fail any step running longer than this (e.g. `"10m"`). `0` disables. |
 | `keep_workspaces` | `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
+| `workspace_strategy` | `--workspace-strategy` | `"fresh"` | `"fresh"`: a new directory per run, removed afterward. `"persistent"`: one reusable directory per repo — see [Persistent workspaces](#persistent-workspaces). Any other value is a startup error. |
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
 | `allow_repos` | `--allow-repos` (comma-separated) | _(empty)_ | Repositories permitted to run. See "Repository allowlist" below. |
@@ -89,6 +90,33 @@ allow_repos:
   - https://gitlab.example.com/acme
   - https://gitlab.example.com/platform
 ```
+
+### Persistent workspaces
+
+`workspace_strategy: "persistent"` gives each repository **one reusable
+workspace** at `<workspace_root>/persist-<hash-of-repo-URL>` instead of a fresh
+directory per run. A trigger updates it in place — `git fetch` plus
+`git reset --hard` to the requested commit — so tracked files always match the
+commit, while **untracked files survive**: `node_modules`, build caches,
+incremental-compiler state. That's the point — repeat builds skip cold
+dependency installs.
+
+What you trade and how it behaves:
+
+- **Not hermetic.** A build can be affected by leftovers from previous runs.
+  Delete the repo's `persist-*` directory any time to force a clean rebuild —
+  the next run recreates it. (Any git failure in the reuse path — a corrupt
+  directory, a stale lock file, an unfetchable commit — also triggers an
+  automatic rebuild from scratch, at the cost of one cold build.)
+- **Same-repo runs are serialized.** A trigger that arrives while another run
+  of the same repo is building falls back to a fresh per-run directory for
+  that one run — correct, just without the caches. Different repos are
+  unaffected and run in parallel as usual.
+- **Dirs survive restarts** and the startup sweep, and grow over time (fetched
+  history plus whatever your builds leave behind).
+- `keep_workspaces` still governs only the fresh/fallback `run-*` directories.
+- A finished run's recorded `workspace_dir` points at a directory that later
+  runs of the same repo will mutate.
 
 ## `janus run [flags] <dir>` / `janus run --repo ...`
 
