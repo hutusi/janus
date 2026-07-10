@@ -66,6 +66,23 @@ not disable the hook). A started run returns `202` with `{"run_id"}`.
 | 401  | Secret token mismatch. |
 | 404  | `gitlab` provider not configured (no `--gitlab-secret`). |
 
+## Multiple repositories
+
+One Janus server serves any number of projects — there is **no per-repo
+registration**. Every delivery carries its repository's clone URL, and Janus
+clones *that* repo for *that* run, reading the pipeline committed **in it**
+(`pipeline_path`, default `.janus/ci.yml`) — so each project defines its own
+pipeline simply by committing one. To add a project:
+
+1. Point its webhook at the **same** URL and secret as every other project.
+2. Make sure its URL passes `allow_repos` (a group prefix covers a whole team).
+3. Commit its `.janus/ci.yml`.
+
+The single shared secret is by design: a leaked secret can only fake events for
+allowlisted repositories, which run only their own committed pipelines at
+commits that actually exist — worst case is a build of legitimate code, not
+code injection. Rotate it by editing `janus.env` and restarting.
+
 ## Restricting which repos can run
 
 Janus runs the triggered repo's pipeline as **host processes with no isolation**.

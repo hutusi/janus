@@ -136,8 +136,9 @@ janus serve --data-dir /var/lib/janus --gitlab-secret "$(openssl rand -hex 24)"
 ```
 
 Push and merge-request events trigger runs that are matched against each
-workflow's `on:` filters. With `--data-dir`, run history and logs survive
-restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
+workflow's `on:` filters. Any number of repositories can share one server —
+each runs its own committed pipeline. With `--data-dir`, run history and logs
+survive restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
 
 ## Pipeline format (target)
 
