@@ -18,7 +18,7 @@ Janus loads **one** pipeline file per repository per trigger — by default
   builds every master update, and run the release explicitly when you want to publish:
 
   ```sh
-  janus run --pipeline-path .janus/release.yml .
+  janus run --file .janus/release.yml .
   ```
 
 - **Build + deploy on every master merge** — use `release.yml` as your `.janus/ci.yml`.
