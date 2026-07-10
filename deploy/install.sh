@@ -13,8 +13,9 @@
 # manual and are pointed to at the end.
 #
 # Usage:
-#   sudo ./deploy/install.sh [install|upgrade] [options]
+#   sudo ./deploy/install.sh [install|upgrade|uninstall] [options]
 #   sudo ./deploy/install.sh --binary ./janus   # offline: install a local build
+#   sudo ./deploy/install.sh uninstall          # remove service+binary, keep config/state
 #   ./deploy/install.sh --dry-run               # preview, no root or Linux needed
 # Run --help for the option list, or read docs/deployment.md for the walkthrough.
 
@@ -42,6 +43,7 @@ DRY_RUN=0
 ALLOW_REPOS=""   # newline-separated, built up from repeated --allow-repo
 ARCH=""
 BINARY=""        # local binary to install (offline); empty = download a release
+PURGE=0          # uninstall only: also remove config/secrets, state, and the user
 
 # --- helpers ---------------------------------------------------------------
 log()  { printf '==> %s\n' "$*"; }
@@ -61,7 +63,7 @@ usage() {
 	cat <<EOF
 Janus scripted installer — provision Janus as a systemd service.
 
-Usage: sudo ./deploy/install.sh [install|upgrade] [options]
+Usage: sudo ./deploy/install.sh [install|upgrade|uninstall] [options]
 
 Options:
   --allow-repo <url>   allow a repo/group URL prefix (repeatable; seeds allow_repos)
@@ -71,12 +73,16 @@ Options:
   --addr <host:port>   listen address (default: 127.0.0.1:8080)
   --prefix <dir>       install the binary here (default: /usr/local/bin)
   --no-gen-secrets     do not auto-generate secrets; leave janus.env blank
+  --purge              with uninstall: also remove config/secrets, run history,
+                       and the '$USER_NAME' user (default keeps them all)
   --dry-run            print the planned actions without changing anything
   -h, --help           show this help
 
 install (default)      full provision: binary, user, config, secrets, unit, start
 upgrade                re-download + checksum-verify the binary, then restart
                        (leaves the user, config and secrets untouched)
+uninstall              stop + disable the service, remove the unit and binary;
+                       keeps $CONFIG_DIR, $STATE_DIR and the user unless --purge
 
 Automates steps 1-5 of docs/deployment.md. TLS and the GitLab webhook stay
 manual — see that guide.
@@ -111,6 +117,12 @@ check_preconditions() {
 	[ "$(uname -s)" = "Linux" ] || err "this installer targets Linux systemd hosts (found $(uname -s))"
 	[ "$(id -u)" = "0" ] || err "must run as root — re-run with: sudo $0 $MODE ..."
 	[ -d /run/systemd/system ] || err "systemd not detected (/run/systemd/system is missing)"
+
+	if [ "$MODE" = "uninstall" ]; then
+		require_tools systemctl
+		[ "$PURGE" -eq 0 ] || require_tools userdel
+		return
+	fi
 
 	# curl/sha256sum are only needed to download + verify a release; a local
 	# --binary install needs neither, keeping air-gapped hosts happy.
@@ -308,6 +320,41 @@ verify_service() {
 	warn "healthz did not respond at $url yet — inspect with: journalctl -u janus -e"
 }
 
+# Reverse of install: stop and remove the service and binary. Keeps the config
+# (with its secrets), the run history, and the service user unless --purge —
+# uninstall should not destroy data or credentials by surprise, and keeping
+# them makes a later reinstall painless (install never overwrites them).
+uninstall_service() {
+	if [ "$DRY_RUN" -eq 1 ] || [ -f "$UNIT_PATH" ]; then
+		run systemctl disable --now janus || true
+		run rm -f "$UNIT_PATH"
+		run systemctl daemon-reload
+	else
+		log "no unit at $UNIT_PATH — skipping service removal"
+	fi
+	run rm -f "$PREFIX/janus"
+
+	if [ "$PURGE" -eq 1 ]; then
+		run rm -rf "$STATE_DIR"
+		run rm -rf "$CONFIG_DIR"
+		if [ "$DRY_RUN" -eq 1 ] || id "$USER_NAME" >/dev/null 2>&1; then
+			run userdel "$USER_NAME"
+		fi
+		log "uninstalled and purged: service, binary, $CONFIG_DIR, $STATE_DIR, user '$USER_NAME'"
+		return
+	fi
+
+	cat <<EOF
+
+Janus is uninstalled (service + binary removed).
+
+Kept — remove with 'uninstall --purge', or by hand:
+  $CONFIG_DIR    (config + secrets)
+  $STATE_DIR    (run history and workspaces)
+  the '$USER_NAME' system user
+EOF
+}
+
 print_summary() {
 	cat <<EOF
 
@@ -326,7 +373,7 @@ EOF
 
 # --- argument parsing ------------------------------------------------------
 case "${1:-}" in
-install | upgrade)
+install | upgrade | uninstall)
 	MODE="$1"
 	shift
 	;;
@@ -365,6 +412,7 @@ $1"
 		PREFIX="$1"
 		;;
 	--no-gen-secrets) GEN_SECRETS=0 ;;
+	--purge) PURGE=1 ;;
 	--dry-run) DRY_RUN=1 ;;
 	-h | --help)
 		usage
@@ -379,8 +427,16 @@ done
 if [ -n "$BINARY" ] && [ "$VERSION" != "latest" ]; then
 	err "--binary and --version are mutually exclusive (--version only selects a download)"
 fi
+if [ "$PURGE" -eq 1 ] && [ "$MODE" != "uninstall" ]; then
+	err "--purge only applies to uninstall"
+fi
 
 check_preconditions
+
+if [ "$MODE" = "uninstall" ]; then
+	uninstall_service
+	exit 0
+fi
 
 if [ "$PREFIX" != "/usr/local/bin" ]; then
 	warn "the shipped unit runs /usr/local/bin/janus; with --prefix $PREFIX you must edit ExecStart in $UNIT_PATH"

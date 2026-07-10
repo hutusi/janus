@@ -206,6 +206,23 @@ sudo systemctl restart janus
 janus version
 ```
 
+## 9. Uninstalling
+
+```sh
+sudo ./deploy/install.sh uninstall      # or, from a checkout: make uninstall-service
+```
+
+Stops and disables the service, removes the unit and the binary — and **keeps**
+`/etc/janus` (config + secrets), `/var/lib/janus` (run history), and the `janus`
+user, so nothing is destroyed by surprise and a later reinstall picks the config
+back up. To remove those too:
+
+```sh
+sudo ./deploy/install.sh uninstall --purge
+```
+
+Both variants support `--dry-run` to preview every action first.
+
 ## Hardening notes
 
 The shipped unit applies a **balanced** sandbox (`NoNewPrivileges`,
