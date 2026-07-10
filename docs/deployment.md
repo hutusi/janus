@@ -169,6 +169,23 @@ ci.example.com {
 nginx works equally well (`proxy_pass http://127.0.0.1:8080;`). See the
 [reverse-proxy note](configuration.md#config-file) in the configuration docs.
 
+### "Connection refused" from other machines
+
+By design: the service binds **`127.0.0.1:8080`** (the `addr` in
+`/etc/janus/janus.yml`), so `curl 127.0.0.1:8080` works on the host while
+`http://<server-ip>:8080` is refused from anywhere else. Only local clients —
+like the reverse proxy above — can reach it; browse it through the proxy's
+`https://` name, not port 8080.
+
+To expose it directly on a trusted network instead, set `addr: "0.0.0.0:8080"`
+in `/etc/janus/janus.yml`, run `sudo systemctl restart janus`, and open the port
+in your firewall / cloud security group ("refused" becoming "timeout" means the
+firewall is the remaining blocker). Understand what that trades away: the
+dashboard is not behind the API token, and the token and webhook secret then
+travel as plain HTTP. Note that re-running `install.sh --addr …` does **not**
+change an existing install — the installer never overwrites an existing config;
+edit the file.
+
 ## 7. Connect a GitLab webhook
 
 With the service reachable over HTTPS and `JANUS_GITLAB_SECRET` set, point a
