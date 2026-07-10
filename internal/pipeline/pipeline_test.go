@@ -88,6 +88,28 @@ jobs:
 	}
 }
 
+func TestParseBranchesIgnore(t *testing.T) {
+	const src = `
+name: ci
+on:
+  push: { branches-ignore: [master] }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`
+	wf, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wf.On.Push.Matches("master") {
+		t.Error("ignored branch should not match")
+	}
+	if !wf.On.Push.Matches("feature/x") {
+		t.Error("non-ignored branch should match")
+	}
+}
+
 func TestParseValidFixtureFile(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "pipelines", "valid.yml"))
 	if err != nil {
@@ -135,6 +157,30 @@ jobs:
       - run: echo hi
 `,
 			wantInErr: "if:",
+		},
+		{
+			name: "branches and branches-ignore on push",
+			src: `
+name: ci
+on: { push: { branches: [main], branches-ignore: [dev] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`on.push` cannot set both",
+		},
+		{
+			name: "branches and branches-ignore on merge_request, empty list still counts",
+			src: `
+name: ci
+on: { merge_request: { branches: [], branches-ignore: [main] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`on.merge_request` cannot set both",
 		},
 		{
 			name: "matrix/strategy",
