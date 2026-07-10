@@ -55,6 +55,45 @@ func TestTriggerRejectsDisallowedRepo(t *testing.T) {
 	}
 }
 
+func TestPipelineFile(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "evil.yml")
+	def := ".janus/ci.yml"
+	tests := []struct {
+		name     string
+		def      string
+		override string
+		want     string
+		wantErr  bool
+	}{
+		{"empty falls back to default", def, "", filepath.FromSlash(".janus/ci.yml"), false},
+		{"bare name resolves in the pipeline dir", def, "release.yml", filepath.FromSlash(".janus/release.yml"), false},
+		{"subdirectory resolves in the pipeline dir", def, "nightly/build.yml", filepath.FromSlash(".janus/nightly/build.yml"), false},
+		{"full path resolves under the dir, not from the root", def, ".janus/release.yml", filepath.FromSlash(".janus/.janus/release.yml"), false},
+		{"escape from the pipeline dir rejected", def, "../examples/evil.yml", "", true},
+		{"nested escape rejected", def, "../../etc/evil.yml", "", true},
+		{"the directory itself rejected", def, ".", "", true},
+		{"absolute path rejected", def, abs, "", true},
+		{"root-level default resolves from the root", "janus.yml", "ci/other.yml", filepath.FromSlash("ci/other.yml"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := pipelineFile(tc.def, model.Event{PipelinePath: tc.override})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("pipelineFile(%q, %q) = %q, want error", tc.def, tc.override, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("pipelineFile(%q, %q): %v", tc.def, tc.override, err)
+			}
+			if got != tc.want {
+				t.Errorf("pipelineFile(%q, %q) = %q, want %q", tc.def, tc.override, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMatches(t *testing.T) {
 	pushMain := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{Branches: []string{"main"}}}}
 	mrMain := &model.Workflow{On: model.Triggers{MergeRequest: &model.BranchFilter{Branches: []string{"main"}}}}

@@ -11,10 +11,11 @@ import (
 )
 
 type triggerRequest struct {
-	RepoURL string `json:"repo_url"`
-	Branch  string `json:"branch"`
-	SHA     string `json:"sha"`
-	Ref     string `json:"ref"`
+	RepoURL      string `json:"repo_url"`
+	Branch       string `json:"branch"`
+	SHA          string `json:"sha"`
+	Ref          string `json:"ref"`
+	PipelinePath string `json:"pipeline_path"` // optional; relative to the configured pipeline file's directory
 }
 
 // handleTrigger starts a run manually. It builds a normalized manual Event and
@@ -35,12 +36,13 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ev := model.Event{
-		Provider: "manual",
-		Kind:     model.EventManual,
-		RepoURL:  req.RepoURL,
-		Branch:   req.Branch,
-		SHA:      req.SHA,
-		Ref:      req.Ref,
+		Provider:     "manual",
+		Kind:         model.EventManual,
+		RepoURL:      req.RepoURL,
+		Branch:       req.Branch,
+		SHA:          req.SHA,
+		Ref:          req.Ref,
+		PipelinePath: req.PipelinePath,
 	}
 	if ev.Branch == "" {
 		ev.Branch = strings.TrimPrefix(req.Ref, "refs/heads/")

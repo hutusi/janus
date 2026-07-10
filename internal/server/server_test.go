@@ -29,6 +29,13 @@ const (
 // initGitRepo creates a repo containing .janus/ci.yml and returns its path + SHA.
 func initGitRepo(t *testing.T, pipeline string) (dir, sha string) {
 	t.Helper()
+	return initGitRepoFiles(t, map[string]string{".janus/ci.yml": pipeline})
+}
+
+// initGitRepoFiles creates a repo containing the given files (path → content)
+// in one commit and returns its path + SHA.
+func initGitRepoFiles(t *testing.T, files map[string]string) (dir, sha string) {
+	t.Helper()
 	dir = t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
@@ -41,11 +48,14 @@ func initGitRepo(t *testing.T, pipeline string) (dir, sha string) {
 	git("init", "-q", "-b", "main")
 	git("config", "user.email", "t@e.com")
 	git("config", "user.name", "T")
-	if err := os.MkdirAll(filepath.Join(dir, ".janus"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".janus", "ci.yml"), []byte(pipeline), 0o644); err != nil {
-		t.Fatal(err)
+	for name, content := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	git("add", ".")
 	git("commit", "-q", "-m", "init")
@@ -235,6 +245,90 @@ func TestTriggerValidation(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for missing repo_url", resp.StatusCode)
+	}
+}
+
+func TestTriggerPipelinePathOverride(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepoFiles(t, map[string]string{
+		".janus/ci.yml": `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: echo "default pipeline"
+`,
+		".janus/release.yml": `name: release
+on: { push: { branches: [main] } }
+jobs:
+  publish:
+    steps:
+      - run: echo "release pipeline"
+`,
+	})
+	ts := newTestServer(t)
+
+	trigger := func(pipelinePath string) *model.Run {
+		t.Helper()
+		payload := map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/heads/main", "branch": "main"}
+		if pipelinePath != "" {
+			payload["pipeline_path"] = pipelinePath
+		}
+		body, _ := json.Marshal(payload)
+		resp := postTrigger(t, ts, string(body))
+		if resp.StatusCode != http.StatusAccepted {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			t.Fatalf("trigger status = %d, want 202; body=%s", resp.StatusCode, b)
+		}
+		var tr struct {
+			RunID string `json:"run_id"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&tr)
+		_ = resp.Body.Close()
+		return pollRun(t, ts, tr.RunID, 15*time.Second)
+	}
+
+	// pipeline_path selects the alternate file, relative to the pipeline dir.
+	run := trigger("release.yml")
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if run.WorkflowName != "release" {
+		t.Errorf("workflow = %q, want %q", run.WorkflowName, "release")
+	}
+	if run.Event.PipelinePath != "release.yml" {
+		t.Errorf("event pipeline_path = %q, want the override recorded", run.Event.PipelinePath)
+	}
+	if jr := findJob(run, "publish"); jr == nil || jr.Status != model.StatusSuccess {
+		t.Fatalf("publish job = %+v, want success", jr)
+	}
+
+	// Without the field, the configured default still runs.
+	run = trigger("")
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("default run status = %s, want success", run.Status)
+	}
+	if run.WorkflowName != "ci" {
+		t.Errorf("default workflow = %q, want %q", run.WorkflowName, "ci")
+	}
+	if run.Event.PipelinePath != "" {
+		t.Errorf("default event pipeline_path = %q, want empty", run.Event.PipelinePath)
+	}
+}
+
+func TestTriggerPipelinePathRejected(t *testing.T) {
+	ts := newTestServer(t)
+	// Rejection happens before checkout, so no git repo is needed.
+	for _, p := range []string{"../evil.yml", filepath.Join(t.TempDir(), "evil.yml")} {
+		body, _ := json.Marshal(map[string]string{"repo_url": "/nonexistent/repo", "sha": "deadbeef", "pipeline_path": p})
+		resp := postTrigger(t, ts, string(body))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("pipeline_path %q: status = %d, want 400", p, resp.StatusCode)
+		}
 	}
 }
 

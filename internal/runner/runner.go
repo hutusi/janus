@@ -1,7 +1,8 @@
 // Package runner is the coordinator between a trigger event and a pipeline run:
-// it checks out the repository at the event's commit, reads and parses
-// .janus/ci.yml from that checkout, matches the event against the workflow's
-// `on:` filters (manual triggers always match), records a run, and executes it
+// it checks out the repository at the event's commit, reads and parses the
+// pipeline file from that checkout (the configured path, or the event's
+// per-trigger override), matches the event against the workflow's `on:` filters
+// (manual triggers always match), records a run, and executes it
 // asynchronously. It is the single entry point shared by the manual trigger and
 // the webhook handlers.
 package runner
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,7 +47,7 @@ type Runner struct {
 // Options configures a Runner.
 type Options struct {
 	WSRoot       string              // where per-run workspaces are created
-	PipelinePath string              // in-repo path to the pipeline file
+	PipelinePath string              // in-repo path to the pipeline file (an event may override it)
 	KeepWS       bool                // keep workspaces after runs (debugging)
 	MaxRuns      int                 // max concurrent runs (<=0 means 4)
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
@@ -109,14 +111,19 @@ func (r *Runner) Shutdown(grace time.Duration) {
 	}
 }
 
-// Trigger checks out the repo at ev's commit, parses the pipeline, and — if the
-// event matches — records and asynchronously executes a run. The workspace is
-// removed when the run finishes. A repo not on the allowlist returns
-// ErrRepoNotAllowed (before any disk work); checkout/parse failures return an
-// error; a non-matching event returns Result{Started: false} with nil error.
+// Trigger checks out the repo at ev's commit, parses the pipeline (the
+// configured path, or ev.PipelinePath when set), and — if the event matches —
+// records and asynchronously executes a run. The workspace is removed when the
+// run finishes. A repo not on the allowlist returns ErrRepoNotAllowed (before
+// any disk work); an invalid pipeline path and checkout/parse failures return
+// an error; a non-matching event returns Result{Started: false} with nil error.
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
+	}
+	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
+	if err != nil {
+		return Result{}, err
 	}
 	if err := os.MkdirAll(r.wsRoot, 0o700); err != nil {
 		return Result{}, err
@@ -132,15 +139,15 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		return Result{}, fmt.Errorf("checkout: %w", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(ws.Dir, r.pipelinePath))
+	data, err := os.ReadFile(filepath.Join(ws.Dir, pipelinePath))
 	if err != nil {
 		_ = ws.Cleanup()
-		return Result{}, fmt.Errorf("read %s: %w", r.pipelinePath, err)
+		return Result{}, fmt.Errorf("read %s: %w", pipelinePath, err)
 	}
 	wf, err := pipeline.Parse(data)
 	if err != nil {
 		_ = ws.Cleanup()
-		return Result{}, fmt.Errorf("pipeline %s: %w", r.pipelinePath, err)
+		return Result{}, fmt.Errorf("pipeline %s: %w", pipelinePath, err)
 	}
 
 	if !matches(wf, ev) {
@@ -166,6 +173,35 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	}()
 
 	return Result{RunID: run.ID, Started: true}, nil
+}
+
+// pipelineFile resolves the effective in-repo pipeline path for ev. Without an
+// override it is def as configured. An override names a file relative to def's
+// directory (default .janus/) — "release.yml", not ".janus/release.yml" — so
+// only YAML deliberately placed with the pipelines is runnable and callers
+// need not know where pipelines live. Absolute paths, Windows drive-relative
+// paths, and `..` escapes are rejected before any disk work (the checkout
+// does not exist yet).
+func pipelineFile(def string, ev model.Event) (string, error) {
+	base := filepath.Clean(def)
+	if filepath.IsAbs(base) || filepath.VolumeName(base) != "" ||
+		base == ".." || strings.HasPrefix(base, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("pipeline path %q must be a relative path inside the repository", def)
+	}
+	if ev.PipelinePath == "" {
+		return base, nil
+	}
+	p := filepath.Clean(ev.PipelinePath)
+	if filepath.IsAbs(p) || filepath.VolumeName(p) != "" {
+		return "", fmt.Errorf("pipeline path %q must be relative to the pipeline directory", ev.PipelinePath)
+	}
+	dir := filepath.Dir(base)
+	full := filepath.Join(dir, p)
+	rel, err := filepath.Rel(dir, full)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("pipeline path %q must name a file inside %q, the pipeline directory", ev.PipelinePath, dir)
+	}
+	return full, nil
 }
 
 // matches reports whether the event should start the workflow. Manual triggers
