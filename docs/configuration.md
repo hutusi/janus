@@ -80,6 +80,10 @@ being used to run an attacker-controlled repo.
     `https://gitlab.example.com.evil.com/…`.
   - A trailing `.git` and the default port (`:443`/`:80`/`:22`) are normalized,
     and scheme + host are matched case-insensitively (paths are case-sensitive).
+  - URLs whose path contains `.` or `..` segments — literal or percent-encoded
+    (`%2e`, `%2f`, `%25`) — are **always denied**: git or the filesystem could
+    resolve them across the prefix boundary after the match. An allowlist
+    *entry* containing such segments is a **startup error**.
 - **Each scheme/host is explicit.** `http://` does not match an `https://` entry.
   A bare host with no scheme (e.g. `gitlab.example.com`) is a **startup error**.
 - **Scope.** The allowlist gates `POST /api/trigger` and `/webhooks/*` only.

@@ -29,8 +29,13 @@ func New(entries []string) (Allowlist, error) {
 		if e == "" {
 			continue
 		}
-		if e != "*" && !looksLikeURLOrPath(e) {
-			return nil, fmt.Errorf("invalid allow_repos entry %q: include a scheme, e.g. %q", e, "https://"+e)
+		if e != "*" {
+			if !looksLikeURLOrPath(e) {
+				return nil, fmt.Errorf("invalid allow_repos entry %q: include a scheme, e.g. %q", e, "https://"+e)
+			}
+			if normalize(e) == "" {
+				return nil, fmt.Errorf("invalid allow_repos entry %q: matches nothing ('.'/'..'/percent-encoded path segments and a bare %q are rejected)", e, "/")
+			}
 		}
 		out = append(out, e)
 	}
@@ -47,7 +52,8 @@ func looksLikeURLOrPath(e string) bool {
 //   - otherwise             -> normalized prefix match with a path boundary,
 //     so a host- or group-level entry permits everything beneath it while
 //     "…/acme" does not match "…/acmecorp" and "…example.com" does not match
-//     "…example.com.evil.com".
+//     "…example.com.evil.com". URLs with "."/".."/percent-encoded path
+//     segments are always denied — they could resolve across the boundary.
 func (a Allowlist) Allows(rawURL string) bool {
 	n := normalize(rawURL)
 	for _, e := range a {
@@ -70,9 +76,24 @@ func (a Allowlist) Allows(rawURL string) bool {
 // fragment, and default ports, lowercases scheme+host, and trims a trailing "/"
 // then ".git". Non-URL remotes (scp-style, file paths) are treated opaquely:
 // only trailing "/" and ".git" are trimmed.
+//
+// Anything containing "." or ".." path segments — literal or hidden behind
+// percent-encoding — normalizes to "", which matches no entry (and New rejects
+// such entries): git, HTTP infrastructure, or the filesystem may resolve those
+// segments AFTER the prefix match, escaping the boundary Allows enforces. No
+// legitimate clone URL contains them, so rejection is fail-closed and free.
 func normalize(s string) string {
 	s = strings.TrimSpace(s)
 	if u, err := url.Parse(s); err == nil && u.Scheme != "" && strings.Contains(s, "://") {
+		// "." / ".." and the escapes of the traversal alphabet — %2e ("."),
+		// %2f ("/"), %25 ("%", the double-encoding vector) — are checked on
+		// both the decoded and the raw path so one decoding layer cannot
+		// hide a segment from the other.
+		esc := strings.ToLower(u.EscapedPath())
+		if hasDotSegments(u.Path) ||
+			strings.Contains(esc, "%2e") || strings.Contains(esc, "%2f") || strings.Contains(esc, "%25") {
+			return ""
+		}
 		host := strings.ToLower(u.Hostname())
 		if p := u.Port(); p != "" && !isDefaultPort(strings.ToLower(u.Scheme), p) {
 			host += ":" + p
@@ -81,7 +102,22 @@ func normalize(s string) string {
 	}
 	s = strings.TrimSuffix(s, "/")
 	s = strings.TrimSuffix(s, ".git")
+	// After the trims so "/acme/...git" (→ "/acme/..") is caught; also covers
+	// scp-style remotes and local paths, which skip the URL branch above.
+	if hasDotSegments(s) {
+		return ""
+	}
 	return s
+}
+
+// hasDotSegments reports whether any "/"-separated segment of s is "." or "..".
+func hasDotSegments(s string) bool {
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func isDefaultPort(scheme, port string) bool {

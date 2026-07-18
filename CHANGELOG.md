@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Allowlist path traversal closed** — repo URLs containing `.` or `..` path segments, literal or percent-encoded (`%2e`, `%2f`, `%25`), are now always denied: git, HTTP infrastructure, or the filesystem could resolve such segments *after* the prefix match, letting `https://host/acme/../evil/repo` slip past a `https://host/acme` entry (worse for local-path remotes, where `..` walks the real filesystem). Allowlist entries containing them are now a startup error.
 - **systemd hardening now actually applies** — the balanced sandbox in [`deploy/janus.service`](deploy/janus.service) had trailing inline comments on its directive lines, which systemd parses as part of the value and silently ignores. `NoNewPrivileges`, `ProtectSystem`, `ProtectHome` and `PrivateTmp` were all being dropped (confirmed via `systemctl show`); the comments moved to their own lines so every protection takes effect. CI now rejects inline-comment directives in `deploy/*.service`.
 
 ## [0.1.0] - 2026-06-26
