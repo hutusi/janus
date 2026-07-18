@@ -23,6 +23,11 @@ func Parse(data []byte) (*model.Workflow, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, friendlyDecodeError(err)
 	}
+	// One document per file: everything after a `---` separator would
+	// otherwise be silently ignored, hiding part of the file from validation.
+	if err := dec.Decode(new(rawWorkflow)); !errors.Is(err, io.EOF) {
+		return nil, errors.New("invalid pipeline: multiple YAML documents in one file are not supported")
+	}
 	wf := raw.toModel()
 	if err := validate(wf); err != nil {
 		return nil, err

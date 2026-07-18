@@ -77,13 +77,31 @@ func Defaults() Config {
 
 // Validate rejects setting values that decoding cannot catch structurally.
 // Call it after all overlays so flag- and env-supplied values are checked too.
+// Zero concurrency caps mean "use the default" and stay allowed; values that
+// can only be a mistake (negatives, explicitly-empty paths) are rejected here
+// instead of silently reverting to a default downstream.
 func (c Config) Validate() error {
 	switch c.WorkspaceStrategy {
 	case "", "fresh", "persistent": // "" = fresh
-		return nil
 	default:
 		return fmt.Errorf("workspace_strategy: %q is not valid (use \"fresh\" or \"persistent\")", c.WorkspaceStrategy)
 	}
+	if c.MaxParallelRuns < 0 {
+		return fmt.Errorf("max_parallel_runs: %d is not valid (must be >= 0; 0 means the default)", c.MaxParallelRuns)
+	}
+	if c.MaxParallelJobs < 0 {
+		return fmt.Errorf("max_parallel_jobs: %d is not valid (must be >= 0; 0 means the default)", c.MaxParallelJobs)
+	}
+	if c.StepTimeout < 0 {
+		return fmt.Errorf("step_timeout: %q is not valid (must be positive; omit for no timeout)", time.Duration(c.StepTimeout).String())
+	}
+	if strings.TrimSpace(c.WorkspaceRoot) == "" {
+		return errors.New("workspace_root cannot be empty")
+	}
+	if strings.TrimSpace(c.PipelinePath) == "" {
+		return errors.New("pipeline_path cannot be empty")
+	}
+	return nil
 }
 
 // Load returns the defaults overlaid with a YAML config file. An empty path
@@ -105,6 +123,11 @@ func Load(path string) (Config, error) {
 			return cfg, nil // empty document: keep defaults
 		}
 		return cfg, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	// One document per file — a second `---` document would be silently
+	// ignored, and half-applied configuration is worse than an error.
+	if err := dec.Decode(new(Config)); !errors.Is(err, io.EOF) {
+		return cfg, fmt.Errorf("parse config %s: multiple YAML documents are not supported", path)
 	}
 	return cfg, nil
 }

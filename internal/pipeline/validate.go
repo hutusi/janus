@@ -3,11 +3,18 @@ package pipeline
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/hutusi/janus/internal/model"
 )
+
+// jobNameRe is the closed charset for job names. Beyond readability, it keeps
+// job-derived artifacts injective: the store names each step's log file after
+// the job, so two names that sanitize alike ("a/b", "a?b") would silently
+// share a log file.
+var jobNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // allowedShells is the closed set of step `shell:` values. "" selects the OS
 // default (/bin/sh on unix, cmd on Windows); the engine (shellArgv) maps each
@@ -47,6 +54,9 @@ func validate(wf *model.Workflow) error {
 
 	for _, name := range sortedJobNames(wf) {
 		job := wf.Jobs[name]
+		if !jobNameRe.MatchString(name) {
+			return fmt.Errorf("job %q: names may contain only letters, digits, '-' and '_'", name)
+		}
 		if len(job.Steps) == 0 {
 			return fmt.Errorf("job %q: at least one step is required", name)
 		}

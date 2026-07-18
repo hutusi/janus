@@ -33,6 +33,11 @@ func validateInterpolation(wf *model.Workflow) error {
 					"allowed tokens are env.NAME, ref, sha, short_sha, branch, event", where, tok)
 			}
 		}
+		// A "${{" with no closing "}}" matches nothing above and would reach
+		// the shell verbatim — almost certainly a typo, so reject it here.
+		if rest := placeholderRe.ReplaceAllString(s, ""); strings.Contains(rest, "${{") {
+			return fmt.Errorf("%s: unterminated ${{ — missing closing }}", where)
+		}
 		return nil
 	}
 

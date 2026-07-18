@@ -63,6 +63,20 @@ jobs:
 	}
 }
 
+func TestParseAcceptsFullJobNameCharset(t *testing.T) {
+	const src = `
+name: ci
+on: { push: {} }
+jobs:
+  build_X-1:
+    steps:
+      - run: echo hi
+`
+	if _, err := Parse([]byte(src)); err != nil {
+		t.Fatalf("letters/digits/'-'/'_' job names should be accepted: %v", err)
+	}
+}
+
 func TestParsePushOnlyMatchesAllBranchesWhenEmpty(t *testing.T) {
 	const src = `
 name: ci
@@ -367,6 +381,81 @@ jobs:
       - run: echo ${{ github.event.number }}
 `,
 			wantInErr: "unsupported interpolation",
+		},
+		{
+			name: "interpolation: unterminated placeholder in run",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    steps:
+      - run: echo ${{ branch
+`,
+			wantInErr: "unterminated ${{",
+		},
+		{
+			name: "interpolation: unterminated placeholder in env",
+			src: `
+name: ci
+on: { push: {} }
+env: { REF: "${{ ref" }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "unterminated ${{",
+		},
+		{
+			name: "job name with slash",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a/b:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "letters, digits",
+		},
+		{
+			name: "job name with space",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  "a b":
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "letters, digits",
+		},
+		{
+			name: "job name with dot",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a.b:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "letters, digits",
+		},
+		{
+			name: "multiple YAML documents",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+---
+name: second
+`,
+			wantInErr: "multiple YAML documents",
 		},
 	}
 

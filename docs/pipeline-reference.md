@@ -51,7 +51,7 @@ jobs:                                     # required: at least one job
 | `on.merge_request.branches`| top level        | —        | Run on merge requests targeting these branches. |
 | `on.merge_request.branches-ignore` | top level | —       | Run on merge requests except those **targeting** these branches. Mutually exclusive with `branches`. |
 | `env`                      | top / job / step | —        | Environment variables, merged in that order. |
-| `jobs.<id>`                | top level        | yes      | A job; the map key is the job name. |
+| `jobs.<id>`                | top level        | yes      | A job; the map key is the job name (letters, digits, `-`, `_` only). |
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
 | `jobs.<id>.steps[].run`    | step             | yes      | Command to run on the host via the step shell. |
 | `jobs.<id>.steps[].shell`  | step             | —        | Shell for `run`: `sh`/`bash`/`cmd`/`powershell`/`pwsh`. Default: `/bin/sh` (unix), `cmd` (Windows). |
@@ -122,6 +122,11 @@ These produce a clear validation error rather than running:
 - `runs-on:`, `container:`, `services:` — jobs run as host processes.
 - `secrets:` — use host environment variables.
 - `cache:`, `permissions:`, `concurrency:`, `outputs:`, step `id:`/`name:`.
+- Job names outside `[A-Za-z0-9_-]` — the store derives log-file names from
+  the job name, and a wider charset would let two jobs share one file.
+- A second YAML document (`---`) in the file — it would be silently ignored,
+  hiding part of the file from validation.
+- An unterminated `${{` — it would reach the shell verbatim.
 - Any other unknown key (caught structurally), and cyclic / unknown `needs`.
 
 ## Execution model (summary)
