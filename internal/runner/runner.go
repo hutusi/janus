@@ -31,6 +31,11 @@ import (
 // not permitted by the configured allowlist. Handlers map it to HTTP 403.
 var ErrRepoNotAllowed = errors.New("repository not allowed")
 
+// ErrBusy is returned by Trigger when the bounded admission queue — runs
+// executing plus runs waiting for a slot — is full. Handlers map it to HTTP
+// 503 so callers back off and retry instead of piling up checkouts.
+var ErrBusy = errors.New("runner at capacity")
+
 // Runner coordinates checkout → parse → match → execute.
 type Runner struct {
 	store        store.Store
@@ -44,6 +49,7 @@ type Runner struct {
 	ctx    context.Context // root context for run execution; cancelled on Shutdown
 	cancel context.CancelFunc
 	sem    chan struct{}  // caps concurrently executing runs
+	admit  chan struct{}  // caps the whole trigger lifecycle: checkout + parse + pending queue
 	wg     sync.WaitGroup // tracks in-flight runs for graceful shutdown
 
 	locksMu sync.Mutex             // guards locks
@@ -87,7 +93,11 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
-		locks:        make(map[string]*sync.Mutex),
+		// maxRuns executing plus a 3×maxRuns pending backlog. Derived rather
+		// than configurable: the point is that a trigger burst cannot start
+		// unbounded git processes or workspaces, not the exact queue depth.
+		admit: make(chan struct{}, 4*maxRuns),
+		locks: make(map[string]*sync.Mutex),
 	}
 }
 
@@ -156,11 +166,23 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
 	}
+	// Bounded admission, before any disk work: everything below — the git
+	// checkout, the parse, the run pending its sem slot — consumes processes
+	// and workspace directories, so it must be capped, not just execution.
+	select {
+	case r.admit <- struct{}{}:
+	default:
+		return Result{}, ErrBusy
+	}
+	release := func() { <-r.admit }
+
 	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
 	if err != nil {
+		release()
 		return Result{}, err
 	}
 	if err := os.MkdirAll(r.wsRoot, 0o700); err != nil {
+		release()
 		return Result{}, err
 	}
 
@@ -181,6 +203,7 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !reuse {
 		var err error
 		if wsDir, err = os.MkdirTemp(r.wsRoot, "run-*"); err != nil {
+			release()
 			return Result{}, err
 		}
 	}
@@ -191,11 +214,13 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	})
 	if err != nil {
 		unlock()
+		release()
 		return Result{}, fmt.Errorf("checkout: %w", err)
 	}
-	// Every pre-execution exit must release both the workspace and the lock —
-	// a leaked repo lock would silently wedge the repo onto the fallback path.
-	abort := func() { _ = ws.Cleanup(); unlock() }
+	// Every pre-execution exit must release the workspace, the repo lock, and
+	// the admission slot — a leaked repo lock would silently wedge the repo
+	// onto the fallback path, and a leaked slot would shrink capacity forever.
+	abort := func() { _ = ws.Cleanup(); unlock(); release() }
 
 	data, err := os.ReadFile(filepath.Join(ws.Dir, pipelinePath))
 	if err != nil {
@@ -222,6 +247,7 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
+		defer release()
 		defer unlock()                      // after cleanup: dir settled before the next run can claim it
 		defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
 		// Wait for a run slot; the run stays Pending until one frees.

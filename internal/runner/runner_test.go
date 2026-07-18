@@ -185,6 +185,47 @@ func waitGone(t *testing.T, path string, timeout time.Duration) {
 	}
 }
 
+func TestTriggerAdmissionBound(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// Fill every admission slot by hand: a further trigger must shed with
+	// ErrBusy before doing any disk work.
+	for i := 0; i < cap(r.admit); i++ {
+		r.admit <- struct{}{}
+	}
+	if _, err := r.Trigger(context.Background(), ev); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Trigger at capacity = %v, want ErrBusy", err)
+	}
+
+	// Free one slot: a trigger that fails before checkout (invalid pipeline
+	// path) must release its slot on the way out, not leak it.
+	<-r.admit
+	bad := ev
+	bad.PipelinePath = "../escape.yml"
+	if _, err := r.Trigger(context.Background(), bad); err == nil || errors.Is(err, ErrBusy) {
+		t.Fatalf("invalid pipeline path should fail with its own error, got %v", err)
+	}
+	if got, want := len(r.admit), cap(r.admit)-1; got != want {
+		t.Fatalf("failed trigger leaked its admission slot: len = %d, want %d", got, want)
+	}
+
+	// The still-free slot admits a real run end-to-end.
+	res, err := r.Trigger(context.Background(), ev)
+	if err != nil || !res.Started {
+		t.Fatalf("Trigger after freeing a slot = %+v, %v", res, err)
+	}
+	if run := waitRun(t, st, res.RunID, 15*time.Second); run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+}
+
 func TestTriggerRejectsDisallowedRepo(t *testing.T) {
 	root := t.TempDir()
 	st := store.NewMemory()

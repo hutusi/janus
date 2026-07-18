@@ -18,12 +18,30 @@ type triggerRequest struct {
 	PipelinePath string `json:"pipeline_path"` // optional; relative to the configured pipeline file's directory
 }
 
+// maxTriggerBody caps a manual-trigger request. The body is a handful of
+// short strings; 1 MiB is generous.
+const maxTriggerBody = 1 << 20
+
 // handleTrigger starts a run manually. It builds a normalized manual Event and
 // hands it to the runner, which checks out, parses, and executes the pipeline.
+// Decoding is strict, matching the YAML parsers: unknown fields and trailing
+// data are errors, not silently ignored.
 func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	var req triggerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	r.Body = http.MaxBytesReader(w, r.Body, maxTriggerBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, "unexpected data after the JSON body")
 		return
 	}
 	if req.RepoURL == "" {
@@ -52,6 +70,11 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
 		s.logger.Warn("trigger rejected: repo not allowed", "repo", ev.RepoURL)
 		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if errors.Is(err, runner.ErrBusy) {
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	if err != nil {

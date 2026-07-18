@@ -59,7 +59,9 @@ trigger (webhook / manual / CLI)
                               trigger's pipeline_path field overrides it)
       match event against on:  (manual always matches)
       engine.NewRun + store.SaveRun  → return run id (202)
-  → async (bounded by --max-parallel-runs):
+  → async (bounded by --max-parallel-runs; the whole trigger — checkout,
+    parse, pending queue — is capped at 4× that, beyond which the API
+    sheds load with 503):
       engine.Execute:
         buildGraph (indegree + dependents, Kahn cycle guard)
         readiness-driven scheduler:

@@ -9,7 +9,9 @@ import (
 	"github.com/hutusi/janus/internal/runner"
 )
 
-// maxWebhookBody caps how much of a webhook payload we read.
+// maxWebhookBody caps a webhook payload. Oversized bodies are rejected with
+// 413 — truncating instead would fail signature verification with a
+// misleading 401.
 const maxWebhookBody = 5 << 20 // 5 MiB
 
 // handleWebhook verifies, normalizes, and acts on a provider webhook.
@@ -26,8 +28,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody))
+	r.Body = http.MaxBytesReader(w, r.Body, maxWebhookBody)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "cannot read body")
 		return
 	}
@@ -54,6 +62,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// hard 403, distinct from the 2xx "no pipeline" case below.
 		s.logger.Warn("webhook rejected: repo not allowed", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch)
 		writeJSON(w, http.StatusForbidden, map[string]string{"status": "rejected", "reason": "repository not in allowlist"})
+		return
+	}
+	if errors.Is(err, runner.ErrBusy) {
+		// Overload is Janus's concern, not the repository's — deliberately
+		// non-2xx so the provider retries the delivery instead of the event
+		// being silently dropped.
+		s.logger.Warn("webhook shed: runner at capacity", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch)
+		w.Header().Set("Retry-After", "30")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "busy"})
 		return
 	}
 	if err != nil {

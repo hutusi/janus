@@ -183,9 +183,15 @@ func runServe(args []string) error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           server.New(st, rn, version, opts...).Handler(),
+		Addr:    cfg.Addr,
+		Handler: server.New(st, rn, version, opts...).Handler(),
+		// ReadTimeout bounds reading a request (headers + body), so a
+		// slow-loris POST cannot pin a connection open. WriteTimeout must stay
+		// unset: the ?follow=1 log stream is a deliberately long-lived
+		// response, and a write deadline would sever it mid-run.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

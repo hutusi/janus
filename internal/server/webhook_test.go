@@ -69,6 +69,21 @@ jobs:
 	}
 }
 
+func TestWebhookBodyTooLarge(t *testing.T) {
+	ts := newTestServer(t)
+	req, _ := http.NewRequest("POST", ts.URL+"/webhooks/gitlab", strings.NewReader(strings.Repeat("x", maxWebhookBody+1)))
+	req.Header.Set("X-Gitlab-Event", "Push Hook")
+	req.Header.Set("X-Gitlab-Token", testGitLabSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (not a truncated-body 401)", resp.StatusCode)
+	}
+}
+
 func TestWebhookGitLabBadToken(t *testing.T) {
 	ts := newTestServer(t)
 	resp := gitlabPush(t, ts, "https://example.com/x.git", "deadbeef", "main", "wrong-token")

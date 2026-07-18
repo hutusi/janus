@@ -292,6 +292,29 @@ func TestTriggerValidation(t *testing.T) {
 	}
 }
 
+func TestTriggerStrictJSON(t *testing.T) {
+	ts := newTestServer(t)
+	for name, body := range map[string]string{
+		"unknown field": `{"repo_url": "/tmp/x", "ref": "refs/heads/main", "bogus": 1}`,
+		"trailing data": `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}{"more": true}`,
+	} {
+		resp := postTrigger(t, ts, body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, resp.StatusCode)
+		}
+	}
+}
+
+func TestTriggerBodyTooLarge(t *testing.T) {
+	ts := newTestServer(t)
+	resp := postTrigger(t, ts, `{"repo_url": "`+strings.Repeat("a", maxTriggerBody)+`"}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
 func TestTriggerPipelinePathOverride(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
