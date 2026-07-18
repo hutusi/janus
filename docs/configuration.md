@@ -60,7 +60,9 @@ Notes:
 - The HTML dashboard (`/`, `/runs/{id}`) is **not** behind the API token. Put a
   reverse proxy in front if it must be protected.
 - On `SIGINT`/`SIGTERM`, Janus stops accepting requests and waits up to 30s for
-  in-flight runs to finish.
+  in-flight runs to finish; overrunning runs are cancelled (process-group
+  kill) and recorded as `cancelled`. After a crash or hard kill, the next
+  startup marks the orphaned `pending`/`running` runs `cancelled`.
 
 ### Repository allowlist
 

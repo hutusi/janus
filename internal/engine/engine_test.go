@@ -6,8 +6,11 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -193,11 +196,66 @@ jobs:
 	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Fatalf("cancellation took %v, expected prompt return", elapsed)
 	}
-	if run.Status != model.StatusFailed {
-		t.Errorf("run status = %s, want failed", run.Status)
+	// External cancellation (shutdown, Ctrl-C) is an interruption, not a
+	// verdict: the run reports cancelled, unlike an ordinary failure.
+	if run.Status != model.StatusCancelled {
+		t.Errorf("run status = %s, want cancelled", run.Status)
 	}
 	if got := jobRun(run, "build").Status; got != model.StatusCancelled {
 		t.Errorf("build status = %s, want cancelled", got)
+	}
+}
+
+// updateFailStore fails every UpdateRun, simulating a full or read-only disk
+// under a running daemon.
+type updateFailStore struct {
+	store.Store
+}
+
+func (updateFailStore) UpdateRun(*model.Run) error { return errors.New("disk full") }
+
+func TestFinalPersistFailureLogsAtError(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: echo hi
+`)
+	var buf bytes.Buffer
+	eng := New(updateFailStore{store.NewMemory()}, WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	run, err := eng.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Execution itself completes; persistence failure must not fail the run.
+	if run.Status != model.StatusSuccess {
+		t.Errorf("run status = %s, want success", run.Status)
+	}
+	// But the unpersistable *terminal* state — after which the stored record
+	// would be stale forever — must be logged at Error, not Warn.
+	if logs := buf.String(); !strings.Contains(logs, "level=ERROR") || !strings.Contains(logs, "final run state") {
+		t.Errorf("expected an error-level log about the final persist failure, got:\n%s", logs)
+	}
+}
+
+// TestRunFailureStaysFailed pins the boundary of the cancelled status: the
+// fail-fast sibling cancellation inside a run must not relabel an ordinary
+// failing run as cancelled.
+func TestRunFailureStaysFailed(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: exit 1
+`)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if run.Status != model.StatusFailed {
+		t.Errorf("run status = %s, want failed", run.Status)
 	}
 }
 

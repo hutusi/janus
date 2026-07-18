@@ -84,7 +84,9 @@ trigger (webhook / manual / CLI)
   serializes a consistent snapshot. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
 - Workspaces are per-run and removed on completion; a startup **sweep** clears
-  orphans left by a crash. Under `workspace_strategy: persistent`, each repo
+  orphans left by a crash, and runs left `pending`/`running` by a crash are
+  marked `cancelled` at startup (their goroutines died with the old process —
+  nothing would ever finish them). Under `workspace_strategy: persistent`, each repo
   instead gets one reusable `persist-*` directory, updated by fetch +
   hard-reset and serialized by a per-repo **try-lock** — a concurrent trigger
   for the same repo falls back to a fresh per-run dir rather than blocking.

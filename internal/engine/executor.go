@@ -44,8 +44,11 @@ func shellArgv(stepShell string) []string {
 
 // hostEnvAllow is the curated set of host environment variables passed through
 // to jobs. The Janus daemon's own environment is otherwise NOT inherited, so
-// its configuration/secrets never leak into builds. It lists both unix and
-// Windows names; os.LookupEnv skips those absent on the current host.
+// its configuration/secrets are not handed to builds via the environment.
+// That is the extent of the guarantee: jobs run as the same OS user as the
+// daemon — no isolation — so anything that user can read stays reachable.
+// It lists both unix and Windows names; os.LookupEnv skips those absent on
+// the current host.
 var hostEnvAllow = []string{
 	// unix
 	"PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR",

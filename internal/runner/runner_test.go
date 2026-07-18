@@ -185,6 +185,69 @@ func waitGone(t *testing.T, path string, timeout time.Duration) {
 	}
 }
 
+func TestReconcileInterrupted(t *testing.T) {
+	st := store.NewMemory()
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	// A run as a crashed daemon would leave it: mid-flight, with a finished
+	// step, a running step, and work that never started.
+	orphan := &model.Run{
+		ID: "orphan", Status: model.StatusRunning, CreatedAt: time.Now(), StartedAt: time.Now(),
+		Jobs: []*model.JobRun{
+			{Name: "build", Status: model.StatusRunning, StartedAt: time.Now(), Steps: []*model.StepRun{
+				{Index: 0, Status: model.StatusSuccess},
+				{Index: 1, Status: model.StatusRunning, StartedAt: time.Now()},
+				{Index: 2, Status: model.StatusPending},
+			}},
+			{Name: "deploy", Status: model.StatusPending, Steps: []*model.StepRun{
+				{Index: 0, Status: model.StatusPending},
+			}},
+		},
+	}
+	done := &model.Run{ID: "done", Status: model.StatusSuccess, CreatedAt: time.Now()}
+	for _, run := range []*model.Run{orphan, done} {
+		if err := st.SaveRun(run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := r.ReconcileInterrupted()
+	if err != nil {
+		t.Fatalf("ReconcileInterrupted: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("repaired = %d, want 1", n)
+	}
+
+	got, err := st.GetRun("orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusCancelled || got.FinishedAt.IsZero() {
+		t.Errorf("run = %s (finished %v), want cancelled with FinishedAt set", got.Status, got.FinishedAt)
+	}
+	build := got.Jobs[0]
+	if build.Status != model.StatusCancelled || build.FinishedAt.IsZero() {
+		t.Errorf("running job = %s, want cancelled with FinishedAt set", build.Status)
+	}
+	if s := build.Steps[0].Status; s != model.StatusSuccess {
+		t.Errorf("finished step = %s, must stay success", s)
+	}
+	if s := build.Steps[1].Status; s != model.StatusCancelled {
+		t.Errorf("running step = %s, want cancelled", s)
+	}
+	if s := build.Steps[2].Status; s != model.StatusSkipped {
+		t.Errorf("pending step = %s, want skipped", s)
+	}
+	if s := got.Jobs[1].Status; s != model.StatusSkipped {
+		t.Errorf("pending job = %s, want skipped", s)
+	}
+
+	if d, _ := st.GetRun("done"); d.Status != model.StatusSuccess {
+		t.Errorf("terminal run = %s, must stay untouched", d.Status)
+	}
+}
+
 func TestTriggerAdmissionBound(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

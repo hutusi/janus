@@ -170,6 +170,11 @@ func runServe(args []string) error {
 	if err := rn.Sweep(); err != nil {
 		logger.Warn("workspace sweep failed", "err", err)
 	}
+	if n, err := rn.ReconcileInterrupted(); err != nil {
+		logger.Warn("reconciling interrupted runs failed", "err", err)
+	} else if n > 0 {
+		logger.Info("marked runs interrupted by the previous process as cancelled", "count", n)
+	}
 
 	opts := []server.Option{server.WithLogger(logger)}
 	if cfg.GitLabSecret != "" {
@@ -212,12 +217,14 @@ func runServe(args []string) error {
 		logger.Info("shutting down; stopping listener and waiting for in-flight runs")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return err
-		}
+		// The runner must shut down even when HTTP shutdown times out (a
+		// lingering log-follow connection is enough to exceed the deadline) —
+		// returning early here would exit the process with build process
+		// groups still alive.
+		err := srv.Shutdown(shutdownCtx)
 		// Wait up to 30s for in-flight runs; cancel (kill processes) if they overrun.
 		rn.Shutdown(30 * time.Second)
-		return nil
+		return err
 	}
 }
 
@@ -287,7 +294,10 @@ func runRun(args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	// Ctrl-C must drive the engine's cancellation path (process-group kill,
+	// run marked cancelled) rather than just dying with orphaned children.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch}
 
 	var dir string

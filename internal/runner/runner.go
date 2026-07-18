@@ -138,6 +138,59 @@ func (r *Runner) Sweep() error {
 	return nil
 }
 
+// ReconcileInterrupted marks runs left non-terminal by a previous process —
+// a crash or hard kill — as cancelled, so they stop displaying as running
+// forever and log followers terminate. Anything mid-flight becomes cancelled;
+// work that never started becomes skipped. Call once at startup, before
+// serving (like Sweep); the executing goroutines died with the old process,
+// so nothing will ever advance these records again. Returns how many runs
+// were repaired; per-run store errors skip that run, and the first is
+// returned after the pass completes.
+func (r *Runner) ReconcileInterrupted() (int, error) {
+	runs, err := r.store.ListRuns(0)
+	if err != nil {
+		return 0, err
+	}
+	var repaired int
+	var firstErr error
+	now := time.Now()
+	for _, run := range runs {
+		if run.Status.Terminal() {
+			continue
+		}
+		for _, jr := range run.Jobs {
+			for _, sr := range jr.Steps {
+				if !sr.Status.Terminal() {
+					if sr.Status == model.StatusRunning {
+						sr.Status = model.StatusCancelled
+						sr.FinishedAt = now
+					} else {
+						sr.Status = model.StatusSkipped
+					}
+				}
+			}
+			if !jr.Status.Terminal() {
+				if jr.Status == model.StatusRunning {
+					jr.Status = model.StatusCancelled
+					jr.FinishedAt = now
+				} else {
+					jr.Status = model.StatusSkipped
+				}
+			}
+		}
+		run.Status = model.StatusCancelled
+		run.FinishedAt = now
+		if err := r.store.UpdateRun(run); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		repaired++
+	}
+	return repaired, firstErr
+}
+
 // Shutdown stops accepting new run work and waits up to grace for in-flight
 // runs to finish; if they don't, it cancels them (killing their host
 // processes) and waits for the unwind. Call after the HTTP listener is closed.

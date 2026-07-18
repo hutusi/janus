@@ -107,8 +107,10 @@ workflow env  →  job env  →  step env
 
 Janus also injects a curated base for every step (e.g. `CI=true`, `PATH`,
 `HOME`, and `JANUS_*` values for the ref/sha/branch). It does **not** pass the
-Janus daemon's full environment into jobs, so daemon configuration never leaks
-into builds.
+Janus daemon's full environment into jobs, so daemon configuration is not
+handed to builds via the environment. That is the extent of the guarantee:
+jobs run as the same OS user as the daemon (no isolation), so anything that
+user can read remains reachable — see the security model in the README.
 
 ## What is rejected (and why)
 
@@ -135,7 +137,9 @@ These produce a clear validation error rather than running:
   their `needs` allow, and a job's steps run sequentially.
 - A step fails on the first non-zero exit; that fails the job.
 - On the first job failure the run is **fail-fast**: in-flight processes are
-  cancelled and not-yet-started jobs are marked skipped.
+  cancelled and not-yet-started jobs are marked skipped. The run itself is
+  `failed` — the run-level `cancelled` status is reserved for external
+  interruption (daemon shutdown, Ctrl-C on `janus run`).
 
 See [architecture.md](architecture.md) for the full lifecycle. Runnable sample
 pipelines live in [examples/](../examples/).

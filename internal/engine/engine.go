@@ -99,8 +99,22 @@ func (rs *runState) update(mutate func()) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	mutate()
+	// Log-and-continue: a missed intermediate write self-heals on the next
+	// transition, and failing the run over its own bookkeeping helps nobody.
 	if err := rs.store.UpdateRun(rs.run); err != nil {
 		rs.logger.Warn("persisting run state failed", "run", rs.run.ID, "err", err)
+	}
+}
+
+// updateFinal is update for a run's terminal transition: there is no later
+// write to self-heal a miss, so a persistence failure here leaves the stored
+// run non-terminal forever and is logged at Error.
+func (rs *runState) updateFinal(mutate func()) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	mutate()
+	if err := rs.store.UpdateRun(rs.run); err != nil {
+		rs.logger.Error("persisting final run state failed; the stored run stays stale", "run", rs.run.ID, "status", rs.run.Status, "err", err)
 	}
 }
 
@@ -158,7 +172,7 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 
 	g, err := buildGraph(wf)
 	if err != nil {
-		rs.update(func() {
+		rs.updateFinal(func() {
 			run.Status = model.StatusFailed
 			run.FinishedAt = time.Now()
 		})
@@ -221,7 +235,7 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 		}
 	}
 
-	rs.update(func() {
+	rs.updateFinal(func() {
 		for _, jr := range run.Jobs {
 			if !jr.Status.Terminal() {
 				jr.Status = model.StatusSkipped // never started due to fail-fast
@@ -232,9 +246,16 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 				}
 			}
 		}
-		if failed {
+		switch {
+		case failed && ctx.Err() != nil:
+			// The parent context was cancelled from outside (shutdown,
+			// Ctrl-C): the run was interrupted, not failed on its own merits.
+			// Fail-fast sibling cancellation only cancels runCtx, so an
+			// ordinary failing run still reports failed here.
+			run.Status = model.StatusCancelled
+		case failed:
 			run.Status = model.StatusFailed
-		} else {
+		default:
 			run.Status = model.StatusSuccess
 		}
 		run.FinishedAt = time.Now()
