@@ -293,15 +293,20 @@ install_unit() {
 
 verify_service() {
 	log "verifying service"
-	run systemctl is-active janus || true
+	# An inactive service is an install failure regardless of what the HTTP
+	# probe below can or cannot check — fail here, don't just print the state.
+	# (Under --dry-run, `run` executes nothing and returns 0, so previews pass.)
+	if ! run systemctl is-active janus; then
+		err "janus.service is not active — inspect with: journalctl -u janus -e"
+	fi
 	url="http://$ADDR/healthz"
 	if [ "$DRY_RUN" -eq 1 ]; then
 		printf "+ curl -fsS --noproxy '*' %s\n" "$url"
 		return
 	fi
 	# curl is optional for a --binary (offline) install, so it may be absent.
-	# is-active above is the primary signal; skip the HTTP probe rather than
-	# loop for 10s and warn misleadingly as if the service failed to start.
+	# is-active above already gates on the service state; skip the HTTP probe
+	# rather than loop for 10s and warn misleadingly.
 	if ! command -v curl >/dev/null 2>&1; then
 		log "curl not present — skipping the HTTP health check; verify once up with: curl -s $url"
 		return 0
