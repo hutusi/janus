@@ -50,7 +50,11 @@ are rejected.
 ```
 trigger (webhook / manual / CLI)
   → runner.Trigger:
-      workspace.Checkout  (shallow fetch of the SHA, detached checkout)
+      workspace.Checkout  (shallow fetch of the SHA, detached checkout;
+                           a ref-fallback checkout is verified against the
+                           requested SHA — a moved ref fails the run rather
+                           than silently executing a commit the run's
+                           metadata does not identify)
       read + pipeline.Parse  (pipeline_path from the checkout; a manual
                               trigger's pipeline_path field overrides it)
       match event against on:  (manual always matches)

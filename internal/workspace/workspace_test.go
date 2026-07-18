@@ -187,6 +187,78 @@ func TestCheckoutReuseForcePush(t *testing.T) {
 	}
 }
 
+func TestCheckoutRejectsRefDrift(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, _ := initGitRepo(t)
+
+	// The event's SHA cannot be fetched (servers may refuse fetch-by-SHA;
+	// here the object simply doesn't exist, which fails identically), so the
+	// ref fallback runs and lands on the branch tip — which must not be
+	// executed while the run records a different SHA.
+	bogus := strings.Repeat("beef1234", 5)
+	_, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: bogus, Ref: "refs/heads/main",
+	})
+	if err == nil {
+		t.Fatal("Checkout should fail when the ref does not point at the requested SHA")
+	}
+	if !strings.Contains(err.Error(), "not the requested SHA") {
+		t.Errorf("error should name the SHA mismatch, got: %v", err)
+	}
+}
+
+func TestCheckoutReuseRejectsRefDrift(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha1 := initGitRepo(t)
+	dir := filepath.Join(t.TempDir(), "ws")
+	if _, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: src, SHA: sha1, Ref: "refs/heads/main", Keep: true, Reuse: true}); err != nil {
+		t.Fatalf("first Checkout: %v", err)
+	}
+	commitFile(t, src, "new.txt", "v2\n")
+
+	// A reused checkout already holding the requested commit runs it even when
+	// the ref moved on — no drift when the object is available. Drift needs a
+	// SHA that cannot be fetched at all: then the ref fallback lands on the tip
+	// and verification must fail (in the reuse path and again after the
+	// self-heal rebuild) rather than run the tip as if it were the request.
+	bogus := strings.Repeat("beef1234", 5)
+	_, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: src, SHA: bogus, Ref: "refs/heads/main", Keep: true, Reuse: true})
+	if err == nil {
+		t.Fatal("reuse Checkout should fail when the requested SHA is unavailable and the ref points elsewhere")
+	}
+	if !strings.Contains(err.Error(), "not the requested SHA") {
+		t.Errorf("error should name the SHA mismatch, got: %v", err)
+	}
+}
+
+func TestCheckoutShortSHA(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+
+	// An abbreviated SHA cannot be fetched directly, so the ref fallback runs;
+	// verification matches by prefix, so the run proceeds.
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: sha[:8], Ref: "refs/heads/main",
+	})
+	if err != nil {
+		t.Fatalf("Checkout with abbreviated SHA: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+	out, err := exec.Command("git", "-C", ws.Dir, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != sha {
+		t.Errorf("HEAD = %s, want %s", got, sha)
+	}
+}
+
 func TestCheckoutReuseSelfHeals(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
