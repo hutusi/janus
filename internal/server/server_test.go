@@ -215,6 +215,12 @@ jobs:
 		t.Errorf("logs = %q, want it to contain the echoed line", logs)
 	}
 
+	// Following a terminal step streams its full output and terminates.
+	followed := getText(t, ts.URL+"/api/runs/"+tr.RunID+"/logs?job=build&step=0&follow=1")
+	if !strings.Contains(followed, "hello from janus on main") {
+		t.Errorf("followed logs = %q, want the full step output", followed)
+	}
+
 	// Dashboard pages render.
 	if body := getText(t, ts.URL+"/"); !strings.Contains(body, tr.RunID[:8]) {
 		t.Errorf("index page does not list the run")

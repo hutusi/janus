@@ -41,7 +41,7 @@ func jobRun(run *model.Run, name string) *model.JobRun {
 
 func readStepLog(t *testing.T, st store.Store, runID, job string, idx int) string {
 	t.Helper()
-	rc, err := st.ReadLogs(runID, job, idx)
+	rc, err := st.ReadLogs(runID, job, idx, 0)
 	if err != nil {
 		t.Fatalf("ReadLogs: %v", err)
 	}

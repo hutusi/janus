@@ -136,7 +136,7 @@ func (f *File) LogWriter(runID, job string, stepIndex int) (io.WriteCloser, erro
 	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 }
 
-func (f *File) ReadLogs(runID, job string, stepIndex int) (io.ReadCloser, error) {
+func (f *File) ReadLogs(runID, job string, stepIndex int, offset int64) (io.ReadCloser, error) {
 	if err := checkRunID(runID); err != nil {
 		return nil, err
 	}
@@ -146,6 +146,13 @@ func (f *File) ReadLogs(runID, job string, stepIndex int) (io.ReadCloser, error)
 			return io.NopCloser(strings.NewReader("")), nil
 		}
 		return nil, err
+	}
+	if offset > 0 {
+		// Seeking past EOF is fine — reads just return EOF.
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
 	}
 	return file, nil
 }

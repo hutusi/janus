@@ -26,6 +26,9 @@ type Store interface {
 
 	// LogWriter returns an append-only sink for one step's combined output.
 	LogWriter(runID, job string, stepIndex int) (io.WriteCloser, error)
-	// ReadLogs returns a reader over one step's recorded output.
-	ReadLogs(runID, job string, stepIndex int) (io.ReadCloser, error)
+	// ReadLogs returns a reader over one step's recorded output, starting at
+	// byte offset (0 = from the beginning; an offset at or past the end reads
+	// as empty, not an error). The offset lets a follower poll a growing log
+	// without re-reading the whole file each tick.
+	ReadLogs(runID, job string, stepIndex int, offset int64) (io.ReadCloser, error)
 }

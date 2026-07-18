@@ -100,15 +100,18 @@ func (m *Memory) LogWriter(runID, job string, stepIndex int) (io.WriteCloser, er
 	return &memLogWriter{m: m, key: logKey(runID, job, stepIndex)}, nil
 }
 
-func (m *Memory) ReadLogs(runID, job string, stepIndex int) (io.ReadCloser, error) {
+func (m *Memory) ReadLogs(runID, job string, stepIndex int, offset int64) (io.ReadCloser, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	buf := m.logs[logKey(runID, job, stepIndex)]
-	if buf == nil {
+	if buf == nil || offset >= int64(buf.Len()) {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	// Copy so the caller reads a stable snapshot.
-	data := append([]byte(nil), buf.Bytes()...)
+	data := append([]byte(nil), buf.Bytes()[offset:]...)
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 

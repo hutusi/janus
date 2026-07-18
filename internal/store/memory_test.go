@@ -46,7 +46,7 @@ func TestMemoryLogRoundTrip(t *testing.T) {
 	_, _ = io.WriteString(w, "hello\n")
 	_ = w.Close()
 
-	rc, err := m.ReadLogs("r", "build", 0)
+	rc, err := m.ReadLogs("r", "build", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,5 +54,29 @@ func TestMemoryLogRoundTrip(t *testing.T) {
 	b, _ := io.ReadAll(rc)
 	if string(b) != "hello\n" {
 		t.Errorf("logs = %q, want hello", b)
+	}
+}
+
+func TestMemoryReadLogsOffset(t *testing.T) {
+	m := NewMemory()
+	w, _ := m.LogWriter("r", "build", 0)
+	_, _ = io.WriteString(w, "hello world")
+	_ = w.Close()
+
+	readAt := func(off int64) string {
+		t.Helper()
+		rc, err := m.ReadLogs("r", "build", 0, off)
+		if err != nil {
+			t.Fatalf("ReadLogs(offset=%d): %v", off, err)
+		}
+		defer func() { _ = rc.Close() }()
+		b, _ := io.ReadAll(rc)
+		return string(b)
+	}
+	if got := readAt(6); got != "world" {
+		t.Errorf("offset 6 = %q, want world", got)
+	}
+	if got := readAt(1000); got != "" {
+		t.Errorf("offset past end = %q, want empty", got)
 	}
 }

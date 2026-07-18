@@ -70,11 +70,36 @@ func TestFileStoreSurvivesRestart(t *testing.T) {
 		t.Errorf("ListRuns order = %s first, want r2", runs[0].ID)
 	}
 
-	rc, _ := reopened.ReadLogs("r2", "build", 0)
+	rc, _ := reopened.ReadLogs("r2", "build", 0, 0)
 	defer func() { _ = rc.Close() }()
 	b, _ := io.ReadAll(rc)
 	if string(b) != "persisted output\n" {
 		t.Errorf("logs after restart = %q, want persisted output", b)
+	}
+}
+
+func TestFileReadLogsOffset(t *testing.T) {
+	st, _ := NewFile(t.TempDir())
+	_ = st.SaveRun(sampleRun("r1", time.Now()))
+	w, _ := st.LogWriter("r1", "build", 0)
+	_, _ = io.WriteString(w, "hello world")
+	_ = w.Close()
+
+	readAt := func(off int64) string {
+		t.Helper()
+		rc, err := st.ReadLogs("r1", "build", 0, off)
+		if err != nil {
+			t.Fatalf("ReadLogs(offset=%d): %v", off, err)
+		}
+		defer func() { _ = rc.Close() }()
+		b, _ := io.ReadAll(rc)
+		return string(b)
+	}
+	if got := readAt(6); got != "world" {
+		t.Errorf("offset 6 = %q, want world", got)
+	}
+	if got := readAt(1000); got != "" {
+		t.Errorf("offset past end = %q, want empty", got)
 	}
 }
 
@@ -84,7 +109,7 @@ func TestFileStoreMissingRun(t *testing.T) {
 		t.Error("expected error for missing run")
 	}
 	// Reading logs for a missing step yields empty, not an error.
-	rc, err := st.ReadLogs("nope", "build", 0)
+	rc, err := st.ReadLogs("nope", "build", 0, 0)
 	if err != nil {
 		t.Fatalf("ReadLogs missing: %v", err)
 	}

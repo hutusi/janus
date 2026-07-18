@@ -83,7 +83,7 @@ func (s *Server) writeRunLogs(w io.Writer, run *model.Run) {
 }
 
 func (s *Server) readStep(runID, job string, step int) []byte {
-	rc, err := s.store.ReadLogs(runID, job, step)
+	rc, err := s.store.ReadLogs(runID, job, step, 0)
 	if err != nil {
 		s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
 		return nil
@@ -100,12 +100,19 @@ func (s *Server) streamStep(w http.ResponseWriter, r *http.Request, runID, job s
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 
-	offset := 0
+	// Each tick reads only what appended since the last one — re-reading the
+	// whole log every 300ms would make following an O(n²) disk workload.
+	var offset int64
 	flush := func() {
-		data := s.readStep(runID, job, step)
-		if len(data) > offset {
-			_, _ = w.Write(data[offset:])
-			offset = len(data)
+		rc, err := s.store.ReadLogs(runID, job, step, offset)
+		if err != nil {
+			s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
+			return
+		}
+		n, _ := io.Copy(w, rc)
+		_ = rc.Close()
+		if n > 0 {
+			offset += n
 			if flusher != nil {
 				flusher.Flush()
 			}
