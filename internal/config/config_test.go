@@ -79,6 +79,7 @@ func TestValidateRejectsNonsenseValues(t *testing.T) {
 	}{
 		{"negative max_parallel_runs", func(c *Config) { c.MaxParallelRuns = -1 }},
 		{"negative max_parallel_jobs", func(c *Config) { c.MaxParallelJobs = -2 }},
+		{"negative history_limit", func(c *Config) { c.HistoryLimit = -1 }},
 		{"negative step_timeout", func(c *Config) { c.StepTimeout = Duration(-5 * time.Second) }},
 		{"empty workspace_root", func(c *Config) { c.WorkspaceRoot = "" }},
 		{"empty pipeline_path", func(c *Config) { c.PipelinePath = "  " }},

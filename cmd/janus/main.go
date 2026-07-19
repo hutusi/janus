@@ -98,6 +98,7 @@ func runServe(args []string) error {
 	fs.String("pipeline-path", def.PipelinePath, "in-repo path to the pipeline file")
 	fs.Int("max-parallel-jobs", def.MaxParallelJobs, "maximum jobs to run concurrently within a run")
 	fs.Int("max-parallel-runs", def.MaxParallelRuns, "maximum runs to execute concurrently")
+	fs.Int("history-limit", def.HistoryLimit, "maximum terminal runs to retain; oldest (and their logs) are pruned (0 = unlimited)")
 	fs.Duration("step-timeout", time.Duration(def.StepTimeout), "fail any step that runs longer than this (0 = no timeout)")
 	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
 	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run) or "persistent" (one reusable dir per repo)`)
@@ -161,8 +162,10 @@ func runServe(args []string) error {
 		PipelinePath: cfg.PipelinePath,
 		KeepWS:       cfg.KeepWorkspaces,
 		MaxRuns:      cfg.MaxParallelRuns,
+		HistoryLimit: cfg.HistoryLimit,
 		Allowlist:    allow,
 		Persistent:   cfg.WorkspaceStrategy == "persistent",
+		Logger:       logger,
 	})
 	if cfg.WorkspaceStrategy == "persistent" {
 		logger.Info("persistent workspaces enabled; builds reuse per-repo directories (not hermetic)")
@@ -174,6 +177,11 @@ func runServe(args []string) error {
 		logger.Warn("reconciling interrupted runs failed", "err", err)
 	} else if n > 0 {
 		logger.Info("marked runs interrupted by the previous process as cancelled", "count", n)
+	}
+	if n, err := st.Prune(cfg.HistoryLimit); err != nil {
+		logger.Warn("pruning run history failed", "err", err)
+	} else if n > 0 {
+		logger.Info("pruned old runs beyond history_limit at startup", "removed", n, "keep", cfg.HistoryLimit)
 	}
 
 	opts := []server.Option{server.WithLogger(logger)}

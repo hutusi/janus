@@ -9,6 +9,21 @@ import (
 	"github.com/hutusi/janus/internal/model"
 )
 
+// page applies an offset then a limit to an already-ordered run slice. offset
+// past the end yields empty; limit <= 0 means no cap. Shared by both stores.
+func page(runs []*model.Run, limit, offset int) []*model.Run {
+	if offset > 0 {
+		if offset >= len(runs) {
+			return []*model.Run{}
+		}
+		runs = runs[offset:]
+	}
+	if limit > 0 && len(runs) > limit {
+		runs = runs[:limit]
+	}
+	return runs
+}
+
 // Store records run metadata and step logs.
 //
 // Run metadata and logs are stored separately: metadata is small and rewritten
@@ -21,8 +36,14 @@ type Store interface {
 	UpdateRun(run *model.Run) error
 	// GetRun returns the run with the given ID, or an error if absent.
 	GetRun(id string) (*model.Run, error)
-	// ListRuns returns runs newest-first, capped at limit (0 = no cap).
-	ListRuns(limit int) ([]*model.Run, error)
+	// ListRuns returns runs newest-first, skipping the first offset of them
+	// (offset <= 0 = from the start) and capping the result at limit (0 = no
+	// cap). An offset past the end returns an empty slice, not an error.
+	ListRuns(limit, offset int) ([]*model.Run, error)
+	// Prune deletes the oldest terminal runs (metadata and logs) beyond keep,
+	// returning how many were removed. Non-terminal runs are never pruned and
+	// do not count toward keep; keep <= 0 is a no-op.
+	Prune(keep int) (removed int, err error)
 
 	// LogWriter returns an append-only sink for one step's combined output.
 	LogWriter(runID, job string, stepIndex int) (io.WriteCloser, error)

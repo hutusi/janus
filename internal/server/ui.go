@@ -35,7 +35,7 @@ type indexData struct {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
-	runs, err := s.store.ListRuns(50)
+	runs, err := s.store.ListRuns(50, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

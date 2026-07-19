@@ -3,9 +3,45 @@ package store
 import (
 	"io"
 	"testing"
+	"time"
 
 	"github.com/hutusi/janus/internal/model"
 )
+
+func TestMemoryPruneDropsRunsAndLogs(t *testing.T) {
+	m := NewMemory()
+	base := time.Now()
+	for i := 0; i < 3; i++ { // r0 newest … r2 oldest, terminal
+		_ = m.SaveRun(sampleRun("r"+string(rune('0'+i)), base.Add(time.Duration(-i)*time.Minute)))
+	}
+	w, _ := m.LogWriter("r2", "build", 0)
+	_, _ = io.WriteString(w, "old")
+	_ = w.Close()
+
+	removed, err := m.Prune(1)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if _, err := m.GetRun("r0"); err != nil {
+		t.Errorf("newest run should survive: %v", err)
+	}
+	if _, err := m.GetRun("r2"); err == nil {
+		t.Error("oldest run should be pruned")
+	}
+	// Its logs are gone too (empty reader, no leaked buffer).
+	rc, _ := m.ReadLogs("r2", "build", 0, 0)
+	b, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if len(b) != 0 {
+		t.Errorf("pruned run's logs = %q, want empty", b)
+	}
+	if len(m.order) != 1 || m.order[0] != "r0" {
+		t.Errorf("order = %v, want [r0]", m.order)
+	}
+}
 
 // TestMemoryReturnsSnapshot pins the contract that fixes the data race between
 // the API encoding a run and the engine mutating it: the store holds an

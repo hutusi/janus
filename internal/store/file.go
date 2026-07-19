@@ -95,7 +95,18 @@ func (f *File) GetRun(id string) (*model.Run, error) {
 	return &run, nil
 }
 
-func (f *File) ListRuns(limit int) ([]*model.Run, error) {
+func (f *File) ListRuns(limit, offset int) ([]*model.Run, error) {
+	runs, err := f.allRuns()
+	if err != nil {
+		return nil, err
+	}
+	return page(runs, limit, offset), nil
+}
+
+// allRuns loads every run, newest-first. The flat-file store has no
+// time-sorted index, so this reads and decodes each run.json — bounded in
+// practice by history_limit retention (see Prune).
+func (f *File) allRuns() ([]*model.Run, error) {
 	entries, err := os.ReadDir(filepath.Join(f.root, "runs"))
 	if err != nil {
 		return nil, err
@@ -114,10 +125,39 @@ func (f *File) ListRuns(limit int) ([]*model.Run, error) {
 	sort.SliceStable(runs, func(i, j int) bool {
 		return runs[i].CreatedAt.After(runs[j].CreatedAt)
 	})
-	if limit > 0 && len(runs) > limit {
-		runs = runs[:limit]
-	}
 	return runs, nil
+}
+
+func (f *File) Prune(keep int) (int, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	runs, err := f.allRuns()
+	if err != nil {
+		return 0, err
+	}
+	// Keep the newest `keep` terminal runs; delete older terminal ones.
+	// Non-terminal runs are left untouched and don't count toward the budget.
+	kept := 0
+	var removed int
+	var firstErr error
+	for _, run := range runs { // newest-first
+		if !run.Status.Terminal() {
+			continue
+		}
+		if kept < keep {
+			kept++
+			continue
+		}
+		if err := os.RemoveAll(f.runDir(run.ID)); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
 }
 
 func (f *File) logPath(runID, job string, stepIndex int) string {

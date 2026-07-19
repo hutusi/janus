@@ -18,6 +18,78 @@ func sampleRun(id string, created time.Time) *model.Run {
 	}
 }
 
+func TestFileListRunsPagination(t *testing.T) {
+	st, _ := NewFile(t.TempDir())
+	base := time.Now()
+	// r0 newest … r4 oldest.
+	for i := 0; i < 5; i++ {
+		_ = st.SaveRun(sampleRun("r"+string(rune('0'+i)), base.Add(time.Duration(-i)*time.Minute)))
+	}
+	ids := func(limit, offset int) []string {
+		t.Helper()
+		runs, err := st.ListRuns(limit, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, len(runs))
+		for i, r := range runs {
+			got[i] = r.ID
+		}
+		return got
+	}
+	if got := ids(2, 0); len(got) != 2 || got[0] != "r0" || got[1] != "r1" {
+		t.Errorf("page 1 = %v, want [r0 r1]", got)
+	}
+	if got := ids(2, 2); len(got) != 2 || got[0] != "r2" || got[1] != "r3" {
+		t.Errorf("page 2 = %v, want [r2 r3]", got)
+	}
+	if got := ids(10, 4); len(got) != 1 || got[0] != "r4" {
+		t.Errorf("last page = %v, want [r4]", got)
+	}
+	if got := ids(10, 99); len(got) != 0 {
+		t.Errorf("offset past end = %v, want empty", got)
+	}
+}
+
+func TestFilePruneKeepsNewestTerminal(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := NewFile(dir)
+	base := time.Now()
+	for i := 0; i < 4; i++ { // r0 newest … r3 oldest, all terminal
+		_ = st.SaveRun(sampleRun("r"+string(rune('0'+i)), base.Add(time.Duration(-i)*time.Minute)))
+	}
+	// A running run older than the cap must survive — never prune non-terminal.
+	running := sampleRun("live", base.Add(-10*time.Minute))
+	running.Status = model.StatusRunning
+	_ = st.SaveRun(running)
+	// Give one victim a log file so we can confirm the whole dir goes.
+	w, _ := st.LogWriter("r3", "build", 0)
+	_, _ = io.WriteString(w, "old output")
+	_ = w.Close()
+
+	removed, err := st.Prune(2)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if removed != 2 { // r2 and r3 are the terminal runs beyond the newest 2
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	for _, id := range []string{"r0", "r1", "live"} {
+		if _, err := st.GetRun(id); err != nil {
+			t.Errorf("run %s should survive: %v", id, err)
+		}
+	}
+	for _, id := range []string{"r2", "r3"} {
+		if _, err := st.GetRun(id); err == nil {
+			t.Errorf("run %s should have been pruned", id)
+		}
+	}
+	// keep=0 is a no-op.
+	if n, _ := st.Prune(0); n != 0 {
+		t.Errorf("Prune(0) removed %d, want 0", n)
+	}
+}
+
 func TestFileStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	st, err := NewFile(dir)
@@ -59,7 +131,7 @@ func TestFileStoreSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runs, err := reopened.ListRuns(0)
+	runs, err := reopened.ListRuns(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

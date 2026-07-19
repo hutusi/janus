@@ -25,7 +25,13 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	runs, err := s.store.ListRuns(limit)
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	runs, err := s.store.ListRuns(limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -65,7 +71,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			s.streamStep(w, r, run.ID, job, step)
 			return
 		}
-		_, _ = w.Write(s.readStep(run.ID, job, step))
+		s.copyStep(w, run.ID, job, step)
 		return
 	}
 	s.writeRunLogs(w, run)
@@ -76,21 +82,21 @@ func (s *Server) writeRunLogs(w io.Writer, run *model.Run) {
 	for _, jr := range run.Jobs {
 		for _, sr := range jr.Steps {
 			_, _ = fmt.Fprintf(w, "=== %s / step %d [%s] ===\n", jr.Name, sr.Index, sr.Status)
-			_, _ = w.Write(s.readStep(run.ID, jr.Name, sr.Index))
+			s.copyStep(w, run.ID, jr.Name, sr.Index)
 			_, _ = io.WriteString(w, "\n")
 		}
 	}
 }
 
-func (s *Server) readStep(runID, job string, step int) []byte {
+// copyStep streams one step's full log to w without buffering it in memory.
+func (s *Server) copyStep(w io.Writer, runID, job string, step int) {
 	rc, err := s.store.ReadLogs(runID, job, step, 0)
 	if err != nil {
 		s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
-		return nil
+		return
 	}
 	defer func() { _ = rc.Close() }()
-	b, _ := io.ReadAll(rc)
-	return b
+	_, _ = io.Copy(w, rc)
 }
 
 // streamStep tails a single step's output until the step is terminal or the

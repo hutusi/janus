@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/hutusi/janus/internal/model"
@@ -80,9 +81,14 @@ func (m *Memory) GetRun(id string) (*model.Run, error) {
 	return run, nil
 }
 
-func (m *Memory) ListRuns(limit int) ([]*model.Run, error) {
+func (m *Memory) ListRuns(limit, offset int) ([]*model.Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return page(m.sortedLocked(), limit, offset), nil
+}
+
+// sortedLocked returns all runs newest-first. Caller holds m.mu.
+func (m *Memory) sortedLocked() []*model.Run {
 	runs := make([]*model.Run, 0, len(m.order))
 	for _, id := range m.order {
 		runs = append(runs, m.runs[id])
@@ -90,10 +96,49 @@ func (m *Memory) ListRuns(limit int) ([]*model.Run, error) {
 	sort.SliceStable(runs, func(i, j int) bool {
 		return runs[i].CreatedAt.After(runs[j].CreatedAt)
 	})
-	if limit > 0 && len(runs) > limit {
-		runs = runs[:limit]
+	return runs
+}
+
+func (m *Memory) Prune(keep int) (int, error) {
+	if keep <= 0 {
+		return 0, nil
 	}
-	return runs, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept, removed := 0, 0
+	victims := make(map[string]bool)
+	for _, run := range m.sortedLocked() { // newest-first
+		if !run.Status.Terminal() {
+			continue
+		}
+		if kept < keep {
+			kept++
+			continue
+		}
+		victims[run.ID] = true
+		removed++
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	for id := range victims {
+		delete(m.runs, id)
+	}
+	newOrder := m.order[:0:0]
+	for _, id := range m.order {
+		if !victims[id] {
+			newOrder = append(newOrder, id)
+		}
+	}
+	m.order = newOrder
+	for key := range m.logs {
+		for id := range victims {
+			if strings.HasPrefix(key, id+"/") {
+				delete(m.logs, key)
+			}
+		}
+	}
+	return removed, nil
 }
 
 func (m *Memory) LogWriter(runID, job string, stepIndex int) (io.WriteCloser, error) {

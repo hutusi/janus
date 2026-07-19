@@ -315,6 +315,33 @@ func TestTriggerStrictJSON(t *testing.T) {
 	}
 }
 
+func TestListRunsPagination(t *testing.T) {
+	st := store.NewMemory()
+	base := time.Now()
+	for i := 0; i < 3; i++ { // n0 newest … n2 oldest
+		run := &model.Run{ID: "n" + string(rune('0'+i)), Status: model.StatusSuccess, CreatedAt: base.Add(time.Duration(-i) * time.Minute)}
+		if err := st.SaveRun(run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eng := engine.New(st)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))), WithAPIToken(testAPIToken))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp := apiGet(t, ts.URL+"/api/runs?limit=1&offset=1")
+	defer func() { _ = resp.Body.Close() }()
+	var runs []model.Run
+	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != "n1" {
+		t.Fatalf("limit=1&offset=1 = %+v, want the 2nd-newest (n1)", runs)
+	}
+}
+
 func TestTriggerBodyTooLarge(t *testing.T) {
 	ts := newTestServer(t)
 	resp := postTrigger(t, ts, `{"repo_url": "`+strings.Repeat("a", maxTriggerBody)+`"}`)

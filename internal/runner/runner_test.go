@@ -289,6 +289,45 @@ func TestTriggerAdmissionBound(t *testing.T) {
 	}
 }
 
+func TestTriggerPrunesHistory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, HistoryLimit: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	first, err := r.Trigger(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("first Trigger: %v", err)
+	}
+	waitRun(t, st, first.RunID, 15*time.Second)
+	second, err := r.Trigger(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	waitRun(t, st, second.RunID, 15*time.Second)
+
+	// With history_limit=1, the first (older terminal) run is pruned once the
+	// second finishes; the newest survives.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runs, err := st.ListRuns(0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(runs) == 1 && runs[0].ID == second.RunID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("history not pruned to the newest run: %+v", runs)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestShutdownRejectsNewTriggers(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})

@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,7 +45,9 @@ type Runner struct {
 	pipelinePath string
 	keepWS       bool
 	persistent   bool
+	historyLimit int
 	allow        allowlist.Allowlist
+	logger       *slog.Logger
 
 	ctx    context.Context // root context for run execution and checkout; cancelled on Shutdown
 	cancel context.CancelFunc
@@ -66,7 +69,9 @@ type Options struct {
 	KeepWS       bool                // keep workspaces after runs (debugging)
 	Persistent   bool                // one reusable workspace per repo, updated in place (workspace_strategy: persistent)
 	MaxRuns      int                 // max concurrent runs (<=0 means 4)
+	HistoryLimit int                 // max terminal runs to retain (<=0 = unlimited); pruned after each run
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
+	Logger       *slog.Logger        // for background events (prune failures); defaults to slog.Default()
 }
 
 // Result reports the outcome of a trigger. Started is false (with a Reason)
@@ -84,6 +89,10 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 	if maxRuns <= 0 {
 		maxRuns = 4
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Runner{
 		store:        st,
@@ -92,7 +101,9 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		pipelinePath: opts.PipelinePath,
 		keepWS:       opts.KeepWS,
 		persistent:   opts.Persistent,
+		historyLimit: opts.HistoryLimit,
 		allow:        opts.Allowlist,
+		logger:       logger,
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
@@ -101,6 +112,19 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		// unbounded git processes or workspaces, not the exact queue depth.
 		admit: make(chan struct{}, 4*maxRuns),
 		locks: make(map[string]*sync.Mutex),
+	}
+}
+
+// pruneHistory enforces the retention cap (a no-op when unset), logging but
+// not failing on error — pruning is housekeeping, not part of the run.
+func (r *Runner) pruneHistory() {
+	if r.historyLimit <= 0 {
+		return
+	}
+	if n, err := r.store.Prune(r.historyLimit); err != nil {
+		r.logger.Warn("pruning run history failed", "err", err)
+	} else if n > 0 {
+		r.logger.Info("pruned old runs beyond history_limit", "removed", n, "keep", r.historyLimit)
 	}
 }
 
@@ -150,7 +174,7 @@ func (r *Runner) Sweep() error {
 // were repaired; per-run store errors skip that run, and the first is
 // returned after the pass completes.
 func (r *Runner) ReconcileInterrupted() (int, error) {
-	runs, err := r.store.ListRuns(0)
+	runs, err := r.store.ListRuns(0, 0) // reconciliation must see every run
 	if err != nil {
 		return 0, err
 	}
@@ -352,6 +376,7 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		defer func() { <-r.sem }()
 		// r.ctx is cancelled on Shutdown, so in-flight runs are stopped.
 		r.engine.Execute(r.ctx, run, wf, ws.Dir)
+		r.pruneHistory()
 	}()
 
 	return Result{RunID: run.ID, Started: true}, nil
