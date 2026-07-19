@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -255,6 +256,54 @@ func TestFileGetRunRejectsOversized(t *testing.T) {
 	}
 	if _, err := st.GetRun("r1"); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Errorf("GetRun on an oversized record = %v, want a too-large error", err)
+	}
+}
+
+func TestFileListReadsSidecarNotRunJSON(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := NewFile(dir)
+	if err := st.SaveRun(sampleRun("r1", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	// The sidecar exists after SaveRun.
+	if _, err := os.Stat(filepath.Join(dir, "runs", "r1", "summary.json")); err != nil {
+		t.Fatalf("summary.json sidecar should exist after SaveRun: %v", err)
+	}
+	// Corrupt run.json; listing must still work (it reads the sidecar, not the
+	// full record), while GetRun (source of truth) now fails.
+	if err := os.WriteFile(filepath.Join(dir, "runs", "r1", "run.json"), []byte("{ not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != 1 || sums[0].ID != "r1" {
+		t.Fatalf("ListRuns from sidecar = %+v, want [r1]", sums)
+	}
+	if _, err := st.GetRun("r1"); err == nil {
+		t.Error("GetRun should fail on the corrupted run.json")
+	}
+}
+
+func TestFileListSelfHealsLegacyRun(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := NewFile(dir)
+	// A "legacy" run: run.json only, no sidecar (as if written before this change).
+	rd := filepath.Join(dir, "runs", "old")
+	if err := os.MkdirAll(rd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(sampleRun("old", time.Now()))
+	if err := os.WriteFile(filepath.Join(rd, "run.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sums, err := st.ListRuns(0, 0)
+	if err != nil || len(sums) != 1 || sums[0].ID != "old" {
+		t.Fatalf("ListRuns of a legacy run = %+v, %v", sums, err)
+	}
+	if _, err := os.Stat(filepath.Join(rd, "summary.json")); err != nil {
+		t.Errorf("listing a legacy run should self-heal its sidecar: %v", err)
 	}
 }
 

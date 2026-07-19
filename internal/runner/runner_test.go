@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -245,6 +246,41 @@ func TestReconcileInterrupted(t *testing.T) {
 
 	if d, _ := st.GetRun("done"); d.Status != model.StatusSuccess {
 		t.Errorf("terminal run = %s, must stay untouched", d.Status)
+	}
+}
+
+func TestReconcileIgnoresStaleSidecar(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	// A finished (terminal) run whose sidecar lagged at "running" — as a crash
+	// between the run.json and summary.json writes would leave it.
+	done := &model.Run{ID: "done", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(done); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := json.Marshal(&model.RunSummary{ID: "done", Status: model.StatusRunning, CreatedAt: done.CreatedAt})
+	if err := os.WriteFile(filepath.Join(dir, "runs", "done", "summary.json"), stale, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.ReconcileInterrupted(); err != nil {
+		t.Fatalf("ReconcileInterrupted: %v", err)
+	}
+	// The finished run must NOT be clobbered to cancelled...
+	got, _ := st.GetRun("done")
+	if got.Status != model.StatusSuccess {
+		t.Errorf("reconcile clobbered a terminal run: status = %s, want success", got.Status)
+	}
+	// ...and its stale sidecar must be healed to the real status.
+	sums, _ := st.ListRuns(0, 0)
+	if len(sums) != 1 || sums[0].Status != model.StatusSuccess {
+		t.Errorf("stale sidecar not healed: %+v", sums)
 	}
 }
 

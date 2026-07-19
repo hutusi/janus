@@ -66,7 +66,32 @@ func (f *File) writeRun(run *model.Run) error {
 	if int64(len(data)) > maxRunFileBytes {
 		return fmt.Errorf("run %q metadata is too large to persist (limit %d bytes)", run.ID, maxRunFileBytes)
 	}
-	tmp, err := os.CreateTemp(dir, ".run-*.json")
+	// run.json is the source of truth — write it first, then the summary
+	// sidecar. That ordering keeps a stale sidecar's lifecycle status <= the
+	// record's (pending->running->terminal is monotonic, terminal is final), so
+	// a lagging sidecar can never claim "terminal" for a still-running run.
+	if err := writeAtomic(dir, "run.json", data); err != nil {
+		return err
+	}
+	// The sidecar is a listing cache; a write hiccup must not fail a valid
+	// persist — readSummary falls back to run.json (and re-heals) if it is
+	// missing.
+	_ = writeSummary(dir, run.Summary())
+	return nil
+}
+
+// writeSummary writes the compact summary sidecar used by ListRuns/Prune.
+func writeSummary(dir string, s *model.RunSummary) error {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(dir, "summary.json", data)
+}
+
+// writeAtomic writes data to dir/name via a temp file + rename.
+func writeAtomic(dir, name string, data []byte) error {
+	tmp, err := os.CreateTemp(dir, "."+name+"-*")
 	if err != nil {
 		return err
 	}
@@ -80,7 +105,7 @@ func (f *File) writeRun(run *model.Run) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, filepath.Join(dir, "run.json"))
+	return os.Rename(tmpName, filepath.Join(dir, name))
 }
 
 // maxRunFileBytes bounds both a run.json write and read symmetrically. Records
@@ -123,34 +148,37 @@ func (f *File) ListRuns(limit, offset int) ([]*model.RunSummary, error) {
 	return page(sums, limit, offset), nil
 }
 
-// readSummary reads one run.json (bounded) and partial-decodes it into a
-// RunSummary — the heavy Jobs slice in the JSON is skipped, so nothing beyond
-// the summary is retained.
+// maxSummaryFileBytes bounds a summary.json read. A summary is a handful of
+// capped fields, so this is small; it only guards against a corrupt sidecar.
+const maxSummaryFileBytes = 64 << 10
+
+// readSummary returns a run's compact summary. It reads the tiny summary.json
+// sidecar so listing never parses the full run.json. If the sidecar is missing
+// or unreadable (a legacy run, or a failed sidecar write), it falls back to
+// deriving the summary from run.json and rewrites the sidecar (self-healing,
+// backward-compatible).
 func (f *File) readSummary(id string) (*model.RunSummary, error) {
-	file, err := os.Open(filepath.Join(f.runDir(id), "run.json"))
+	if data, err := os.ReadFile(filepath.Join(f.runDir(id), "summary.json")); err == nil && int64(len(data)) <= maxSummaryFileBytes {
+		var s model.RunSummary
+		if err := json.Unmarshal(data, &s); err == nil {
+			return &s, nil
+		}
+	}
+	// Fallback: derive from the source of truth and heal the sidecar.
+	run, err := f.GetRun(id)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = file.Close() }()
-	data, err := io.ReadAll(io.LimitReader(file, maxRunFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxRunFileBytes {
-		return nil, fmt.Errorf("run %q metadata is too large (limit %d bytes)", id, maxRunFileBytes)
-	}
-	var s model.RunSummary
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, err
-	}
-	return &s, nil
+	s := run.Summary()
+	_ = writeSummary(f.runDir(id), s)
+	return s, nil
 }
 
 // allSummaries scans every run directory and returns compact summaries
-// newest-first. The flat-file store has no time-sorted index, so it reads each
-// run.json — but retains only summaries, so memory stays bounded regardless of
-// run count (peak = all summaries + one in-flight record). Retention
-// (history_limit) bounds the disk scan itself.
+// newest-first, reading only the tiny summary.json sidecar per run (see
+// readSummary) — not the full run.json — so listing stays cheap in both memory
+// and disk/CPU regardless of record size. Retention (history_limit) bounds the
+// directory scan itself.
 func (f *File) allSummaries() ([]*model.RunSummary, error) {
 	entries, err := os.ReadDir(filepath.Join(f.root, "runs"))
 	if err != nil {

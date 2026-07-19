@@ -214,6 +214,14 @@ func (r *Runner) ReconcileInterrupted() (int, error) {
 			}
 			continue
 		}
+		// The summary is a listing cache and can lag behind run.json (the
+		// source of truth). If the full record is actually terminal, the
+		// summary was stale — do NOT repair (that would overwrite a finished
+		// run); rewrite it to heal the sidecar and move on.
+		if run.Status.Terminal() {
+			_ = r.store.UpdateRun(run)
+			continue
+		}
 		for _, jr := range run.Jobs {
 			for _, sr := range jr.Steps {
 				if !sr.Status.Terminal() {
