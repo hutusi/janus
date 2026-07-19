@@ -108,7 +108,7 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 | Method & path                     | Purpose |
 |-----------------------------------|---------|
 | `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref","pipeline_path"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist; `pipeline_path` optionally picks a committed pipeline file by name relative to the pipeline directory, e.g. `"release.yml"` → `.janus/release.yml`). Unknown JSON fields are a `400`; when the run queue is full, `503` with `Retry-After` — retry later. |
-| `GET /api/runs`                   | List runs, newest first (`?limit=&offset=` for paging) |
+| `GET /api/runs`                   | List run **summaries**, newest first (`?limit=&offset=` for paging); no per-step `jobs` — see the detail endpoint |
 | `GET /api/runs/{id}`              | Run detail (job/step statuses, exit codes) |
 | `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream |
 | `GET /healthz`                    | Health + version |

@@ -60,6 +60,12 @@ func (f *File) writeRun(run *model.Run) error {
 	if err != nil {
 		return err
 	}
+	// Enforce the same cap GetRun reads with, so we never persist a record that
+	// can then never be read back (which would drop it from list/detail/
+	// reconciliation). With the ingestion caps in place this never trips.
+	if int64(len(data)) > maxRunFileBytes {
+		return fmt.Errorf("run %q metadata is too large to persist (limit %d bytes)", run.ID, maxRunFileBytes)
+	}
 	tmp, err := os.CreateTemp(dir, ".run-*.json")
 	if err != nil {
 		return err
@@ -77,10 +83,11 @@ func (f *File) writeRun(run *model.Run) error {
 	return os.Rename(tmpName, filepath.Join(dir, "run.json"))
 }
 
-// maxRunFileBytes bounds a run.json read. Records are bounded by the ingestion
-// caps (pipeline file, event fields), so 16 MiB is generous headroom; the cap
-// only guards against a corrupt or legacy oversized file being loaded whole.
-const maxRunFileBytes = 16 << 20
+// maxRunFileBytes bounds both a run.json write and read symmetrically. Records
+// are bounded by the ingestion caps (pipeline file, event fields), so 16 MiB is
+// generous headroom; the cap guards against a corrupt/oversized file being
+// written or read whole. A var so tests can shrink it.
+var maxRunFileBytes int64 = 16 << 20
 
 func (f *File) GetRun(id string) (*model.Run, error) {
 	if err := checkRunID(id); err != nil {
@@ -108,44 +115,69 @@ func (f *File) GetRun(id string) (*model.Run, error) {
 	return &run, nil
 }
 
-func (f *File) ListRuns(limit, offset int) ([]*model.Run, error) {
-	runs, err := f.allRuns()
+func (f *File) ListRuns(limit, offset int) ([]*model.RunSummary, error) {
+	sums, err := f.allSummaries()
 	if err != nil {
 		return nil, err
 	}
-	return page(runs, limit, offset), nil
+	return page(sums, limit, offset), nil
 }
 
-// allRuns loads every run, newest-first. The flat-file store has no
-// time-sorted index, so this reads and decodes each run.json — bounded in
-// practice by history_limit retention (see Prune).
-func (f *File) allRuns() ([]*model.Run, error) {
+// readSummary reads one run.json (bounded) and partial-decodes it into a
+// RunSummary — the heavy Jobs slice in the JSON is skipped, so nothing beyond
+// the summary is retained.
+func (f *File) readSummary(id string) (*model.RunSummary, error) {
+	file, err := os.Open(filepath.Join(f.runDir(id), "run.json"))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maxRunFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxRunFileBytes {
+		return nil, fmt.Errorf("run %q metadata is too large (limit %d bytes)", id, maxRunFileBytes)
+	}
+	var s model.RunSummary
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// allSummaries scans every run directory and returns compact summaries
+// newest-first. The flat-file store has no time-sorted index, so it reads each
+// run.json — but retains only summaries, so memory stays bounded regardless of
+// run count (peak = all summaries + one in-flight record). Retention
+// (history_limit) bounds the disk scan itself.
+func (f *File) allSummaries() ([]*model.RunSummary, error) {
 	entries, err := os.ReadDir(filepath.Join(f.root, "runs"))
 	if err != nil {
 		return nil, err
 	}
-	runs := make([]*model.Run, 0, len(entries))
+	sums := make([]*model.RunSummary, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		run, err := f.GetRun(e.Name())
+		s, err := f.readSummary(e.Name())
 		if err != nil {
 			continue // skip incomplete/unreadable run dirs
 		}
-		runs = append(runs, run)
+		sums = append(sums, s)
 	}
-	sort.SliceStable(runs, func(i, j int) bool {
-		return runs[i].CreatedAt.After(runs[j].CreatedAt)
+	sort.SliceStable(sums, func(i, j int) bool {
+		return sums[i].CreatedAt.After(sums[j].CreatedAt)
 	})
-	return runs, nil
+	return sums, nil
 }
 
 func (f *File) Prune(keep int) (int, error) {
 	if keep <= 0 {
 		return 0, nil
 	}
-	runs, err := f.allRuns()
+	sums, err := f.allSummaries()
 	if err != nil {
 		return 0, err
 	}
@@ -154,15 +186,15 @@ func (f *File) Prune(keep int) (int, error) {
 	kept := 0
 	var removed int
 	var firstErr error
-	for _, run := range runs { // newest-first
-		if !run.Status.Terminal() {
+	for _, s := range sums { // newest-first
+		if !s.Status.Terminal() {
 			continue
 		}
 		if kept < keep {
 			kept++
 			continue
 		}
-		if err := os.RemoveAll(f.runDir(run.ID)); err != nil {
+		if err := os.RemoveAll(f.runDir(s.ID)); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}

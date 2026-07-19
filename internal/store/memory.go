@@ -81,10 +81,15 @@ func (m *Memory) GetRun(id string) (*model.Run, error) {
 	return run, nil
 }
 
-func (m *Memory) ListRuns(limit, offset int) ([]*model.Run, error) {
+func (m *Memory) ListRuns(limit, offset int) ([]*model.RunSummary, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return page(m.sortedLocked(), limit, offset), nil
+	runs := page(m.sortedLocked(), limit, offset)
+	sums := make([]*model.RunSummary, len(runs))
+	for i, r := range runs {
+		sums[i] = r.Summary()
+	}
+	return sums, nil
 }
 
 // sortedLocked returns all runs newest-first. Caller holds m.mu.

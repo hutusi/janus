@@ -617,12 +617,35 @@ func TestListRunsPagination(t *testing.T) {
 
 	resp := apiGet(t, ts.URL+"/api/runs?limit=1&offset=1")
 	defer func() { _ = resp.Body.Close() }()
-	var runs []model.Run
+	var runs []model.RunSummary
 	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil {
 		t.Fatal(err)
 	}
 	if len(runs) != 1 || runs[0].ID != "n1" {
 		t.Fatalf("limit=1&offset=1 = %+v, want the 2nd-newest (n1)", runs)
+	}
+}
+
+func TestListRunsReturnsSummariesNotJobs(t *testing.T) {
+	st := store.NewMemory()
+	// A run with a heavy jobs slice — the list must not carry it.
+	run := &model.Run{ID: "r", WorkflowName: "ci", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Event: model.Event{Kind: model.EventPush, Branch: "main"},
+		Jobs:  []*model.JobRun{{Name: "build", Steps: []*model.StepRun{{Index: 0, Command: "secret-heavy-command"}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))), WithAPIToken(testAPIToken))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	body := getText(t, ts.URL+"/api/runs")
+	// The summary carries the listing fields but not the jobs/commands.
+	if !strings.Contains(body, `"id":"r"`) || !strings.Contains(body, `"branch":"main"`) {
+		t.Errorf("list should carry summary fields: %s", body)
+	}
+	if strings.Contains(body, "secret-heavy-command") || strings.Contains(body, `"jobs"`) {
+		t.Errorf("list must not carry the heavy jobs slice: %s", body)
 	}
 }
 

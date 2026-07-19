@@ -258,6 +258,39 @@ func TestFileGetRunRejectsOversized(t *testing.T) {
 	}
 }
 
+func TestFileListRunsOmitsJobs(t *testing.T) {
+	st, _ := NewFile(t.TempDir())
+	run := sampleRun("r1", time.Now()) // sampleRun has a build job with a step
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != 1 || sums[0].ID != "r1" || sums[0].Status != model.StatusSuccess {
+		t.Fatalf("summary = %+v, want r1/success", sums)
+	}
+	// GetRun still carries the full jobs.
+	full, _ := st.GetRun("r1")
+	if len(full.Jobs) == 0 {
+		t.Error("GetRun should still return the full jobs")
+	}
+}
+
+func TestFileWriteRunRejectsOversized(t *testing.T) {
+	orig := maxRunFileBytes
+	maxRunFileBytes = 256 // tiny, so a normal run overflows
+	t.Cleanup(func() { maxRunFileBytes = orig })
+
+	st, _ := NewFile(t.TempDir())
+	run := sampleRun("r1", time.Now())
+	run.Event.Title = strings.Repeat("t", 500) // pushes serialized size past the cap
+	if err := st.SaveRun(run); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Errorf("SaveRun of an oversized record = %v, want a too-large error (symmetric with GetRun)", err)
+	}
+}
+
 func TestFileStoreMissingRun(t *testing.T) {
 	st, _ := NewFile(t.TempDir())
 	if _, err := st.GetRun("nope"); err == nil {

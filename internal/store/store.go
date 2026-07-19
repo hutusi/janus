@@ -11,17 +11,17 @@ import (
 
 // page applies an offset then a limit to an already-ordered run slice. offset
 // past the end yields empty; limit <= 0 means no cap. Shared by both stores.
-func page(runs []*model.Run, limit, offset int) []*model.Run {
+func page[T any](items []T, limit, offset int) []T {
 	if offset > 0 {
-		if offset >= len(runs) {
-			return []*model.Run{}
+		if offset >= len(items) {
+			return []T{}
 		}
-		runs = runs[offset:]
+		items = items[offset:]
 	}
-	if limit > 0 && len(runs) > limit {
-		runs = runs[:limit]
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
 	}
-	return runs
+	return items
 }
 
 // Store records run metadata and step logs.
@@ -36,10 +36,12 @@ type Store interface {
 	UpdateRun(run *model.Run) error
 	// GetRun returns the run with the given ID, or an error if absent.
 	GetRun(id string) (*model.Run, error)
-	// ListRuns returns runs newest-first, skipping the first offset of them
-	// (offset <= 0 = from the start) and capping the result at limit (0 = no
-	// cap). An offset past the end returns an empty slice, not an error.
-	ListRuns(limit, offset int) ([]*model.Run, error)
+	// ListRuns returns compact run summaries newest-first, skipping the first
+	// offset of them (offset <= 0 = from the start) and capping the result at
+	// limit (0 = no cap). Summaries omit the heavy Jobs slice so a listing
+	// never holds every full record in memory; full detail is via GetRun. An
+	// offset past the end returns an empty slice, not an error.
+	ListRuns(limit, offset int) ([]*model.RunSummary, error)
 	// Prune deletes the oldest terminal runs (metadata and logs) beyond keep,
 	// returning how many were removed. Non-terminal runs are never pruned and
 	// do not count toward keep; keep <= 0 is a no-op.

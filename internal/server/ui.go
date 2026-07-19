@@ -61,7 +61,7 @@ var templateFuncs = template.FuncMap{
 // indexData is the model for the run-list page.
 type indexData struct {
 	Version string
-	Runs    []*model.Run
+	Runs    []*model.RunSummary
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {

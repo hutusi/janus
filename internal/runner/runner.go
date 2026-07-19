@@ -194,15 +194,24 @@ func (r *Runner) Sweep() error {
 // were repaired; per-run store errors skip that run, and the first is
 // returned after the pass completes.
 func (r *Runner) ReconcileInterrupted() (int, error) {
-	runs, err := r.store.ListRuns(0, 0) // reconciliation must see every run
+	// Scan compact summaries (bounded memory), then load only the non-terminal
+	// runs — the few a crash left mid-flight — one full record at a time.
+	summaries, err := r.store.ListRuns(0, 0)
 	if err != nil {
 		return 0, err
 	}
 	var repaired int
 	var firstErr error
 	now := time.Now()
-	for _, run := range runs {
-		if run.Status.Terminal() {
+	for _, s := range summaries {
+		if s.Status.Terminal() {
+			continue
+		}
+		run, err := r.store.GetRun(s.ID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		for _, jr := range run.Jobs {
@@ -298,6 +307,7 @@ const (
 	maxRefLen          = 512
 	maxBranchLen       = 512
 	maxPipelinePathLen = 512
+	maxTitleLen        = 4 << 10 // commit/MR title, display only
 )
 
 // validateEvent rejects over-long event fields before any disk work.
@@ -311,6 +321,7 @@ func validateEvent(ev model.Event) error {
 		{"ref", ev.Ref, maxRefLen},
 		{"branch", ev.Branch, maxBranchLen},
 		{"pipeline_path", ev.PipelinePath, maxPipelinePathLen},
+		{"title", ev.Title, maxTitleLen},
 	} {
 		if len(f.value) > f.max {
 			return fmt.Errorf("%s is too long: %d bytes (max %d)", f.name, len(f.value), f.max)
