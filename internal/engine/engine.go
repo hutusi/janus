@@ -106,16 +106,37 @@ func (rs *runState) update(mutate func()) {
 	}
 }
 
+// finalPersistAttempts / finalPersistBackoff bound the retry of a run's
+// terminal write. Vars, not consts, so tests can zero the backoff.
+var (
+	finalPersistAttempts = 3
+	finalPersistBackoff  = 250 * time.Millisecond
+)
+
 // updateFinal is update for a run's terminal transition: there is no later
-// write to self-heal a miss, so a persistence failure here leaves the stored
-// run non-terminal forever and is logged at Error.
+// write to self-heal a miss, so a transient failure (a full or briefly
+// read-only disk) would otherwise strand the stored run non-terminal forever —
+// which startup reconciliation later records as cancelled even for a run that
+// actually succeeded. It retries the write a few times before giving up and
+// logging at Error. Deliberately no error propagation or health endpoint:
+// Execute runs in a detached goroutine with no caller to receive the error,
+// and startup reconciliation is the backstop — a health surface for this one
+// failure mode is out of scope for a minimal tool.
 func (rs *runState) updateFinal(mutate func()) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	mutate()
-	if err := rs.store.UpdateRun(rs.run); err != nil {
-		rs.logger.Error("persisting final run state failed; the stored run stays stale", "run", rs.run.ID, "status", rs.run.Status, "err", err)
+	var err error
+	for attempt := 1; ; attempt++ {
+		if err = rs.store.UpdateRun(rs.run); err == nil {
+			return
+		}
+		if attempt >= finalPersistAttempts {
+			break
+		}
+		time.Sleep(finalPersistBackoff)
 	}
+	rs.logger.Error("persisting final run state failed after retries; the stored run stays stale", "run", rs.run.ID, "status", rs.run.Status, "attempts", finalPersistAttempts, "err", err)
 }
 
 type jobResult struct {

@@ -301,8 +301,11 @@ func TestTriggerValidation(t *testing.T) {
 func TestTriggerStrictJSON(t *testing.T) {
 	ts := newTestServer(t)
 	for name, body := range map[string]string{
-		"unknown field": `{"repo_url": "/tmp/x", "ref": "refs/heads/main", "bogus": 1}`,
-		"trailing data": `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}{"more": true}`,
+		"unknown field":         `{"repo_url": "/tmp/x", "ref": "refs/heads/main", "bogus": 1}`,
+		"trailing object":       `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}{"more": true}`,
+		"trailing close-array":  `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}]`,
+		"trailing close-object": `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}}`,
+		"trailing garbage":      `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}xyz`,
 	} {
 		resp := postTrigger(t, ts, body)
 		_ = resp.Body.Close()

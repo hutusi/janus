@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -40,7 +41,16 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	if dec.More() {
+	// Require the body to be exactly one JSON value: a second Decode must hit
+	// EOF. dec.More() is not enough — it returns false for a trailing `]`/`}`,
+	// so `{...}]` would slip through, and it can mask a body-limit error hit
+	// while scanning trailing bytes.
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "unexpected data after the JSON body")
 		return
 	}

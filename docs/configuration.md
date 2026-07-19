@@ -81,8 +81,11 @@ being used to run an attacker-controlled repo.
   - `https://gitlab.example.com/acme` → any repo under the `acme` group, but
     **not** `…/acmecorp` and **not** the look-alike host
     `https://gitlab.example.com.evil.com/…`.
-  - A trailing `.git` and the default port (`:443`/`:80`/`:22`) are normalized,
-    and scheme + host are matched case-insensitively (paths are case-sensitive).
+  - A trailing `.git` and each scheme's default port (`https` 443, `http` 80,
+    `ssh` 22, `git` 9418) are normalized, and scheme + host are matched
+    case-insensitively (paths are case-sensitive). Userinfo is **significant**:
+    `ssh://git@host/…` and `ssh://root@host/…` are different authorities
+    (git connects as that user) and do not match each other.
   - URLs whose path contains `.` or `..` segments — literal or percent-encoded
     (`%2e`, `%2f`, `%25`) — are **always denied**: git or the filesystem could
     resolve them across the prefix boundary after the match. An allowlist

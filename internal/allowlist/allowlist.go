@@ -98,7 +98,14 @@ func normalize(s string) string {
 		if p := u.Port(); p != "" && !isDefaultPort(strings.ToLower(u.Scheme), p) {
 			host += ":" + p
 		}
-		s = strings.ToLower(u.Scheme) + "://" + host + u.EscapedPath()
+		// Userinfo is significant: git connects as that user, so
+		// ssh://git@host and ssh://root@host are different authorities and must
+		// not compare equal. Kept case-sensitively (unlike the host).
+		auth := host
+		if u.User != nil {
+			auth = u.User.String() + "@" + auth
+		}
+		s = strings.ToLower(u.Scheme) + "://" + auth + u.EscapedPath()
 	}
 	s = strings.TrimSuffix(s, "/")
 	s = strings.TrimSuffix(s, ".git")
@@ -126,8 +133,10 @@ func isDefaultPort(scheme, port string) bool {
 		return port == "443"
 	case "http":
 		return port == "80"
-	case "ssh", "git":
+	case "ssh":
 		return port == "22"
+	case "git":
+		return port == "9418" // the git protocol's own port, not ssh's 22
 	}
 	return false
 }

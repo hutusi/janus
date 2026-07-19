@@ -206,25 +206,42 @@ jobs:
 	}
 }
 
-// updateFailStore fails every UpdateRun, simulating a full or read-only disk
-// under a running daemon.
-type updateFailStore struct {
+// terminalFailStore fails the terminal UpdateRun (the write of a terminal
+// status) failFirst times, then succeeds, counting terminal-write attempts.
+// It simulates a full or briefly read-only disk under a running daemon.
+type terminalFailStore struct {
 	store.Store
+	failFirst int
+	attempts  int
 }
 
-func (updateFailStore) UpdateRun(*model.Run) error { return errors.New("disk full") }
+func (s *terminalFailStore) UpdateRun(run *model.Run) error {
+	if run.Status.Terminal() {
+		s.attempts++
+		if s.attempts <= s.failFirst {
+			return errors.New("disk full")
+		}
+	}
+	return s.Store.UpdateRun(run)
+}
 
-func TestFinalPersistFailureLogsAtError(t *testing.T) {
-	wf := mustParse(t, `
+const okPipeline = `
 name: ci
 on: { push: {} }
 jobs:
   build:
     steps:
       - run: echo hi
-`)
+`
+
+func TestFinalPersistFailureLogsAtError(t *testing.T) {
+	finalPersistBackoff = 0
+	t.Cleanup(func() { finalPersistBackoff = 250 * time.Millisecond })
+
+	wf := mustParse(t, okPipeline)
 	var buf bytes.Buffer
-	eng := New(updateFailStore{store.NewMemory()}, WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	st := &terminalFailStore{Store: store.NewMemory(), failFirst: finalPersistAttempts} // never succeeds
+	eng := New(st, WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 	run, err := eng.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -233,10 +250,37 @@ jobs:
 	if run.Status != model.StatusSuccess {
 		t.Errorf("run status = %s, want success", run.Status)
 	}
-	// But the unpersistable *terminal* state — after which the stored record
-	// would be stale forever — must be logged at Error, not Warn.
+	// The terminal write is retried the full budget before giving up.
+	if st.attempts != finalPersistAttempts {
+		t.Errorf("terminal write attempts = %d, want %d", st.attempts, finalPersistAttempts)
+	}
+	// And the unpersistable terminal state is logged at Error, not Warn.
 	if logs := buf.String(); !strings.Contains(logs, "level=ERROR") || !strings.Contains(logs, "final run state") {
 		t.Errorf("expected an error-level log about the final persist failure, got:\n%s", logs)
+	}
+}
+
+func TestFinalPersistRetrySucceeds(t *testing.T) {
+	finalPersistBackoff = 0
+	t.Cleanup(func() { finalPersistBackoff = 250 * time.Millisecond })
+
+	wf := mustParse(t, okPipeline)
+	var buf bytes.Buffer
+	st := &terminalFailStore{Store: store.NewMemory(), failFirst: 1} // succeeds on the retry
+	eng := New(st, WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	run, err := eng.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	stored, err := st.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Status != model.StatusSuccess {
+		t.Errorf("stored run status = %s, want success (retry should persist it)", stored.Status)
+	}
+	if strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("a recovered retry should not log at Error:\n%s", buf.String())
 	}
 }
 

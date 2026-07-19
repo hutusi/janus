@@ -52,6 +52,13 @@ func TestAllows(t *testing.T) {
 		{"deny dot-dot via .git trim", []string{"https://gl.example.com/acme"}, "https://gl.example.com/acme/...git", false},
 		{"deny scp-style traversal", []string{"git@gl.example.com:acme"}, "git@gl.example.com:acme/../evil.git", false},
 		{"deny local path traversal", []string{"/srv/git/acme"}, "/srv/git/acme/../../home/evil.git", false},
+
+		{"userinfo must match", []string{"ssh://git@gl.example.com/acme"}, "ssh://git@gl.example.com/acme/app.git", true},
+		{"deny different userinfo", []string{"ssh://git@gl.example.com/acme"}, "ssh://root@gl.example.com/acme/app.git", false},
+		{"deny added userinfo", []string{"ssh://gl.example.com/acme"}, "ssh://root@gl.example.com/acme/app.git", false},
+		{"git default port unified", []string{"git://gl.example.com/acme"}, "git://gl.example.com:9418/acme/app.git", true},
+		{"git non-default port must match", []string{"git://gl.example.com/acme"}, "git://gl.example.com:22/acme/app.git", false},
+		{"ssh default port unified", []string{"ssh://gl.example.com/acme"}, "ssh://gl.example.com:22/acme/app.git", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

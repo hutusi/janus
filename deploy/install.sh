@@ -322,7 +322,9 @@ verify_service() {
 		i=$((i + 1))
 		sleep 1
 	done
-	warn "healthz did not respond at $url yet — inspect with: journalctl -u janus -e"
+	# curl is present but the service never answered in 10s — it is active but
+	# not serving. Fail the install rather than let the summary claim success.
+	err "healthz did not respond at $url after 10s — the service is active but not serving; inspect with: journalctl -u janus -e"
 }
 
 # Reverse of install: stop and remove the service and binary. Keeps the config
