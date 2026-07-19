@@ -328,6 +328,52 @@ func TestTriggerPrunesHistory(t *testing.T) {
 	}
 }
 
+func TestTriggerInvalidTargetLeavesNoWorkspace(t *testing.T) {
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	// Invalid SHA: workspace.Checkout rejects it before creating a
+	// cleanup-capable Workspace, so the runner must remove the run-* dir it made.
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/some/repo", SHA: "not-hex", Ref: "refs/heads/main"}
+
+	if _, err := r.Trigger(context.Background(), ev); err == nil {
+		t.Fatal("Trigger with an invalid SHA should error")
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "run-*"))
+	if len(matches) != 0 {
+		t.Errorf("invalid target leaked workspace dirs: %v", matches)
+	}
+}
+
+func TestTriggerCheckoutHonorsRequestCancellation(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// An already-cancelled request context must abort the checkout — with the
+	// old r.ctx-only code the request cancellation was ignored and this
+	// checkout would succeed.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.Trigger(ctx, ev); err == nil {
+		t.Fatal("Trigger with a cancelled request ctx should fail the checkout")
+	}
+	if runs, _ := st.ListRuns(0, 0); len(runs) != 0 {
+		t.Errorf("a cancelled checkout must not record a run, got %d", len(runs))
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "run-*"))
+	if len(matches) != 0 {
+		t.Errorf("a cancelled checkout leaked workspace dirs: %v", matches)
+	}
+}
+
 func TestShutdownRejectsNewTriggers(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})

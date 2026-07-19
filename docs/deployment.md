@@ -154,6 +154,12 @@ journalctl -u janus -f          # follow logs
 curl -s localhost:8080/healthz  # {"status":"ok","version":"v0.1.0"}
 ```
 
+`/healthz` returns `200 {"status":"ok"}` normally. It returns
+`503 {"status":"degraded"}` if a run's final state could not be persisted even
+after retries (a full or read-only data dir) — stored history is then stale;
+check the logs and restart to clear the latch. Point your monitoring at this
+endpoint.
+
 ## 6. TLS / reverse proxy
 
 Janus speaks **plain HTTP** and has no TLS of its own — terminate TLS at a reverse

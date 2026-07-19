@@ -25,6 +25,9 @@ func TestLoadEmptyPathReturnsDefaults(t *testing.T) {
 	if cfg.Addr != ":8080" || cfg.PipelinePath != ".janus/ci.yml" || cfg.MaxParallelJobs != 4 {
 		t.Errorf("Load(\"\") did not return defaults: %+v", cfg)
 	}
+	if cfg.HistoryLimit != 1000 {
+		t.Errorf("default history_limit = %d, want 1000", cfg.HistoryLimit)
+	}
 }
 
 func TestLoadOverlaysFileOnDefaults(t *testing.T) {

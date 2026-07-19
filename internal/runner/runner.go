@@ -115,6 +115,10 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 	}
 }
 
+// Degraded reports whether the engine ever abandoned a run's terminal state
+// unpersisted; the daemon surfaces it via /healthz.
+func (r *Runner) Degraded() bool { return r.engine.Degraded() }
+
 // pruneHistory enforces the retention cap (a no-op when unset), logging but
 // not failing on error — pruning is housekeeping, not part of the run.
 func (r *Runner) pruneHistory() {
@@ -262,6 +266,12 @@ func (r *Runner) Shutdown(grace time.Duration) {
 	}
 }
 
+// checkoutTimeout bounds a single checkout so a stalled or malicious git
+// server cannot pin an HTTP handler and an admission slot indefinitely. It is
+// a var (not a const) only so tests can shrink it; 10m clears a large shallow
+// clone with margin.
+var checkoutTimeout = 10 * time.Minute
+
 // Trigger checks out the repo at ev's commit, parses the pipeline (the
 // configured path, or ev.PipelinePath when set), and — if the event matches —
 // records and asynchronously executes a run. Fresh workspaces are removed when
@@ -272,11 +282,12 @@ func (r *Runner) Shutdown(grace time.Duration) {
 // checkout/parse failures return an error; a non-matching event returns
 // Result{Started: false} with nil error.
 //
-// ctx scopes only the caller's admission decision; checkout and execution run
-// on the runner's own context so they survive the request returning and are
-// cancelled by Shutdown instead.
+// The checkout runs under a context cancelled by ctx (the request), r.ctx
+// (Shutdown), or a deadline — whichever fires first. Honoring request
+// cancellation matters: if a webhook client times out mid-checkout, cancelling
+// here means no run is started for its retry to duplicate. Execution, by
+// contrast, uses r.ctx so it survives the request returning.
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
-	_ = ctx // see the doc comment: checkout/execute deliberately use r.ctx
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
 	}
@@ -322,14 +333,24 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		}
 	}
 
-	// Checkout runs on r.ctx (not the request ctx) so Shutdown's cancel kills
-	// an in-flight git process, and an admitted, authenticated event is not
-	// dropped just because the webhook client hit its own delivery timeout.
-	ws, err := workspace.Checkout(r.ctx, workspace.Options{
+	// Cancel the checkout on request cancellation, Shutdown, or the deadline.
+	// AfterFunc bridges r.ctx so Shutdown still kills an in-flight git process;
+	// the WithTimeout parent is the request ctx so a client disconnect aborts it.
+	cctx, cancel := context.WithTimeout(ctx, checkoutTimeout)
+	stop := context.AfterFunc(r.ctx, cancel)
+	ws, err := workspace.Checkout(cctx, workspace.Options{
 		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref,
 		Keep: r.keepWS || reuse, Reuse: reuse,
 	})
+	stop()
+	cancel()
 	if err != nil {
+		// MkdirTemp created wsDir before Checkout validated the target, so a
+		// validation (or any pre-workspace) failure would otherwise leave an
+		// empty run-* dir behind. A persistent dir self-heals, so never nuke it.
+		if !reuse {
+			_ = os.RemoveAll(wsDir)
+		}
 		unlock()
 		release()
 		return Result{}, fmt.Errorf("checkout: %w", err)
@@ -374,8 +395,10 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		// Wait for a run slot; the run stays Pending until one frees.
 		r.sem <- struct{}{}
 		defer func() { <-r.sem }()
-		// r.ctx is cancelled on Shutdown, so in-flight runs are stopped.
-		r.engine.Execute(r.ctx, run, wf, ws.Dir)
+		// r.ctx is cancelled on Shutdown, so in-flight runs are stopped. A
+		// terminal-persist failure is already logged and latched (Degraded())
+		// by the engine, so the returned error is intentionally discarded here.
+		_ = r.engine.Execute(r.ctx, run, wf, ws.Dir)
 		r.pruneHistory()
 	}()
 

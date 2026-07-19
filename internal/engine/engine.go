@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hutusi/janus/internal/model"
@@ -29,7 +30,15 @@ type Engine struct {
 	// runJob executes one job's steps and returns its terminal status. It is a
 	// field (not just a method) so tests can drive the scheduler with a fake.
 	runJob func(ctx context.Context, rs *runState, job *model.Job, jr *model.JobRun) model.Status
+
+	// degraded latches true when a run's terminal state could not be persisted
+	// even after retries. The stored history is then stale, so the daemon
+	// surfaces it via /healthz. Cleared only by restart.
+	degraded atomic.Bool
 }
+
+// Degraded reports whether a run's final state was ever abandoned unpersisted.
+func (e *Engine) Degraded() bool { return e.degraded.Load() }
 
 // Option configures an Engine.
 type Option func(*Engine)
@@ -117,19 +126,17 @@ var (
 // write to self-heal a miss, so a transient failure (a full or briefly
 // read-only disk) would otherwise strand the stored run non-terminal forever —
 // which startup reconciliation later records as cancelled even for a run that
-// actually succeeded. It retries the write a few times before giving up and
-// logging at Error. Deliberately no error propagation or health endpoint:
-// Execute runs in a detached goroutine with no caller to receive the error,
-// and startup reconciliation is the backstop — a health surface for this one
-// failure mode is out of scope for a minimal tool.
-func (rs *runState) updateFinal(mutate func()) {
+// actually succeeded. It retries the write a few times, then gives up, logs at
+// Error, and returns the error so Execute can surface it (a non-zero exit for
+// `janus run`, a degraded /healthz for the daemon).
+func (rs *runState) updateFinal(mutate func()) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	mutate()
 	var err error
 	for attempt := 1; ; attempt++ {
 		if err = rs.store.UpdateRun(rs.run); err == nil {
-			return
+			return nil
 		}
 		if attempt >= finalPersistAttempts {
 			break
@@ -137,6 +144,7 @@ func (rs *runState) updateFinal(mutate func()) {
 		time.Sleep(finalPersistBackoff)
 	}
 	rs.logger.Error("persisting final run state failed after retries; the stored run stays stale", "run", rs.run.ID, "status", rs.run.Status, "attempts", finalPersistAttempts, "err", err)
+	return err
 }
 
 type jobResult struct {
@@ -172,20 +180,23 @@ func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *mod
 }
 
 // Run is a synchronous convenience: it creates, persists, executes, and returns
-// a run for wf. Used by `janus run`.
+// a run for wf. Used by `janus run`. A non-nil error means the steps ran but
+// the run's terminal state could not be persisted (see Execute).
 func (e *Engine) Run(ctx context.Context, wf *model.Workflow, ev model.Event, workDir string) (*model.Run, error) {
 	run := e.NewRun(wf, ev, workDir)
 	if err := e.store.SaveRun(run); err != nil {
 		return nil, err
 	}
-	e.Execute(ctx, run, wf, workDir)
-	return run, nil
+	return run, e.Execute(ctx, run, wf, workDir)
 }
 
 // Execute runs the scheduler over an already-saved run (built by NewRun),
 // blocking until every job reaches a terminal state. Status changes are
-// persisted via the store as they happen.
-func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow, workDir string) {
+// persisted via the store as they happen. It returns a non-nil error only when
+// the run's *terminal* state could not be persisted after retries — a run that
+// fails on its own merits (failing steps) returns nil. Such a persist failure
+// also latches the engine Degraded().
+func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow, workDir string) error {
 	rs := &runState{run: run, wf: wf, event: run.Event, workDir: workDir, store: e.store, tee: e.tee, logger: e.logger}
 	if rs.tee != nil {
 		rs.teeMu = &sync.Mutex{}
@@ -193,11 +204,10 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 
 	g, err := buildGraph(wf)
 	if err != nil {
-		rs.updateFinal(func() {
+		return e.finalize(rs, func() {
 			run.Status = model.StatusFailed
 			run.FinishedAt = time.Now()
 		})
-		return
 	}
 
 	byName := make(map[string]*model.JobRun, len(run.Jobs))
@@ -256,7 +266,7 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 		}
 	}
 
-	rs.updateFinal(func() {
+	return e.finalize(rs, func() {
 		for _, jr := range run.Jobs {
 			if !jr.Status.Terminal() {
 				jr.Status = model.StatusSkipped // never started due to fail-fast
@@ -281,6 +291,17 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 		}
 		run.FinishedAt = time.Now()
 	})
+}
+
+// finalize applies the terminal mutation and, if persisting it ultimately
+// fails, latches the engine Degraded() and returns the error so callers can
+// surface it. The run itself has completed either way.
+func (e *Engine) finalize(rs *runState, mutate func()) error {
+	if err := rs.updateFinal(mutate); err != nil {
+		e.degraded.Store(true)
+		return err
+	}
+	return nil
 }
 
 func newRunID() string {

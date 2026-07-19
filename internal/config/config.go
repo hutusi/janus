@@ -70,6 +70,7 @@ func Defaults() Config {
 		PipelinePath:      ".janus/ci.yml",
 		MaxParallelJobs:   4,
 		MaxParallelRuns:   4,
+		HistoryLimit:      1000,
 		StepTimeout:       0,
 		KeepWorkspaces:    false,
 		WorkspaceStrategy: "fresh",

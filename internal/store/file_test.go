@@ -175,6 +175,40 @@ func TestFileReadLogsOffset(t *testing.T) {
 	}
 }
 
+func TestFileReadLogsTail(t *testing.T) {
+	st, _ := NewFile(t.TempDir())
+	_ = st.SaveRun(sampleRun("r1", time.Now()))
+	w, _ := st.LogWriter("r1", "build", 0)
+	_, _ = io.WriteString(w, "hello world")
+	_ = w.Close()
+
+	tailOf := func(max int64) string {
+		t.Helper()
+		rc, err := st.ReadLogsTail("r1", "build", 0, max)
+		if err != nil {
+			t.Fatalf("ReadLogsTail(%d): %v", max, err)
+		}
+		defer func() { _ = rc.Close() }()
+		b, _ := io.ReadAll(rc)
+		return string(b)
+	}
+	if got := tailOf(5); got != "world" {
+		t.Errorf("tail(5) = %q, want world", got)
+	}
+	if got := tailOf(0); got != "hello world" {
+		t.Errorf("tail(0) = %q, want the whole log", got)
+	}
+	if got := tailOf(1000); got != "hello world" {
+		t.Errorf("tail(oversized) = %q, want the whole log", got)
+	}
+	rc, _ := st.ReadLogsTail("r1", "build", 9, 5) // missing step
+	b, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if len(b) != 0 {
+		t.Errorf("missing-step tail = %q, want empty", b)
+	}
+}
+
 func TestFileStoreMissingRun(t *testing.T) {
 	st, _ := NewFile(t.TempDir())
 	if _, err := st.GetRun("nope"); err == nil {

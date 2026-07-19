@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"github.com/hutusi/janus/internal/allowlist"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
+	"github.com/hutusi/janus/internal/pipeline"
 	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
 	"github.com/hutusi/janus/internal/store"
@@ -227,6 +230,96 @@ jobs:
 	}
 	if code := statusOf(t, ts.URL+"/runs/"+tr.RunID); code != http.StatusOK {
 		t.Errorf("run page status = %d, want 200", code)
+	}
+}
+
+// terminalFailStore fails every terminal UpdateRun, so a completed run cannot
+// persist its final state — which degrades the engine.
+type terminalFailStore struct {
+	store.Store
+}
+
+func (terminalFailStore) UpdateRun(run *model.Run) error {
+	if run.Status.Terminal() {
+		return errors.New("disk full")
+	}
+	return nil
+}
+
+func TestRunPageBoundsLogs(t *testing.T) {
+	runPageStepTailBytes = 32
+	t.Cleanup(func() { runPageStepTailBytes = 64 << 10 })
+
+	st := store.NewMemory()
+	eng := engine.New(st)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	run := &model.Run{ID: "big", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := st.LogWriter("big", "build", 0)
+	_, _ = io.WriteString(w, strings.Repeat("A", 100)+"TAILMARK")
+	_ = w.Close()
+
+	body := getText(t, ts.URL+"/runs/big")
+	if !strings.Contains(body, "TAILMARK") {
+		t.Error("run page should show the tail of the log")
+	}
+	if !strings.Contains(body, "earlier output truncated") {
+		t.Error("run page should mark the truncation")
+	}
+	if strings.Contains(body, strings.Repeat("A", 100)) {
+		t.Error("run page should NOT contain the full (head) of an oversized log")
+	}
+
+	// A small log renders whole with no marker.
+	small := &model.Run{ID: "small", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	_ = st.SaveRun(small)
+	w2, _ := st.LogWriter("small", "build", 0)
+	_, _ = io.WriteString(w2, "tiny")
+	_ = w2.Close()
+	body2 := getText(t, ts.URL+"/runs/small")
+	if !strings.Contains(body2, "tiny") || strings.Contains(body2, "truncated") {
+		t.Errorf("small log should render whole with no marker:\n%s", body2)
+	}
+}
+
+func TestHealthDegraded(t *testing.T) {
+	wf, err := pipeline.Parse([]byte("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: echo hi\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	st := terminalFailStore{store.NewMemory()}
+	eng := engine.New(st, engine.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	// Run a trivial pipeline: its steps succeed but the terminal write fails,
+	// so the engine latches degraded.
+	if _, err := eng.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir()); err == nil {
+		t.Fatal("expected a terminal-persist error to degrade the engine")
+	}
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("degraded /healthz status = %d, want 503", resp.StatusCode)
+	}
+	var body struct{ Status string }
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Status != "degraded" {
+		t.Errorf("status = %q, want degraded", body.Status)
 	}
 }
 

@@ -243,12 +243,16 @@ func TestFinalPersistFailureLogsAtError(t *testing.T) {
 	st := &terminalFailStore{Store: store.NewMemory(), failFirst: finalPersistAttempts} // never succeeds
 	eng := New(st, WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 	run, err := eng.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	// The steps ran, so the in-memory run is success — but the terminal write
+	// was abandoned, so Run must report the error and the engine must degrade.
+	if err == nil {
+		t.Fatal("Run should return the abandoned-terminal-write error")
 	}
-	// Execution itself completes; persistence failure must not fail the run.
-	if run.Status != model.StatusSuccess {
-		t.Errorf("run status = %s, want success", run.Status)
+	if run == nil || run.Status != model.StatusSuccess {
+		t.Errorf("run = %+v, want a success run alongside the error", run)
+	}
+	if !eng.Degraded() {
+		t.Error("engine should be Degraded() after abandoning a terminal write")
 	}
 	// The terminal write is retried the full budget before giving up.
 	if st.attempts != finalPersistAttempts {
@@ -270,7 +274,10 @@ func TestFinalPersistRetrySucceeds(t *testing.T) {
 	eng := New(st, WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 	run, err := eng.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("Run: a recovered retry should not error: %v", err)
+	}
+	if eng.Degraded() {
+		t.Error("a recovered retry should not degrade the engine")
 	}
 	stored, err := st.GetRun(run.ID)
 	if err != nil {

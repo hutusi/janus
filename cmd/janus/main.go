@@ -358,11 +358,16 @@ func runRun(args []string) error {
 
 	st := store.NewMemory()
 	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithStepTimeout(*stepTimeout), engine.WithTee(os.Stdout))
-	run, err := eng.Run(ctx, wf, ev, dir)
-	if err != nil {
-		return err
+	run, runErr := eng.Run(ctx, wf, ev, dir)
+	if run == nil {
+		return runErr // SaveRun failed: no run to summarize
 	}
 	printRunSummary(run)
+	if runErr != nil {
+		// The steps ran, but the final state could not be persisted — a
+		// distinct failure from an ordinary failed run.
+		return fmt.Errorf("run %s: steps completed but persisting the final state failed: %w", run.ID, runErr)
+	}
 	if run.Status != model.StatusSuccess {
 		return fmt.Errorf("run %s finished: %s", run.ID, run.Status)
 	}

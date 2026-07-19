@@ -197,6 +197,34 @@ func (f *File) ReadLogs(runID, job string, stepIndex int, offset int64) (io.Read
 	return file, nil
 }
 
+func (f *File) ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, error) {
+	if maxBytes <= 0 {
+		return f.ReadLogs(runID, job, stepIndex, 0)
+	}
+	if err := checkRunID(runID); err != nil {
+		return nil, err
+	}
+	file, err := os.Open(f.logPath(runID, job, stepIndex))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return io.NopCloser(strings.NewReader("")), nil
+		}
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if info.Size() > maxBytes {
+		if _, err := file.Seek(info.Size()-maxBytes, io.SeekStart); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	return file, nil
+}
+
 // sanitize maps a job name to a safe filename fragment.
 func sanitize(name string) string {
 	return strings.Map(func(r rune) rune {

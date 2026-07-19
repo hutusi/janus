@@ -3,12 +3,20 @@ package server
 import (
 	"bytes"
 	"embed"
+	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/hutusi/janus/internal/model"
 )
+
+// runPageStepTailBytes caps how much of each step's log the HTML run page
+// renders. The page buffers its output and auto-refreshes, so an unbounded log
+// would OOM the daemon; only the tail is shown (the interesting end of a build)
+// with a pointer to the full logs. A var so tests can shrink it.
+var runPageStepTailBytes int64 = 64 << 10
 
 //go:embed templates/*.html
 var templateFS embed.FS
@@ -57,12 +65,43 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var logs bytes.Buffer
-	s.writeRunLogs(&logs, run)
+	s.writeRunLogsTail(&logs, run, runPageStepTailBytes)
 	s.render(w, "run.html", runPageData{
 		Run:     run,
 		Logs:    logs.String(),
 		Refresh: !run.Status.Terminal(),
 	})
+}
+
+// writeRunLogsTail is writeRunLogs for the HTML page: it renders only the last
+// tailBytes of each step (with a marker when truncated), so total page memory
+// is bounded by numSteps × tailBytes regardless of log size. The API snapshot
+// and streaming endpoints keep using the unbounded writeRunLogs / streamStep.
+func (s *Server) writeRunLogsTail(w io.Writer, run *model.Run, tailBytes int64) {
+	for _, jr := range run.Jobs {
+		for _, sr := range jr.Steps {
+			_, _ = fmt.Fprintf(w, "=== %s / step %d [%s] ===\n", jr.Name, sr.Index, sr.Status)
+			s.copyStepTail(w, run.ID, jr.Name, sr.Index, tailBytes)
+			_, _ = io.WriteString(w, "\n")
+		}
+	}
+}
+
+// copyStepTail writes at most tailBytes of one step's log, prefixed with a
+// marker when the log was longer so the reader knows the start was cut. The
+// tail is read into memory first (bounded by tailBytes) so the marker can lead.
+func (s *Server) copyStepTail(w io.Writer, runID, job string, step int, tailBytes int64) {
+	rc, err := s.store.ReadLogsTail(runID, job, step, tailBytes)
+	if err != nil {
+		s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	tail, _ := io.ReadAll(rc) // ReadLogsTail caps this at tailBytes
+	if tailBytes > 0 && int64(len(tail)) >= tailBytes {
+		_, _ = fmt.Fprintf(w, "… (earlier output truncated — full logs at /api/runs/%s/logs?job=%s&step=%d)\n", runID, job, step)
+	}
+	_, _ = w.Write(tail)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {

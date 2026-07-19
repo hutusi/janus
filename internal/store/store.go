@@ -52,4 +52,9 @@ type Store interface {
 	// as empty, not an error). The offset lets a follower poll a growing log
 	// without re-reading the whole file each tick.
 	ReadLogs(runID, job string, stepIndex int, offset int64) (io.ReadCloser, error)
+	// ReadLogsTail returns a reader over at most the last maxBytes of one
+	// step's output (maxBytes <= 0 = the whole log; a missing step reads as
+	// empty). The tail may begin mid-line. It lets the HTML page bound memory
+	// regardless of log size without reading the whole file.
+	ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, error)
 }
