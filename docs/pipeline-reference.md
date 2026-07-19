@@ -97,6 +97,11 @@ Anything else inside `${{ ... }}` — operators, function calls, `secrets.*`,
 `github.*`, `steps.*`, `matrix.*` — is a validation error. There is no
 expression evaluation by design.
 
+Interpolation is size-bounded: a step whose materialized command (>1 MiB),
+working-directory (>4 KiB), any environment value (>64 KiB), or total
+environment (>1 MiB) exceeds the limit **fails** rather than expanding
+without bound — so a large value referenced many times can't exhaust memory.
+
 ## Environment precedence
 
 For each step, variables merge in this order (later wins):

@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hutusi/janus/internal/model"
@@ -39,11 +40,19 @@ var templateFuncs = template.FuncMap{
 		return t.Format("2006-01-02 15:04:05")
 	},
 	// trunc bounds a metadata string rendered in the dashboard (command, job
-	// or workflow name) so a large value stored on an old run — or one that
-	// predates the pipeline-file size cap — can't bloat the page.
+	// or workflow name, branch) so a large value stored on an old run — or one
+	// that predates the ingestion caps — can't bloat the page.
 	"trunc": func(n int, s string) string {
 		if len(s) > n {
 			return s[:n] + "…"
+		}
+		return s
+	},
+	// needs renders a job's needs list, bounded like trunc.
+	"needs": func(n []string) string {
+		s := strings.Join(n, ", ")
+		if len(s) > 200 {
+			return s[:200] + "…"
 		}
 		return s
 	},

@@ -411,6 +411,20 @@ func TestTriggerSaveFailureDegrades(t *testing.T) {
 	}
 }
 
+func TestTriggerRejectsOversizedEventFields(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: strings.Repeat("b", maxBranchLen+1)}
+	if _, err := r.Trigger(context.Background(), ev); err == nil {
+		t.Fatal("Trigger with an over-long branch should error")
+	}
+	if runs, _ := st.ListRuns(0, 0); len(runs) != 0 {
+		t.Errorf("an oversized-field trigger must not record a run, got %d", len(runs))
+	}
+}
+
 func TestShutdownRejectsNewTriggers(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})

@@ -291,6 +291,24 @@ func TestFinalPersistRetrySucceeds(t *testing.T) {
 	}
 }
 
+// TestRunInterpolationOverflowFailsStep proves a bounded pipeline that expands
+// hugely under interpolation fails the step cleanly instead of OOMing.
+func TestRunInterpolationOverflowFailsStep(t *testing.T) {
+	big := strings.Repeat("x", 65000) // under the per-env-value cap
+	// 20 references × 65000 bytes expands past the 1 MiB command cap.
+	src := "name: ci\non: { push: {} }\nenv: { BIG: \"" + big + "\" }\njobs:\n  build:\n    steps:\n      - run: \"" + strings.Repeat("${{ env.BIG }}", 20) + "\"\n"
+	wf := mustParse(t, src)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if run.Status != model.StatusFailed {
+		t.Fatalf("run status = %s, want failed (interpolation overflow)", run.Status)
+	}
+	log := readStepLog(t, st, run.ID, "build", 0)
+	if !strings.Contains(log, "exceeds") {
+		t.Errorf("step log = %q, want an interpolation-limit error", log)
+	}
+}
+
 // TestRunFailureStaysFailed pins the boundary of the cancelled status: the
 // fail-fast sibling cancellation inside a run must not relabel an ordinary
 // failing run as cancelled.

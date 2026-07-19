@@ -2,6 +2,9 @@ package store
 
 import (
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,6 +241,20 @@ func TestFileReadLogsTailCoherentUnderGrowth(t *testing.T) {
 	// grown head — so exactly "ab", never "abcde".
 	if string(b) != "ab" {
 		t.Errorf("tail under growth = %q, want the coherent snapshot %q", b, "ab")
+	}
+}
+
+func TestFileGetRunRejectsOversized(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := NewFile(dir)
+	_ = st.SaveRun(sampleRun("r1", time.Now()))
+	// Overwrite run.json with an oversized blob (a corrupt/legacy record).
+	path := filepath.Join(dir, "runs", "r1", "run.json")
+	if err := os.WriteFile(path, make([]byte, maxRunFileBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetRun("r1"); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Errorf("GetRun on an oversized record = %v, want a too-large error", err)
 	}
 }
 

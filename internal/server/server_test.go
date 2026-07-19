@@ -445,6 +445,27 @@ func TestRunPageTruncatesLongCommand(t *testing.T) {
 	}
 }
 
+func TestDashboardTruncatesLongBranch(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	longBranch := strings.Repeat("B", 5000)
+	run := &model.Run{ID: "br", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		WorkflowName: "ci", Event: model.Event{Kind: model.EventPush, Branch: longBranch},
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/runs/br"} {
+		body := getText(t, ts.URL+path)
+		if strings.Contains(body, longBranch) {
+			t.Errorf("%s renders the full long branch, want it truncated", path)
+		}
+	}
+}
+
 func TestHealthDegraded(t *testing.T) {
 	wf, err := pipeline.Parse([]byte("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: echo hi\n"))
 	if err != nil {

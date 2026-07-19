@@ -77,16 +77,29 @@ func (f *File) writeRun(run *model.Run) error {
 	return os.Rename(tmpName, filepath.Join(dir, "run.json"))
 }
 
+// maxRunFileBytes bounds a run.json read. Records are bounded by the ingestion
+// caps (pipeline file, event fields), so 16 MiB is generous headroom; the cap
+// only guards against a corrupt or legacy oversized file being loaded whole.
+const maxRunFileBytes = 16 << 20
+
 func (f *File) GetRun(id string) (*model.Run, error) {
 	if err := checkRunID(id); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(filepath.Join(f.runDir(id), "run.json"))
+	file, err := os.Open(filepath.Join(f.runDir(id), "run.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("run %q not found", id)
 		}
 		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maxRunFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxRunFileBytes {
+		return nil, fmt.Errorf("run %q metadata is too large (limit %d bytes)", id, maxRunFileBytes)
 	}
 	var run model.Run
 	if err := json.Unmarshal(data, &run); err != nil {

@@ -288,6 +288,37 @@ func (r *Runner) Shutdown(grace time.Duration) {
 // clone with margin.
 var checkoutTimeout = 10 * time.Minute
 
+// Event-field length caps. These values come from the webhook body (up to
+// 5 MiB) or the manual API, and flow into the stored run, the unauthenticated
+// dashboard, and interpolation (${{ branch }}, ${{ ref }}); bound them at the
+// single entry point so none of those can be amplified. Generous — real values
+// are tens of bytes.
+const (
+	maxRepoURLLen      = 2 << 10
+	maxRefLen          = 512
+	maxBranchLen       = 512
+	maxPipelinePathLen = 512
+)
+
+// validateEvent rejects over-long event fields before any disk work.
+func validateEvent(ev model.Event) error {
+	for _, f := range []struct {
+		name  string
+		value string
+		max   int
+	}{
+		{"repo_url", ev.RepoURL, maxRepoURLLen},
+		{"ref", ev.Ref, maxRefLen},
+		{"branch", ev.Branch, maxBranchLen},
+		{"pipeline_path", ev.PipelinePath, maxPipelinePathLen},
+	} {
+		if len(f.value) > f.max {
+			return fmt.Errorf("%s is too long: %d bytes (max %d)", f.name, len(f.value), f.max)
+		}
+	}
+	return nil
+}
+
 // Trigger checks out the repo at ev's commit, parses the pipeline (the
 // configured path, or ev.PipelinePath when set), and — if the event matches —
 // records and asynchronously executes a run. Fresh workspaces are removed when
@@ -306,6 +337,9 @@ var checkoutTimeout = 10 * time.Minute
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
+	}
+	if err := validateEvent(ev); err != nil {
+		return Result{}, err
 	}
 	// Bounded admission, before any disk work: everything below — the git
 	// checkout, the parse, the run pending its sem slot — consumes processes

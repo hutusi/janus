@@ -557,8 +557,30 @@ func TestInterpolate(t *testing.T) {
 		{"${{branch}}-${{short_sha}}", "main-abcdef1"}, // no inner spaces
 	}
 	for _, tc := range tests {
-		if got := ctx.Interpolate(tc.in); got != tc.want {
+		got, err := ctx.Interpolate(tc.in, 1<<20)
+		if err != nil {
+			t.Errorf("Interpolate(%q): unexpected error %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
 			t.Errorf("Interpolate(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestInterpolateBounded(t *testing.T) {
+	ctx := Context{Env: map[string]string{"BIG": strings.Repeat("x", 1000)}}
+	// Many references to a large value expand past the cap → error, not OOM.
+	cmd := strings.Repeat("${{ env.BIG }}", 100) // ~100 KiB expanded
+	if _, err := ctx.Interpolate(cmd, 4096); err == nil {
+		t.Error("interpolation exceeding max should error")
+	}
+	// A literal string longer than max also errors (the tail is counted).
+	if _, err := ctx.Interpolate(strings.Repeat("a", 5000), 4096); err == nil {
+		t.Error("a literal longer than max should error")
+	}
+	// Comfortably under the cap → no error, correct output.
+	if got, err := ctx.Interpolate("hi ${{ env.BIG }}", 1<<20); err != nil || got != "hi "+strings.Repeat("x", 1000) {
+		t.Errorf("under-cap interpolation = %q, %v", got, err)
 	}
 }

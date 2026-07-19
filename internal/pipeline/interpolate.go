@@ -80,31 +80,52 @@ type Context struct {
 	Event    string
 }
 
-// Interpolate substitutes ${{ ... }} placeholders in s using the context.
-// Unknown env vars resolve to the empty string (shell-like). It assumes s has
-// already passed validateInterpolation; any non-whitelisted token is left
+// Interpolate substitutes ${{ ... }} placeholders in s using the context,
+// bounding the result to max bytes. Interpolation can expand a small template
+// into an arbitrarily large string (a big env value referenced many times), so
+// it errors past max rather than materializing gigabytes and OOMing the shared
+// daemon. Unknown env vars resolve to the empty string (shell-like). It assumes
+// s has already passed validateInterpolation; any non-whitelisted token is left
 // verbatim rather than guessed at.
-func (c Context) Interpolate(s string) string {
-	return placeholderRe.ReplaceAllStringFunc(s, func(match string) string {
-		tok := strings.TrimSpace(placeholderRe.FindStringSubmatch(match)[1])
-		switch tok {
-		case "ref":
-			return c.Ref
-		case "sha":
-			return c.SHA
-		case "short_sha":
-			return c.ShortSHA
-		case "branch":
-			return c.Branch
-		case "event":
-			return c.Event
-		default:
-			if name, ok := strings.CutPrefix(tok, "env."); ok {
-				return c.Env[name]
-			}
-			return match // unreachable for validated input
+func (c Context) Interpolate(s string, max int) (string, error) {
+	var b strings.Builder
+	last := 0
+	for _, m := range placeholderRe.FindAllStringSubmatchIndex(s, -1) {
+		repl := c.resolve(strings.TrimSpace(s[m[2]:m[3]]), s[m[0]:m[1]])
+		if b.Len()+(m[0]-last)+len(repl) > max {
+			return "", fmt.Errorf("interpolated value exceeds %d bytes", max)
 		}
-	})
+		b.WriteString(s[last:m[0]])
+		b.WriteString(repl)
+		last = m[1]
+	}
+	if b.Len()+(len(s)-last) > max {
+		return "", fmt.Errorf("interpolated value exceeds %d bytes", max)
+	}
+	b.WriteString(s[last:])
+	return b.String(), nil
+}
+
+// resolve returns the replacement for a placeholder token, or the original
+// match for a non-whitelisted token (unreachable for validated input).
+func (c Context) resolve(tok, match string) string {
+	switch tok {
+	case "ref":
+		return c.Ref
+	case "sha":
+		return c.SHA
+	case "short_sha":
+		return c.ShortSHA
+	case "branch":
+		return c.Branch
+	case "event":
+		return c.Event
+	default:
+		if name, ok := strings.CutPrefix(tok, "env."); ok {
+			return c.Env[name]
+		}
+		return match
+	}
 }
 
 func sortedKeys(m map[string]string) []string {
