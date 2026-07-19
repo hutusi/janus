@@ -394,6 +394,12 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 
 	run := r.engine.NewRun(wf, ev, ws.Dir)
 	if err := r.store.SaveRun(run); err != nil {
+		// The store rejected recording a new run (a full/read-only/permission
+		// problem for the local file store — persistent, not transient), so
+		// the daemon can't do its job: latch degraded for /healthz. Without
+		// this, a store that breaks with no interrupted runs to reconcile would
+		// stay a false 200 while rejecting every trigger.
+		r.MarkDegraded()
 		abort()
 		return Result{}, err
 	}

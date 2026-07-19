@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -329,6 +330,36 @@ func TestRunPageTotalBudget(t *testing.T) {
 	}
 	if !strings.Contains(body, "page size limit reached") {
 		t.Error("run page should note that remaining step logs were omitted")
+	}
+}
+
+func TestWriteRunLogsTailBounded(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+
+	// A long job name (would blow a header) plus several oversized step logs —
+	// everything (headers, markers, tails) must stay within the total budget.
+	const total, perStep int64 = 500, 100
+	longName := strings.Repeat("j", 300)
+	steps := make([]*model.StepRun, 10)
+	for i := range steps {
+		steps[i] = &model.StepRun{Index: i, Status: model.StatusSuccess}
+		w, _ := st.LogWriter("r", longName, i)
+		_, _ = io.WriteString(w, strings.Repeat("x", 400))
+		_ = w.Close()
+	}
+	run := &model.Run{ID: "r", Status: model.StatusSuccess,
+		Jobs: []*model.JobRun{{Name: longName, Status: model.StatusSuccess, Steps: steps}}}
+
+	var buf bytes.Buffer
+	srv.writeRunLogsTail(&buf, run, perStep, total)
+
+	const trailerMax = 160 // the fixed "page size limit reached …" trailer
+	if int64(buf.Len()) > total+trailerMax {
+		t.Errorf("rendered logs = %d bytes, want <= %d (budget %d + trailer)", buf.Len(), total+trailerMax, total)
+	}
+	if !strings.Contains(buf.String(), "page size limit reached") {
+		t.Error("a truncated render should end with the page-limit trailer")
 	}
 }
 

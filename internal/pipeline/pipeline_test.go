@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,48 @@ jobs:
 	}
 	if test := wf.Jobs["test"]; test == nil || len(test.Needs) != 1 || test.Needs[0] != "build" {
 		t.Errorf("test.needs = %+v, want [build]", test)
+	}
+}
+
+func TestParseRejectsOversizedPipelines(t *testing.T) {
+	var manyJobs strings.Builder
+	manyJobs.WriteString("name: ci\non: { push: {} }\njobs:\n")
+	for i := 0; i < maxJobs+1; i++ {
+		fmt.Fprintf(&manyJobs, "  j%d:\n    steps:\n      - run: echo hi\n", i)
+	}
+
+	var manySteps strings.Builder
+	manySteps.WriteString("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n")
+	for i := 0; i < maxStepsPerJob+1; i++ {
+		manySteps.WriteString("      - run: echo hi\n")
+	}
+
+	longName := "name: ci\non: { push: {} }\njobs:\n  " + strings.Repeat("j", maxJobNameLen+1) + ":\n    steps:\n      - run: echo hi\n"
+	longCmd := "name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: " + strings.Repeat("x", maxCommandBytes+1) + "\n"
+
+	cases := map[string]struct{ src, want string }{
+		"too many jobs":  {manyJobs.String(), "too many jobs"},
+		"too many steps": {manySteps.String(), "too many steps"},
+		"long job name":  {longName, "job name too long"},
+		"long command":   {longCmd, "`run` is too long"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.src))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Parse error = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+
+	// A generous-but-in-limits pipeline still parses.
+	var ok strings.Builder
+	ok.WriteString("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n")
+	for i := 0; i < 50; i++ {
+		ok.WriteString("      - run: echo hi\n")
+	}
+	if _, err := Parse([]byte(ok.String())); err != nil {
+		t.Fatalf("a 50-step pipeline should be valid: %v", err)
 	}
 }
 

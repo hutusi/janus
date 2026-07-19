@@ -16,6 +16,16 @@ import (
 // share a log file.
 var jobNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+// Generous structural limits. They sit far above any real pipeline and exist
+// only to reject the absurd, so per-run artifacts (the run JSON, the log-file
+// set, the dashboard's step table) stay finite for a decidedly-bounded input.
+const (
+	maxJobs         = 256
+	maxStepsPerJob  = 256
+	maxJobNameLen   = 256
+	maxCommandBytes = 64 << 10
+)
+
 // allowedShells is the closed set of step `shell:` values. "" selects the OS
 // default (/bin/sh on unix, cmd on Windows); the engine (shellArgv) maps each
 // name to an argv prefix and must stay in sync with this set.
@@ -51,18 +61,30 @@ func validate(wf *model.Workflow) error {
 	if len(wf.Jobs) == 0 {
 		return errors.New("at least one job is required under `jobs`")
 	}
+	if len(wf.Jobs) > maxJobs {
+		return fmt.Errorf("too many jobs: %d (max %d)", len(wf.Jobs), maxJobs)
+	}
 
 	for _, name := range sortedJobNames(wf) {
 		job := wf.Jobs[name]
 		if !jobNameRe.MatchString(name) {
 			return fmt.Errorf("job %q: names may contain only letters, digits, '-' and '_'", name)
 		}
+		if len(name) > maxJobNameLen {
+			return fmt.Errorf("job name too long: %d characters (max %d)", len(name), maxJobNameLen)
+		}
 		if len(job.Steps) == 0 {
 			return fmt.Errorf("job %q: at least one step is required", name)
+		}
+		if len(job.Steps) > maxStepsPerJob {
+			return fmt.Errorf("job %q: too many steps: %d (max %d)", name, len(job.Steps), maxStepsPerJob)
 		}
 		for i, s := range job.Steps {
 			if strings.TrimSpace(s.Run) == "" {
 				return fmt.Errorf("job %q step %d: `run` is required and cannot be empty", name, i+1)
+			}
+			if len(s.Run) > maxCommandBytes {
+				return fmt.Errorf("job %q step %d: `run` is too long: %d bytes (max %d)", name, i+1, len(s.Run), maxCommandBytes)
 			}
 			if !allowedShells[s.Shell] {
 				return fmt.Errorf("job %q step %d: unsupported `shell` %q (allowed: sh, bash, cmd, powershell, pwsh)", name, i+1, s.Shell)

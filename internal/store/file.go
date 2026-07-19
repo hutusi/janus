@@ -217,16 +217,16 @@ func (f *File) ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (i
 		_ = file.Close()
 		return nil, false, err
 	}
+	off, length := int64(0), info.Size()
 	truncated := info.Size() > maxBytes
 	if truncated {
-		if _, err := file.Seek(info.Size()-maxBytes, io.SeekStart); err != nil {
-			_ = file.Close()
-			return nil, false, err
-		}
+		off, length = info.Size()-maxBytes, maxBytes
 	}
-	// LimitReader caps the read at maxBytes even if the step appends after the
-	// Stat above, so a fast-growing log can never overshoot the budget.
-	return readCloser{Reader: io.LimitReader(file, maxBytes), Closer: file}, truncated, nil
+	// SectionReader is bound to the window observed at Stat, so a concurrent
+	// append can neither push the read past maxBytes nor turn a whole-file read
+	// into a head-of-a-grown-file read — the tail and truncated flag stay
+	// coherent as of Stat.
+	return readCloser{Reader: io.NewSectionReader(file, off, length), Closer: file}, truncated, nil
 }
 
 // readCloser pairs a bounded Reader with the underlying file's Closer.

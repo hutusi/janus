@@ -77,50 +77,68 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// limitedWriter caps how many bytes reach the underlying writer. Writes past
+// the budget are dropped and flip truncated; Write always reports len(p) so
+// callers (Fprintf, io.Copy, io.WriteString) never see a short write and retry.
+type limitedWriter struct {
+	w         io.Writer
+	remaining int64
+	truncated bool
+}
+
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	if lw.remaining <= 0 {
+		lw.truncated = true
+		return len(p), nil
+	}
+	if int64(len(p)) > lw.remaining {
+		_, err := lw.w.Write(p[:lw.remaining])
+		lw.remaining = 0
+		lw.truncated = true
+		return len(p), err
+	}
+	n, err := lw.w.Write(p)
+	lw.remaining -= int64(n)
+	return n, err
+}
+
 // writeRunLogsTail is writeRunLogs for the HTML page: it renders the last
-// perStep bytes of each step (with a marker when truncated), and stops once a
-// running total budget is spent, so the page is bounded by total regardless of
-// log size or step count. The API snapshot and streaming endpoints keep using
-// the unbounded writeRunLogs / streamStep.
+// perStep bytes of each step (with a marker when truncated). Everything —
+// headers, markers, and tails — goes through a byte-limited writer, so the
+// rendered logs are hard-capped at total regardless of job-name length, step
+// count, or log size. The API snapshot and streaming endpoints keep using the
+// unbounded writeRunLogs / streamStep.
 func (s *Server) writeRunLogsTail(w io.Writer, run *model.Run, perStep, total int64) {
-	remaining := total
-	writeCount := func(str string) { _, _ = io.WriteString(w, str); remaining -= int64(len(str)) }
+	lw := &limitedWriter{w: w, remaining: total}
 	for _, jr := range run.Jobs {
 		for _, sr := range jr.Steps {
-			if remaining <= 0 {
-				_, _ = fmt.Fprintf(w, "… (page size limit reached — remaining step logs omitted; full logs at /api/runs/%s/logs)\n", run.ID)
-				return
-			}
-			writeCount(fmt.Sprintf("=== %s / step %d [%s] ===\n", jr.Name, sr.Index, sr.Status))
-			if remaining > 0 {
-				allowance := perStep
-				if allowance > remaining {
-					allowance = remaining
-				}
-				remaining -= s.copyStepTail(w, run.ID, jr.Name, sr.Index, allowance)
-			}
-			writeCount("\n")
+			_, _ = fmt.Fprintf(lw, "=== %s / step %d [%s] ===\n", jr.Name, sr.Index, sr.Status)
+			s.copyStepTail(lw, run.ID, jr.Name, sr.Index, perStep)
+			_, _ = io.WriteString(lw, "\n")
 		}
+	}
+	if lw.truncated {
+		// A fixed trailer, written outside the budget (so its own bytes can't
+		// be dropped), telling the reader where the full logs live.
+		_, _ = fmt.Fprintf(w, "\n… (page size limit reached — output truncated; full logs at /api/runs/%s/logs)\n", run.ID)
 	}
 }
 
-// copyStepTail writes at most maxBytes of one step's log, prefixed with a
-// marker when the log was longer so the reader knows the start was cut, and
-// returns how many log bytes it wrote. The tail is read into memory first
-// (bounded by maxBytes) so the marker can lead.
-func (s *Server) copyStepTail(w io.Writer, runID, job string, step int, maxBytes int64) int64 {
+// copyStepTail writes at most maxBytes of one step's log through w, prefixed
+// with a marker when the log was longer so the reader knows the start was cut.
+// The tail is read into memory first (bounded by maxBytes) so the marker leads.
+func (s *Server) copyStepTail(w io.Writer, runID, job string, step int, maxBytes int64) {
 	rc, truncated, err := s.store.ReadLogsTail(runID, job, step, maxBytes)
 	if err != nil {
 		s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
-		return 0
+		return
 	}
 	defer func() { _ = rc.Close() }()
 	tail, _ := io.ReadAll(rc) // bounded by maxBytes
 	if truncated {
 		_, _ = fmt.Fprintf(w, "… (earlier output truncated — full logs at /api/runs/%s/logs?job=%s&step=%d)\n", runID, job, step)
 	}
-	n, _ := w.Write(tail)
-	return int64(n)
+	_, _ = w.Write(tail)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {

@@ -87,12 +87,13 @@ func normalize(s string) string {
 	s = strings.TrimSpace(s)
 	if u, err := url.Parse(s); err == nil && u.Scheme != "" && strings.Contains(s, "://") {
 		// "." / ".." and the escapes of the traversal alphabet — %2e ("."),
-		// %2f ("/"), %25 ("%", the double-encoding vector) — are checked on
-		// both the decoded and the raw path so one decoding layer cannot
-		// hide a segment from the other.
+		// %2f ("/"), %5c ("\", a separator to git/Windows), %25 ("%", the
+		// double-encoding vector) — are checked on both the decoded and the
+		// raw path so one decoding layer cannot hide a segment from the other.
 		esc := strings.ToLower(u.EscapedPath())
 		if hasDotSegments(u.Path) ||
-			strings.Contains(esc, "%2e") || strings.Contains(esc, "%2f") || strings.Contains(esc, "%25") {
+			strings.Contains(esc, "%2e") || strings.Contains(esc, "%2f") ||
+			strings.Contains(esc, "%5c") || strings.Contains(esc, "%25") {
 			return ""
 		}
 		host := strings.ToLower(u.Hostname())
@@ -118,9 +119,11 @@ func normalize(s string) string {
 	return s
 }
 
-// hasDotSegments reports whether any "/"-separated segment of s is "." or "..".
+// hasDotSegments reports whether any segment of s is "." or "..". It splits on
+// both "/" and "\" because git and Windows/IIS-style backends treat backslash
+// as a path separator, so "acme\..\evil" is a traversal too.
 func hasDotSegments(s string) bool {
-	for _, seg := range strings.Split(s, "/") {
+	for _, seg := range strings.FieldsFunc(s, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if seg == "." || seg == ".." {
 			return true
 		}

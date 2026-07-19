@@ -212,6 +212,35 @@ func TestFileReadLogsTail(t *testing.T) {
 	}
 }
 
+func TestFileReadLogsTailCoherentUnderGrowth(t *testing.T) {
+	st, _ := NewFile(t.TempDir())
+	_ = st.SaveRun(sampleRun("g1", time.Now()))
+	w, _ := st.LogWriter("g1", "build", 0)
+	_, _ = io.WriteString(w, "ab") // below the cap
+	_ = w.Close()
+
+	// Open the tail while the file is 2 bytes and under the 5-byte cap.
+	rc, truncated, err := st.ReadLogsTail("g1", "build", 0, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Error("a sub-cap file should report truncated=false")
+	}
+	// Now the step keeps writing, growing the file past the cap.
+	w2, _ := st.LogWriter("g1", "build", 0)
+	_, _ = io.WriteString(w2, "cdefghij")
+	_ = w2.Close()
+
+	b, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	// The snapshot must be the file as of the open (SectionReader), not the
+	// grown head — so exactly "ab", never "abcde".
+	if string(b) != "ab" {
+		t.Errorf("tail under growth = %q, want the coherent snapshot %q", b, "ab")
+	}
+}
+
 func TestFileStoreMissingRun(t *testing.T) {
 	st, _ := NewFile(t.TempDir())
 	if _, err := st.GetRun("nope"); err == nil {

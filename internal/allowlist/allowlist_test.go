@@ -53,6 +53,11 @@ func TestAllows(t *testing.T) {
 		{"deny scp-style traversal", []string{"git@gl.example.com:acme"}, "git@gl.example.com:acme/../evil.git", false},
 		{"deny local path traversal", []string{"/srv/git/acme"}, "/srv/git/acme/../../home/evil.git", false},
 
+		{"deny URL backslash traversal", []string{"https://gl.example.com/acme"}, `https://gl.example.com/acme/x\..\..\evil/app.git`, false},
+		{"deny percent-encoded backslash", []string{"https://gl.example.com/acme"}, "https://gl.example.com/acme/x%5c..%5c..%5cevil/app.git", false},
+		{"deny scp-style backslash traversal", []string{"git@gl.example.com:acme"}, `git@gl.example.com:acme\..\evil.git`, false},
+		{"deny local path backslash traversal", []string{"/srv/git/acme"}, `/srv/git/acme\..\..\home\evil.git`, false},
+
 		{"userinfo must match", []string{"ssh://git@gl.example.com/acme"}, "ssh://git@gl.example.com/acme/app.git", true},
 		{"deny different userinfo", []string{"ssh://git@gl.example.com/acme"}, "ssh://root@gl.example.com/acme/app.git", false},
 		{"deny added userinfo", []string{"ssh://gl.example.com/acme"}, "ssh://root@gl.example.com/acme/app.git", false},

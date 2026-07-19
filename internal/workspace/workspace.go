@@ -9,6 +9,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -217,6 +218,10 @@ func (w *Workspace) gitOut(ctx context.Context, args ...string) (string, error) 
 	full := append([]string{"-C", w.Dir}, args...)
 	out, err := exec.CommandContext(ctx, "git", full...).Output()
 	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(ee.Stderr)))
+		}
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil

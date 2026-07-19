@@ -386,6 +386,31 @@ func TestRunnerMarkDegraded(t *testing.T) {
 	}
 }
 
+// saveFailStore rejects SaveRun, as a full/read-only data dir would.
+type saveFailStore struct {
+	store.Store
+}
+
+func (saveFailStore) SaveRun(*model.Run) error { return errors.New("disk full") }
+
+func TestTriggerSaveFailureDegrades(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(saveFailStore{store.NewMemory()}, engine.New(store.NewMemory()),
+		Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	if _, err := r.Trigger(context.Background(), ev); err == nil {
+		t.Fatal("Trigger should fail when SaveRun fails")
+	}
+	if !r.Degraded() {
+		t.Error("a SaveRun failure should latch the runner degraded")
+	}
+}
+
 func TestShutdownRejectsNewTriggers(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
