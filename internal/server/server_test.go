@@ -291,6 +291,47 @@ func TestRunPageBoundsLogs(t *testing.T) {
 	}
 }
 
+func TestRunPageTotalBudget(t *testing.T) {
+	runPageStepTailBytes = 64
+	runPageTotalBytes = 200
+	t.Cleanup(func() { runPageStepTailBytes, runPageTotalBytes = 64<<10, 1<<20 })
+
+	st := store.NewMemory()
+	eng := engine.New(st)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// 20 steps, each with a 64-byte log — far past the 200-byte page budget.
+	steps := make([]*model.StepRun, 20)
+	for i := range steps {
+		steps[i] = &model.StepRun{Index: i, Status: model.StatusSuccess}
+	}
+	run := &model.Run{ID: "many", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: steps}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for i := range steps {
+		w, _ := st.LogWriter("many", "build", i)
+		_, _ = io.WriteString(w, strings.Repeat("x", 64))
+		_ = w.Close()
+	}
+
+	body := getText(t, ts.URL+"/runs/many")
+	// The rendered log content must be bounded near the total budget, not the
+	// full 20×64 = 1280 bytes. Count the log payload ('x') rather than the
+	// whole HTML (which also carries a bounded per-step status table).
+	if xs := strings.Count(body, "x"); int64(xs) > runPageTotalBytes {
+		t.Errorf("log content not bounded by the total budget: %d 'x' bytes rendered", xs)
+	}
+	if !strings.Contains(body, "page size limit reached") {
+		t.Error("run page should note that remaining step logs were omitted")
+	}
+}
+
 func TestHealthDegraded(t *testing.T) {
 	wf, err := pipeline.Parse([]byte("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: echo hi\n"))
 	if err != nil {

@@ -72,10 +72,11 @@ func (a Allowlist) Allows(rawURL string) bool {
 }
 
 // normalize canonicalizes a repo URL (or allowlist entry) so candidate and
-// entry are compared on equal footing. For real URLs it drops userinfo, query,
-// fragment, and default ports, lowercases scheme+host, and trims a trailing "/"
-// then ".git". Non-URL remotes (scp-style, file paths) are treated opaquely:
-// only trailing "/" and ".git" are trimmed.
+// entry are compared on equal footing. For real URLs it keeps userinfo (git
+// connects as that user, so it is significant), drops query, fragment, and
+// default ports, lowercases scheme+host, and trims a trailing "/" then ".git".
+// Non-URL remotes (scp-style, file paths) are treated opaquely: only trailing
+// "/" and ".git" are trimmed.
 //
 // Anything containing "." or ".." path segments — literal or hidden behind
 // percent-encoding — normalizes to "", which matches no entry (and New rejects

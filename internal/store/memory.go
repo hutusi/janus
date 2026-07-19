@@ -160,19 +160,20 @@ func (m *Memory) ReadLogs(runID, job string, stepIndex int, offset int64) (io.Re
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (m *Memory) ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, error) {
+func (m *Memory) ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	buf := m.logs[logKey(runID, job, stepIndex)]
 	if buf == nil {
-		return io.NopCloser(bytes.NewReader(nil)), nil
+		return io.NopCloser(bytes.NewReader(nil)), false, nil
 	}
 	b := buf.Bytes()
-	if maxBytes > 0 && int64(len(b)) > maxBytes {
+	truncated := maxBytes > 0 && int64(len(b)) > maxBytes
+	if truncated {
 		b = b[int64(len(b))-maxBytes:]
 	}
 	// Copy so the caller reads a stable snapshot.
-	return io.NopCloser(bytes.NewReader(append([]byte(nil), b...))), nil
+	return io.NopCloser(bytes.NewReader(append([]byte(nil), b...))), truncated, nil
 }
 
 type memLogWriter struct {

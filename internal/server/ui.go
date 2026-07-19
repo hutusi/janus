@@ -12,11 +12,15 @@ import (
 	"github.com/hutusi/janus/internal/model"
 )
 
-// runPageStepTailBytes caps how much of each step's log the HTML run page
-// renders. The page buffers its output and auto-refreshes, so an unbounded log
-// would OOM the daemon; only the tail is shown (the interesting end of a build)
-// with a pointer to the full logs. A var so tests can shrink it.
-var runPageStepTailBytes int64 = 64 << 10
+// The HTML run page buffers its output and auto-refreshes, so it must be
+// bounded regardless of log size or step count: at most runPageStepTailBytes
+// of each step's log (its interesting end) and at most runPageTotalBytes across
+// the whole page. Only the tail is shown, with a pointer to the full logs.
+// Vars so tests can shrink them.
+var (
+	runPageStepTailBytes int64 = 64 << 10 // per step
+	runPageTotalBytes    int64 = 1 << 20  // whole page
+)
 
 //go:embed templates/*.html
 var templateFS embed.FS
@@ -65,7 +69,7 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var logs bytes.Buffer
-	s.writeRunLogsTail(&logs, run, runPageStepTailBytes)
+	s.writeRunLogsTail(&logs, run, runPageStepTailBytes, runPageTotalBytes)
 	s.render(w, "run.html", runPageData{
 		Run:     run,
 		Logs:    logs.String(),
@@ -73,35 +77,50 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeRunLogsTail is writeRunLogs for the HTML page: it renders only the last
-// tailBytes of each step (with a marker when truncated), so total page memory
-// is bounded by numSteps × tailBytes regardless of log size. The API snapshot
-// and streaming endpoints keep using the unbounded writeRunLogs / streamStep.
-func (s *Server) writeRunLogsTail(w io.Writer, run *model.Run, tailBytes int64) {
+// writeRunLogsTail is writeRunLogs for the HTML page: it renders the last
+// perStep bytes of each step (with a marker when truncated), and stops once a
+// running total budget is spent, so the page is bounded by total regardless of
+// log size or step count. The API snapshot and streaming endpoints keep using
+// the unbounded writeRunLogs / streamStep.
+func (s *Server) writeRunLogsTail(w io.Writer, run *model.Run, perStep, total int64) {
+	remaining := total
+	writeCount := func(str string) { _, _ = io.WriteString(w, str); remaining -= int64(len(str)) }
 	for _, jr := range run.Jobs {
 		for _, sr := range jr.Steps {
-			_, _ = fmt.Fprintf(w, "=== %s / step %d [%s] ===\n", jr.Name, sr.Index, sr.Status)
-			s.copyStepTail(w, run.ID, jr.Name, sr.Index, tailBytes)
-			_, _ = io.WriteString(w, "\n")
+			if remaining <= 0 {
+				_, _ = fmt.Fprintf(w, "… (page size limit reached — remaining step logs omitted; full logs at /api/runs/%s/logs)\n", run.ID)
+				return
+			}
+			writeCount(fmt.Sprintf("=== %s / step %d [%s] ===\n", jr.Name, sr.Index, sr.Status))
+			if remaining > 0 {
+				allowance := perStep
+				if allowance > remaining {
+					allowance = remaining
+				}
+				remaining -= s.copyStepTail(w, run.ID, jr.Name, sr.Index, allowance)
+			}
+			writeCount("\n")
 		}
 	}
 }
 
-// copyStepTail writes at most tailBytes of one step's log, prefixed with a
-// marker when the log was longer so the reader knows the start was cut. The
-// tail is read into memory first (bounded by tailBytes) so the marker can lead.
-func (s *Server) copyStepTail(w io.Writer, runID, job string, step int, tailBytes int64) {
-	rc, err := s.store.ReadLogsTail(runID, job, step, tailBytes)
+// copyStepTail writes at most maxBytes of one step's log, prefixed with a
+// marker when the log was longer so the reader knows the start was cut, and
+// returns how many log bytes it wrote. The tail is read into memory first
+// (bounded by maxBytes) so the marker can lead.
+func (s *Server) copyStepTail(w io.Writer, runID, job string, step int, maxBytes int64) int64 {
+	rc, truncated, err := s.store.ReadLogsTail(runID, job, step, maxBytes)
 	if err != nil {
 		s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
-		return
+		return 0
 	}
 	defer func() { _ = rc.Close() }()
-	tail, _ := io.ReadAll(rc) // ReadLogsTail caps this at tailBytes
-	if tailBytes > 0 && int64(len(tail)) >= tailBytes {
+	tail, _ := io.ReadAll(rc) // bounded by maxBytes
+	if truncated {
 		_, _ = fmt.Fprintf(w, "… (earlier output truncated — full logs at /api/runs/%s/logs?job=%s&step=%d)\n", runID, job, step)
 	}
-	_, _ = w.Write(tail)
+	n, _ := w.Write(tail)
+	return int64(n)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {

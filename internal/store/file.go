@@ -197,32 +197,42 @@ func (f *File) ReadLogs(runID, job string, stepIndex int, offset int64) (io.Read
 	return file, nil
 }
 
-func (f *File) ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, error) {
+func (f *File) ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, bool, error) {
 	if maxBytes <= 0 {
-		return f.ReadLogs(runID, job, stepIndex, 0)
+		rc, err := f.ReadLogs(runID, job, stepIndex, 0)
+		return rc, false, err
 	}
 	if err := checkRunID(runID); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	file, err := os.Open(f.logPath(runID, job, stepIndex))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return io.NopCloser(strings.NewReader("")), nil
+			return io.NopCloser(strings.NewReader("")), false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return nil, err
+		return nil, false, err
 	}
-	if info.Size() > maxBytes {
+	truncated := info.Size() > maxBytes
+	if truncated {
 		if _, err := file.Seek(info.Size()-maxBytes, io.SeekStart); err != nil {
 			_ = file.Close()
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return file, nil
+	// LimitReader caps the read at maxBytes even if the step appends after the
+	// Stat above, so a fast-growing log can never overshoot the budget.
+	return readCloser{Reader: io.LimitReader(file, maxBytes), Closer: file}, truncated, nil
+}
+
+// readCloser pairs a bounded Reader with the underlying file's Closer.
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // sanitize maps a job name to a safe filename fragment.

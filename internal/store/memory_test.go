@@ -99,26 +99,29 @@ func TestMemoryReadLogsTail(t *testing.T) {
 	_, _ = io.WriteString(w, "hello world")
 	_ = w.Close()
 
-	tailOf := func(max int64) string {
+	tailOf := func(max int64) (string, bool) {
 		t.Helper()
-		rc, err := m.ReadLogsTail("r", "build", 0, max)
+		rc, truncated, err := m.ReadLogsTail("r", "build", 0, max)
 		if err != nil {
 			t.Fatalf("ReadLogsTail(%d): %v", max, err)
 		}
 		defer func() { _ = rc.Close() }()
 		b, _ := io.ReadAll(rc)
-		return string(b)
+		return string(b), truncated
 	}
-	if got := tailOf(5); got != "world" {
-		t.Errorf("tail(5) = %q, want world", got)
+	if got, tr := tailOf(5); got != "world" || !tr {
+		t.Errorf("tail(5) = %q,%v, want world,true", got, tr)
 	}
-	if got := tailOf(0); got != "hello world" {
-		t.Errorf("tail(0) = %q, want the whole log", got)
+	if got, tr := tailOf(11); got != "hello world" || tr { // exactly the length: not truncated
+		t.Errorf("tail(11) = %q,%v, want the whole log,false", got, tr)
 	}
-	if got := tailOf(1000); got != "hello world" {
-		t.Errorf("tail(oversized) = %q, want the whole log", got)
+	if got, tr := tailOf(0); got != "hello world" || tr {
+		t.Errorf("tail(0) = %q,%v, want the whole log,false", got, tr)
 	}
-	rc, _ := m.ReadLogsTail("r", "build", 9, 5) // missing step
+	if got, tr := tailOf(1000); got != "hello world" || tr {
+		t.Errorf("tail(oversized) = %q,%v, want the whole log,false", got, tr)
+	}
+	rc, _, _ := m.ReadLogsTail("r", "build", 9, 5) // missing step
 	b, _ := io.ReadAll(rc)
 	_ = rc.Close()
 	if len(b) != 0 {

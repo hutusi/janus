@@ -54,7 +54,9 @@ type Store interface {
 	ReadLogs(runID, job string, stepIndex int, offset int64) (io.ReadCloser, error)
 	// ReadLogsTail returns a reader over at most the last maxBytes of one
 	// step's output (maxBytes <= 0 = the whole log; a missing step reads as
-	// empty). The tail may begin mid-line. It lets the HTML page bound memory
-	// regardless of log size without reading the whole file.
-	ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, error)
+	// empty) and reports whether the log was longer than maxBytes (i.e. the
+	// start was cut). The reader yields no more than maxBytes even if the log
+	// keeps growing, so the HTML page is bounded regardless of log size. The
+	// tail may begin mid-line.
+	ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (rc io.ReadCloser, truncated bool, err error)
 }

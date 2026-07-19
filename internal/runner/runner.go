@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hutusi/janus/internal/allowlist"
@@ -57,6 +58,8 @@ type Runner struct {
 
 	admitMu sync.Mutex // guards closing and serializes admission against Shutdown
 	closing bool       // once set (by Shutdown), no new triggers are admitted
+
+	degraded atomic.Bool // latched on a startup failure (e.g. an unwritable store); surfaced via /healthz
 
 	locksMu sync.Mutex             // guards locks
 	locks   map[string]*sync.Mutex // per-repo workspace locks (persistent strategy)
@@ -115,9 +118,16 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 	}
 }
 
-// Degraded reports whether the engine ever abandoned a run's terminal state
-// unpersisted; the daemon surfaces it via /healthz.
-func (r *Runner) Degraded() bool { return r.engine.Degraded() }
+// Degraded reports whether the daemon is in a known-bad state the operator
+// should act on: the engine abandoned a run's terminal state unpersisted, or a
+// startup step (e.g. reconciling interrupted runs) failed against an
+// unwritable store. The daemon surfaces it via /healthz. A restart clears the
+// startup latch, but if storage is still broken the failing startup step
+// re-latches it, so a restart cannot falsely report healthy.
+func (r *Runner) Degraded() bool { return r.degraded.Load() || r.engine.Degraded() }
+
+// MarkDegraded latches the runner into a degraded state (see Degraded).
+func (r *Runner) MarkDegraded() { r.degraded.Store(true) }
 
 // pruneHistory enforces the retention cap (a no-op when unset), logging but
 // not failing on error — pruning is housekeeping, not part of the run.

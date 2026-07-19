@@ -174,7 +174,11 @@ func runServe(args []string) error {
 		logger.Warn("workspace sweep failed", "err", err)
 	}
 	if n, err := rn.ReconcileInterrupted(); err != nil {
-		logger.Warn("reconciling interrupted runs failed", "err", err)
+		// The store rejected a write at startup (e.g. a full or read-only data
+		// dir), so a run is still stale and the store is unhealthy. Latch
+		// degraded so /healthz reports 503 rather than a false 200 on restart.
+		rn.MarkDegraded()
+		logger.Warn("reconciling interrupted runs failed; marking unhealthy", "err", err)
 	} else if n > 0 {
 		logger.Info("marked runs interrupted by the previous process as cancelled", "count", n)
 	}

@@ -374,6 +374,18 @@ func TestTriggerCheckoutHonorsRequestCancellation(t *testing.T) {
 	}
 }
 
+func TestRunnerMarkDegraded(t *testing.T) {
+	st := store.NewMemory()
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+	if r.Degraded() {
+		t.Fatal("a fresh runner should not be degraded")
+	}
+	r.MarkDegraded()
+	if !r.Degraded() {
+		t.Error("MarkDegraded should latch Degraded()")
+	}
+}
+
 func TestShutdownRejectsNewTriggers(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
