@@ -82,7 +82,9 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	if errors.Is(err, runner.ErrBusy) {
+	if errors.Is(err, runner.ErrBusy) || errors.Is(err, runner.ErrStoreUnavailable) {
+		// Both are Janus-side transient conditions: retry, don't treat as a
+		// client (400) error.
 		w.Header().Set("Retry-After", "30")
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return

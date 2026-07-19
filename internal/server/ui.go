@@ -38,6 +38,15 @@ var templateFuncs = template.FuncMap{
 		}
 		return t.Format("2006-01-02 15:04:05")
 	},
+	// trunc bounds a metadata string rendered in the dashboard (command, job
+	// or workflow name) so a large value stored on an old run — or one that
+	// predates the pipeline-file size cap — can't bloat the page.
+	"trunc": func(n int, s string) string {
+		if len(s) > n {
+			return s[:n] + "…"
+		}
+		return s
+	},
 }
 
 // indexData is the model for the run-list page.
@@ -112,11 +121,19 @@ func (s *Server) writeRunLogsTail(w io.Writer, run *model.Run, perStep, total in
 	lw := &limitedWriter{w: w, remaining: total}
 	for _, jr := range run.Jobs {
 		for _, sr := range jr.Steps {
+			// Stop reading once the budget is spent: without this the loop would
+			// still call ReadLogsTail for every remaining step, reading the
+			// whole log set from disk (gigabytes) just to drop it.
+			if lw.remaining <= 0 {
+				lw.truncated = true
+				goto done
+			}
 			_, _ = fmt.Fprintf(lw, "=== %s / step %d [%s] ===\n", jr.Name, sr.Index, sr.Status)
 			s.copyStepTail(lw, run.ID, jr.Name, sr.Index, perStep)
 			_, _ = io.WriteString(lw, "\n")
 		}
 	}
+done:
 	if lw.truncated {
 		// A fixed trailer, written outside the budget (so its own bytes can't
 		// be dropped), telling the reader where the full logs live.

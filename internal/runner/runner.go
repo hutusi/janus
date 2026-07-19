@@ -38,6 +38,12 @@ var ErrRepoNotAllowed = errors.New("repository not allowed")
 // 503 so callers back off and retry instead of piling up checkouts.
 var ErrBusy = errors.New("runner at capacity")
 
+// ErrStoreUnavailable is returned by Trigger when the store cannot record the
+// run (a full/read-only data dir). Handlers map it to HTTP 503 + Retry-After —
+// like ErrBusy, it is Janus's problem, not the repository's, so the event must
+// be retried rather than acknowledged and dropped.
+var ErrStoreUnavailable = errors.New("store unavailable")
+
 // Runner coordinates checkout → parse → match → execute.
 type Runner struct {
 	store        store.Store
@@ -376,7 +382,7 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	// onto the fallback path, and a leaked slot would shrink capacity forever.
 	abort := func() { _ = ws.Cleanup(); unlock(); release() }
 
-	data, err := os.ReadFile(filepath.Join(ws.Dir, pipelinePath))
+	data, err := pipeline.ReadFile(filepath.Join(ws.Dir, pipelinePath))
 	if err != nil {
 		abort()
 		return Result{}, fmt.Errorf("read %s: %w", pipelinePath, err)
@@ -396,12 +402,13 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if err := r.store.SaveRun(run); err != nil {
 		// The store rejected recording a new run (a full/read-only/permission
 		// problem for the local file store — persistent, not transient), so
-		// the daemon can't do its job: latch degraded for /healthz. Without
-		// this, a store that breaks with no interrupted runs to reconcile would
-		// stay a false 200 while rejecting every trigger.
+		// the daemon can't do its job: latch degraded for /healthz, and return
+		// a typed error so both handlers answer 503 + Retry-After (the event
+		// must be retried, not acknowledged and dropped) rather than a
+		// misleading 200/400.
 		r.MarkDegraded()
 		abort()
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 
 	go func() {

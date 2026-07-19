@@ -5,12 +5,39 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
 
 	"github.com/hutusi/janus/internal/model"
 	"gopkg.in/yaml.v3"
 )
+
+// MaxFileBytes caps a pipeline file. A CI YAML is normally a few kilobytes;
+// 1 MiB is generous. The cap is enforced at read time so a giant .janus/ci.yml
+// is never loaded whole into memory or parsed — it bounds everything that flows
+// from the file (commands, names, env, job/step counts), the ingestion point
+// the per-field limits alone could not.
+const MaxFileBytes = 1 << 20
+
+// ReadFile reads a pipeline file, rejecting anything larger than MaxFileBytes
+// without buffering the whole file. Use it in place of os.ReadFile at every
+// site that loads a pipeline for Parse.
+func ReadFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, MaxFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxFileBytes {
+		return nil, fmt.Errorf("pipeline file %s is too large (limit %d bytes)", path, MaxFileBytes)
+	}
+	return data, nil
+}
 
 // Parse decodes and fully validates a pipeline YAML document. It rejects any
 // unsupported key (if, matrix, uses, with, runs-on, ...), any unsupported

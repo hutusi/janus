@@ -93,6 +93,29 @@ func newTestServerAllow(t *testing.T, entries ...string) *httptest.Server {
 	return ts
 }
 
+// saveFailStore rejects SaveRun, as a full/read-only data dir would.
+type saveFailStore struct {
+	store.Store
+}
+
+func (saveFailStore) SaveRun(*model.Run) error { return errors.New("disk full") }
+
+// newTestServerStore builds an allow-all server over the given store (used to
+// inject failure). Providers + token are wired like newTestServer.
+func newTestServerStore(t *testing.T, st store.Store) *httptest.Server {
+	t.Helper()
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, engine.New(st), runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow})
+	srv := New(st, rn, "test",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithProvider(provider.GitLab{}, testGitLabSecret),
+		WithAPIToken(testAPIToken),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
 // newTestServerPersistent builds an allow-all server whose runner reuses one
 // workspace per repo (workspace_strategy: persistent).
 func newTestServerPersistent(t *testing.T) *httptest.Server {
@@ -333,6 +356,43 @@ func TestRunPageTotalBudget(t *testing.T) {
 	}
 }
 
+// countingStore counts ReadLogsTail calls to prove the renderer stops reading
+// once the page budget is spent.
+type countingStore struct {
+	store.Store
+	tailReads int
+}
+
+func (c *countingStore) ReadLogsTail(runID, job string, step int, maxBytes int64) (io.ReadCloser, bool, error) {
+	c.tailReads++
+	return c.Store.ReadLogsTail(runID, job, step, maxBytes)
+}
+
+func TestWriteRunLogsTailStopsReadingWhenFull(t *testing.T) {
+	cs := &countingStore{Store: store.NewMemory()}
+	srv := New(cs, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+
+	const total, perStep int64 = 100, 100
+	steps := make([]*model.StepRun, 500)
+	for i := range steps {
+		steps[i] = &model.StepRun{Index: i, Status: model.StatusSuccess}
+		w, _ := cs.LogWriter("r", "build", i)
+		_, _ = io.WriteString(w, strings.Repeat("x", 200)) // each step overflows the budget
+		_ = w.Close()
+	}
+	run := &model.Run{ID: "r", Status: model.StatusSuccess,
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: steps}}}
+
+	var buf bytes.Buffer
+	srv.writeRunLogsTail(&buf, run, perStep, total)
+
+	// The budget is spent within the first step or two — the render must not
+	// have read all 500 step logs from the store.
+	if cs.tailReads > 3 {
+		t.Errorf("renderer read %d step logs, want it to stop once the budget was spent", cs.tailReads)
+	}
+}
+
 func TestWriteRunLogsTailBounded(t *testing.T) {
 	st := store.NewMemory()
 	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
@@ -360,6 +420,28 @@ func TestWriteRunLogsTailBounded(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "page size limit reached") {
 		t.Error("a truncated render should end with the page-limit trailer")
+	}
+}
+
+func TestRunPageTruncatesLongCommand(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	longCmd := strings.Repeat("Z", 5000)
+	run := &model.Run{ID: "cmd", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess,
+			Steps: []*model.StepRun{{Index: 0, Command: longCmd, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	body := getText(t, ts.URL+"/runs/cmd")
+	if strings.Contains(body, longCmd) {
+		t.Error("run page should truncate a very long command, not render it whole")
+	}
+	if !strings.Contains(body, "…") {
+		t.Error("truncated command should show an ellipsis")
 	}
 }
 
@@ -460,6 +542,22 @@ func TestTriggerValidation(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for missing repo_url", resp.StatusCode)
+	}
+}
+
+func TestTriggerStoreUnavailableReturns503(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, "name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: echo hi\n")
+	ts := newTestServerStore(t, saveFailStore{store.NewMemory()})
+
+	body, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/heads/main", "branch": "main"})
+	resp := postTrigger(t, ts, string(body))
+	defer func() { _ = resp.Body.Close() }()
+	// A storage failure is Janus's problem: 503 (retriable), not a 400 client error.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (store unavailable)", resp.StatusCode)
 	}
 }
 

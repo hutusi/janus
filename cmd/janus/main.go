@@ -270,7 +270,7 @@ func runValidate(args []string) error {
 		return errors.New("usage: janus validate <file>")
 	}
 	path := fs.Arg(0)
-	data, err := os.ReadFile(path)
+	data, err := pipeline.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -351,7 +351,7 @@ func runRun(args []string) error {
 		dir = abs
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, *file))
+	data, err := pipeline.ReadFile(filepath.Join(dir, *file))
 	if err != nil {
 		return err
 	}

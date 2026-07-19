@@ -106,6 +106,25 @@ func TestParseRejectsOversizedPipelines(t *testing.T) {
 	}
 }
 
+func TestReadFileSizeCap(t *testing.T) {
+	dir := t.TempDir()
+	small := filepath.Join(dir, "ok.yml")
+	if err := os.WriteFile(small, []byte("name: ci\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(small); err != nil {
+		t.Errorf("a small file should read: %v", err)
+	}
+
+	big := filepath.Join(dir, "big.yml")
+	if err := os.WriteFile(big, make([]byte, MaxFileBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(big); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Errorf("a >MaxFileBytes file should be rejected, got %v", err)
+	}
+}
+
 func TestParseAcceptsFullJobNameCharset(t *testing.T) {
 	const src = `
 name: ci

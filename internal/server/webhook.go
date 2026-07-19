@@ -73,6 +73,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "busy"})
 		return
 	}
+	if errors.Is(err, runner.ErrStoreUnavailable) {
+		// The store couldn't record the run — Janus's problem, not the repo's.
+		// Non-2xx so the provider retries instead of the event being dropped.
+		s.logger.Error("webhook could not be recorded: store unavailable", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch, "err", err)
+		w.Header().Set("Retry-After", "30")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
+		return
+	}
 	if err != nil {
 		// The push/MR is valid; a missing or invalid .janus/ci.yml (or a
 		// checkout problem) is the repository's concern. Stay 2xx, but log it.

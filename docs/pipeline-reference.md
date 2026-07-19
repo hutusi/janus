@@ -126,9 +126,10 @@ These produce a clear validation error rather than running:
 - `cache:`, `permissions:`, `concurrency:`, `outputs:`, step `id:`/`name:`.
 - Job names outside `[A-Za-z0-9_-]` — the store derives log-file names from
   the job name, and a wider charset would let two jobs share one file.
-- Absurd sizes — more than 256 jobs, more than 256 steps in a job, a job name
-  over 256 characters, or a step `run` over 64 KiB. Generous limits that only
-  reject the pathological, so per-run artifacts stay finite.
+- Absurd sizes — a pipeline file over 1 MiB (rejected at read, before parsing),
+  more than 256 jobs, more than 256 steps in a job, a job name over 256
+  characters, or a step `run` over 64 KiB. Generous limits that only reject the
+  pathological, so per-run artifacts stay finite.
 - A second YAML document (`---`) in the file — it would be silently ignored,
   hiding part of the file from validation.
 - An unterminated `${{` — it would reach the shell verbatim.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hutusi/janus/internal/model"
+	"github.com/hutusi/janus/internal/store"
 )
 
 // gitlabPush posts a GitLab "Push Hook" for repo@sha on the given branch.
@@ -66,6 +67,31 @@ jobs:
 	}
 	if run.Event.Kind != model.EventPush || run.Event.Branch != "main" {
 		t.Errorf("event = %+v, want push on main", run.Event)
+	}
+}
+
+func TestWebhookStoreUnavailableRetries(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, `name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: echo hi
+`)
+	ts := newTestServerStore(t, saveFailStore{store.NewMemory()})
+
+	resp := gitlabPush(t, ts, repo, sha, "main", testGitLabSecret)
+	defer func() { _ = resp.Body.Close() }()
+	// A storage failure must NOT be acked as 200 (GitLab would drop the event);
+	// it is a retriable 503.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (store unavailable)", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("503 should carry Retry-After so the provider retries")
 	}
 }
 
