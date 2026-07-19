@@ -289,6 +289,64 @@ func TestTriggerAdmissionBound(t *testing.T) {
 	}
 }
 
+func TestShutdownRejectsNewTriggers(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	r.Shutdown(time.Second) // no in-flight work: returns immediately after closing the gate
+
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/anything", SHA: "0123456789abcdef0123456789abcdef01234567", Ref: "refs/heads/main"}
+	if _, err := r.Trigger(context.Background(), ev); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Trigger after Shutdown = %v, want ErrBusy (no disk work)", err)
+	}
+}
+
+func TestShutdownWaitsForAdmittedTrigger(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	// Simulate a trigger that has been admitted and is mid-checkout: it holds
+	// an admission slot and a wg count, but has not spawned its run goroutine.
+	release, err := r.admitOne()
+	if err != nil {
+		t.Fatalf("admitOne: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() { r.Shutdown(30 * time.Second); close(done) }()
+
+	// Shutdown must not complete while the admitted trigger is outstanding,
+	// and the closing gate must become visible to new triggers.
+	deadline := time.Now().Add(5 * time.Second)
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/x", SHA: "0123456789abcdef0123456789abcdef01234567", Ref: "refs/heads/main"}
+	for {
+		if _, err := r.Trigger(context.Background(), ev); errors.Is(err, ErrBusy) {
+			break // closing observed
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closing gate never became visible to Trigger")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("Shutdown returned while an admitted trigger was still outstanding")
+	default:
+	}
+
+	release() // the trigger finishes: Shutdown can now drain
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after the trigger released")
+	}
+	if len(r.admit) != 0 {
+		t.Errorf("admission slot leaked: len = %d, want 0", len(r.admit))
+	}
+}
+
 func TestTriggerRejectsDisallowedRepo(t *testing.T) {
 	root := t.TempDir()
 	st := store.NewMemory()

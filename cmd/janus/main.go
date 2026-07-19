@@ -322,6 +322,9 @@ func runRun(args []string) error {
 		defer func() { _ = ws.Cleanup() }()
 		dir = ws.Dir
 		ev.RepoURL, ev.SHA, ev.Ref = *repo, *sha, *ref
+		if ws.Head != "" { // the exact commit checked out, not the abbreviation supplied
+			ev.SHA = ws.Head
+		}
 		if ev.Branch == "" {
 			ev.Branch = strings.TrimPrefix(*ref, "refs/heads/")
 		}

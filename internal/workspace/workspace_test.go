@@ -330,6 +330,77 @@ func TestCheckoutReuseFreshDir(t *testing.T) {
 	}
 }
 
+func TestValidateTarget(t *testing.T) {
+	valid := []struct{ sha, ref string }{
+		{"", "refs/heads/main"},
+		{"0123456789abcdef0123456789abcdef01234567", ""},
+		{"abc1234", "feature/x-y_z"},
+		{"", "refs/tags/v1.0"},
+		{"", "release@2026"},
+	}
+	for _, tc := range valid {
+		if err := validateTarget(tc.sha, tc.ref); err != nil {
+			t.Errorf("validateTarget(%q, %q) = %v, want nil", tc.sha, tc.ref, err)
+		}
+	}
+	bad := []struct {
+		name, sha, ref string
+	}{
+		{"option-injecting SHA", "--upload-pack=/bin/echo", ""},
+		{"option-injecting ref", "", "--upload-pack=/bin/echo"},
+		{"leading-dash ref", "", "-main"},
+		{"traversal ref", "", "refs/../heads/main"},
+		{"space in ref", "", "refs/heads/a b"},
+		{"lock-suffix ref", "", "refs/heads/x.lock"},
+		{"trailing-slash ref", "", "refs/heads/x/"},
+		{"reflog ref", "", "main@{0}"},
+		{"too-short SHA", "abc12", ""},
+		{"non-hex SHA", "zzzzzzz", ""},
+		{"over-long SHA", strings.Repeat("a", 65), ""},
+	}
+	for _, tc := range bad {
+		if err := validateTarget(tc.sha, tc.ref); err == nil {
+			t.Errorf("%s: validateTarget(%q, %q) = nil, want error", tc.name, tc.sha, tc.ref)
+		}
+	}
+}
+
+func TestCheckoutRejectsOptionInjection(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, _ := initGitRepo(t)
+	for _, reuse := range []bool{false, true} {
+		// The payload must be rejected before any git fetch runs — otherwise
+		// --upload-pack executes and defeats the SHA verification.
+		_, err := Checkout(context.Background(), Options{
+			Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src,
+			Ref: "--upload-pack=/bin/echo", Keep: true, Reuse: reuse,
+		})
+		if err == nil {
+			t.Fatalf("reuse=%v: option-injecting ref was not rejected", reuse)
+		}
+	}
+}
+
+func TestCheckoutRecordsResolvedHead(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	// Abbreviated SHA + ref fallback: Head must be the full resolved commit.
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: sha[:8], Ref: "refs/heads/main",
+	})
+	if err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+	if ws.Head != sha {
+		t.Errorf("ws.Head = %q, want the full %q", ws.Head, sha)
+	}
+}
+
 func TestCheckoutValidation(t *testing.T) {
 	if _, err := Checkout(context.Background(), Options{Dir: t.TempDir(), SHA: "abc"}); err == nil {
 		t.Error("expected error when RepoURL is empty")

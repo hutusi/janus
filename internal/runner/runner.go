@@ -46,11 +46,14 @@ type Runner struct {
 	persistent   bool
 	allow        allowlist.Allowlist
 
-	ctx    context.Context // root context for run execution; cancelled on Shutdown
+	ctx    context.Context // root context for run execution and checkout; cancelled on Shutdown
 	cancel context.CancelFunc
 	sem    chan struct{}  // caps concurrently executing runs
 	admit  chan struct{}  // caps the whole trigger lifecycle: checkout + parse + pending queue
-	wg     sync.WaitGroup // tracks in-flight runs for graceful shutdown
+	wg     sync.WaitGroup // tracks admitted triggers (checkout onward) for graceful shutdown
+
+	admitMu sync.Mutex // guards closing and serializes admission against Shutdown
+	closing bool       // once set (by Shutdown), no new triggers are admitted
 
 	locksMu sync.Mutex             // guards locks
 	locks   map[string]*sync.Mutex // per-repo workspace locks (persistent strategy)
@@ -191,17 +194,46 @@ func (r *Runner) ReconcileInterrupted() (int, error) {
 	return repaired, firstErr
 }
 
-// Shutdown stops accepting new run work and waits up to grace for in-flight
-// runs to finish; if they don't, it cancels them (killing their host
-// processes) and waits for the unwind. Call after the HTTP listener is closed.
+// admitOne reserves an admission slot and registers the trigger with the
+// shutdown WaitGroup, atomically with respect to Shutdown. It returns ErrBusy
+// if the runner is closing or the queue is full. The returned release must be
+// called exactly once on every exit path — it frees the slot and the wg count,
+// replacing both `<-r.admit` and `wg.Done()`. Acquiring wg here (not after
+// checkout+parse) means Shutdown waits for in-flight checkouts too, and the
+// admitMu-guarded closing check gives a happens-before with Shutdown so no
+// wg.Add can ever race wg.Wait.
+func (r *Runner) admitOne() (release func(), err error) {
+	r.admitMu.Lock()
+	defer r.admitMu.Unlock()
+	if r.closing {
+		return nil, ErrBusy
+	}
+	select {
+	case r.admit <- struct{}{}:
+	default:
+		return nil, ErrBusy
+	}
+	r.wg.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { <-r.admit; r.wg.Done() }) }, nil
+}
+
+// Shutdown stops accepting new triggers and waits up to grace for admitted
+// work (checkout onward) to finish; if it doesn't, it cancels them (killing
+// their host processes) and waits for the unwind. Call after the HTTP listener
+// is closed.
 func (r *Runner) Shutdown(grace time.Duration) {
+	r.admitMu.Lock()
+	r.closing = true
+	r.admitMu.Unlock()
+
 	done := make(chan struct{})
 	go func() { r.wg.Wait(); close(done) }()
 	select {
 	case <-done:
 		r.cancel()
 	case <-time.After(grace):
-		r.cancel() // grace expired: cancel in-flight runs, then wait for unwind
+		r.cancel() // grace expired: cancel in-flight work, then wait for unwind
 		<-done
 	}
 }
@@ -215,19 +247,24 @@ func (r *Runner) Shutdown(grace time.Duration) {
 // ErrRepoNotAllowed (before any disk work); an invalid pipeline path and
 // checkout/parse failures return an error; a non-matching event returns
 // Result{Started: false} with nil error.
+//
+// ctx scopes only the caller's admission decision; checkout and execution run
+// on the runner's own context so they survive the request returning and are
+// cancelled by Shutdown instead.
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
+	_ = ctx // see the doc comment: checkout/execute deliberately use r.ctx
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
 	}
 	// Bounded admission, before any disk work: everything below — the git
 	// checkout, the parse, the run pending its sem slot — consumes processes
 	// and workspace directories, so it must be capped, not just execution.
-	select {
-	case r.admit <- struct{}{}:
-	default:
-		return Result{}, ErrBusy
+	// admitOne also enrolls in the shutdown WaitGroup, so a checkout still in
+	// flight when Shutdown begins is waited on (and then cancelled via r.ctx).
+	release, err := r.admitOne()
+	if err != nil {
+		return Result{}, err
 	}
-	release := func() { <-r.admit }
 
 	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
 	if err != nil {
@@ -261,7 +298,10 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		}
 	}
 
-	ws, err := workspace.Checkout(ctx, workspace.Options{
+	// Checkout runs on r.ctx (not the request ctx) so Shutdown's cancel kills
+	// an in-flight git process, and an admitted, authenticated event is not
+	// dropped just because the webhook client hit its own delivery timeout.
+	ws, err := workspace.Checkout(r.ctx, workspace.Options{
 		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref,
 		Keep: r.keepWS || reuse, Reuse: reuse,
 	})
@@ -269,6 +309,12 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		unlock()
 		release()
 		return Result{}, fmt.Errorf("checkout: %w", err)
+	}
+	// Pin the run's metadata to the exact commit that will run: verifyHEAD
+	// resolved the full 40-char SHA, so ${{ sha }} / JANUS_SHA are correct even
+	// for an abbreviated or ref-only trigger.
+	if ws.Head != "" {
+		ev.SHA = ws.Head
 	}
 	// Every pre-execution exit must release the workspace, the repo lock, and
 	// the admission slot — a leaked repo lock would silently wedge the repo
@@ -297,10 +343,8 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 		return Result{}, err
 	}
 
-	r.wg.Add(1)
 	go func() {
-		defer r.wg.Done()
-		defer release()
+		defer release()                     // frees the admission slot and the shutdown wg count
 		defer unlock()                      // after cleanup: dir settled before the next run can claim it
 		defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
 		// Wait for a run slot; the run stays Pending until one frees.

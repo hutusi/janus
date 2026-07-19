@@ -13,8 +13,47 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var (
+	// shaRe matches a full or abbreviated hex commit. The 7-char minimum keeps
+	// the fetch/verify from accepting an ambiguously short prefix.
+	shaRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+	// refRe is a conservative subset of git's ref grammar: it must start
+	// alphanumeric (so it can never be read as a `-option`) and use only a
+	// safe alphabet. hasBadRefSeq below rejects the remaining forbidden runs.
+	refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@-]*$`)
+)
+
+// validateTarget rejects SHAs and refs that git could parse as options (e.g.
+// "--upload-pack=/bin/sh") or resolve ambiguously, before any git process
+// runs. These values come from the webhook payload or the manual API, so they
+// are untrusted; validation — not a `--` terminator — is the guarantee, since
+// `git fetch` does not portably honor `--` before a refspec. A validated SHA
+// is hex and a validated ref starts alphanumeric, so neither can be an option,
+// and the checkout/reset target is only ever such a SHA or the literal
+// "FETCH_HEAD".
+func validateTarget(sha, ref string) error {
+	if sha != "" && !shaRe.MatchString(sha) {
+		return fmt.Errorf("workspace: invalid SHA %q (want 7-64 hex characters)", sha)
+	}
+	if ref != "" && (!refRe.MatchString(ref) || hasBadRefSeq(ref)) {
+		return fmt.Errorf("workspace: invalid ref %q", ref)
+	}
+	return nil
+}
+
+// hasBadRefSeq flags the multi-character sequences git check-ref-format
+// forbids that refRe's alphabet alone cannot exclude.
+func hasBadRefSeq(ref string) bool {
+	return strings.Contains(ref, "..") ||
+		strings.Contains(ref, "@{") ||
+		strings.Contains(ref, "//") ||
+		strings.HasSuffix(ref, ".lock") ||
+		strings.HasSuffix(ref, "/")
+}
 
 // Options configures a checkout.
 type Options struct {
@@ -29,6 +68,7 @@ type Options struct {
 // Workspace is a checked-out repository on disk.
 type Workspace struct {
 	Dir  string
+	Head string // full 40-char SHA actually checked out (set after verifyHEAD)
 	keep bool
 }
 
@@ -45,6 +85,9 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 	}
 	if opt.SHA == "" && opt.Ref == "" {
 		return nil, fmt.Errorf("workspace: a SHA or Ref is required")
+	}
+	if err := validateTarget(opt.SHA, opt.Ref); err != nil {
+		return nil, err
 	}
 	if opt.Reuse {
 		if ws, err := reuseCheckout(ctx, opt); err == nil {
@@ -106,23 +149,23 @@ func (w *Workspace) fetchTarget(ctx context.Context, opt Options) (string, error
 	return "FETCH_HEAD", nil
 }
 
-// verifyHEAD fails unless HEAD is the commit sha identifies. After the ref
-// fallback in fetchTarget, the materialized commit is whatever the ref points
-// at *now* — if the branch moved (or was rewritten) between the event and the
-// checkout, running it would silently execute code the run's recorded SHA does
-// not identify. Prefix match: events carry the full 40-char SHA, but
-// `janus run --sha` may abbreviate. No-op when sha is empty (ref-only runs).
+// verifyHEAD resolves the checked-out commit, records it on w.Head, and — when
+// a SHA was requested — fails unless HEAD matches it. After the ref fallback in
+// fetchTarget the materialized commit is whatever the ref points at *now*; if
+// the branch moved (or was rewritten) between the event and the checkout,
+// running it would silently execute code the run's recorded SHA does not
+// identify. Prefix match: events carry the full 40-char SHA, but `janus run
+// --sha` may abbreviate. With an empty SHA (ref-only runs) it only records
+// Head, so callers can pin metadata to the exact commit that ran.
 func (w *Workspace) verifyHEAD(ctx context.Context, sha string) error {
-	if sha == "" {
-		return nil
-	}
 	head, err := w.gitOut(ctx, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(head, strings.ToLower(sha)) {
+	if sha != "" && !strings.HasPrefix(head, strings.ToLower(sha)) {
 		return fmt.Errorf("workspace: checked-out commit %s is not the requested SHA %s (the ref moved after the event; re-trigger, or omit the SHA to run the current tip)", head, sha)
 	}
+	w.Head = head
 	return nil
 }
 
