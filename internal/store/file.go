@@ -60,7 +60,38 @@ func (f *File) writeRun(run *model.Run) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".run-*.json")
+	// Enforce the same cap GetRun reads with, so we never persist a record that
+	// can then never be read back (which would drop it from list/detail/
+	// reconciliation). With the ingestion caps in place this never trips.
+	if int64(len(data)) > maxRunFileBytes {
+		return fmt.Errorf("run %q metadata is too large to persist (limit %d bytes)", run.ID, maxRunFileBytes)
+	}
+	// run.json is the source of truth — write it first, then the summary
+	// sidecar. That ordering keeps a stale sidecar's lifecycle status <= the
+	// record's (pending->running->terminal is monotonic, terminal is final), so
+	// a lagging sidecar can never claim "terminal" for a still-running run.
+	if err := writeAtomic(dir, "run.json", data); err != nil {
+		return err
+	}
+	// The sidecar is a listing cache; a write hiccup must not fail a valid
+	// persist — readSummary falls back to run.json (and re-heals) if it is
+	// missing.
+	_ = writeSummary(dir, run.Summary())
+	return nil
+}
+
+// writeSummary writes the compact summary sidecar used by ListRuns/Prune.
+func writeSummary(dir string, s *model.RunSummary) error {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(dir, "summary.json", data)
+}
+
+// writeAtomic writes data to dir/name via a temp file + rename.
+func writeAtomic(dir, name string, data []byte) error {
+	tmp, err := os.CreateTemp(dir, "."+name+"-*")
 	if err != nil {
 		return err
 	}
@@ -74,19 +105,33 @@ func (f *File) writeRun(run *model.Run) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, filepath.Join(dir, "run.json"))
+	return os.Rename(tmpName, filepath.Join(dir, name))
 }
+
+// maxRunFileBytes bounds both a run.json write and read symmetrically. Records
+// are bounded by the ingestion caps (pipeline file, event fields), so 16 MiB is
+// generous headroom; the cap guards against a corrupt/oversized file being
+// written or read whole. A var so tests can shrink it.
+var maxRunFileBytes int64 = 16 << 20
 
 func (f *File) GetRun(id string) (*model.Run, error) {
 	if err := checkRunID(id); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(filepath.Join(f.runDir(id), "run.json"))
+	file, err := os.Open(filepath.Join(f.runDir(id), "run.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("run %q not found", id)
 		}
 		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maxRunFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxRunFileBytes {
+		return nil, fmt.Errorf("run %q metadata is too large (limit %d bytes)", id, maxRunFileBytes)
 	}
 	var run model.Run
 	if err := json.Unmarshal(data, &run); err != nil {
@@ -95,29 +140,97 @@ func (f *File) GetRun(id string) (*model.Run, error) {
 	return &run, nil
 }
 
-func (f *File) ListRuns(limit int) ([]*model.Run, error) {
+func (f *File) ListRuns(limit, offset int) ([]*model.RunSummary, error) {
+	sums, err := f.allSummaries()
+	if err != nil {
+		return nil, err
+	}
+	return page(sums, limit, offset), nil
+}
+
+// maxSummaryFileBytes bounds a summary.json read. A summary is a handful of
+// capped fields, so this is small; it only guards against a corrupt sidecar.
+const maxSummaryFileBytes = 64 << 10
+
+// readSummary returns a run's compact summary. It reads the tiny summary.json
+// sidecar so listing never parses the full run.json. If the sidecar is missing
+// or unreadable (a legacy run, or a failed sidecar write), it falls back to
+// deriving the summary from run.json and rewrites the sidecar (self-healing,
+// backward-compatible).
+func (f *File) readSummary(id string) (*model.RunSummary, error) {
+	if data, err := os.ReadFile(filepath.Join(f.runDir(id), "summary.json")); err == nil && int64(len(data)) <= maxSummaryFileBytes {
+		var s model.RunSummary
+		if err := json.Unmarshal(data, &s); err == nil {
+			return &s, nil
+		}
+	}
+	// Fallback: derive from the source of truth and heal the sidecar.
+	run, err := f.GetRun(id)
+	if err != nil {
+		return nil, err
+	}
+	s := run.Summary()
+	_ = writeSummary(f.runDir(id), s)
+	return s, nil
+}
+
+// allSummaries scans every run directory and returns compact summaries
+// newest-first, reading only the tiny summary.json sidecar per run (see
+// readSummary) — not the full run.json — so listing stays cheap in both memory
+// and disk/CPU regardless of record size. Retention (history_limit) bounds the
+// directory scan itself.
+func (f *File) allSummaries() ([]*model.RunSummary, error) {
 	entries, err := os.ReadDir(filepath.Join(f.root, "runs"))
 	if err != nil {
 		return nil, err
 	}
-	runs := make([]*model.Run, 0, len(entries))
+	sums := make([]*model.RunSummary, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		run, err := f.GetRun(e.Name())
+		s, err := f.readSummary(e.Name())
 		if err != nil {
 			continue // skip incomplete/unreadable run dirs
 		}
-		runs = append(runs, run)
+		sums = append(sums, s)
 	}
-	sort.SliceStable(runs, func(i, j int) bool {
-		return runs[i].CreatedAt.After(runs[j].CreatedAt)
+	sort.SliceStable(sums, func(i, j int) bool {
+		return sums[i].CreatedAt.After(sums[j].CreatedAt)
 	})
-	if limit > 0 && len(runs) > limit {
-		runs = runs[:limit]
+	return sums, nil
+}
+
+func (f *File) Prune(keep int) (int, error) {
+	if keep <= 0 {
+		return 0, nil
 	}
-	return runs, nil
+	sums, err := f.allSummaries()
+	if err != nil {
+		return 0, err
+	}
+	// Keep the newest `keep` terminal runs; delete older terminal ones.
+	// Non-terminal runs are left untouched and don't count toward the budget.
+	kept := 0
+	var removed int
+	var firstErr error
+	for _, s := range sums { // newest-first
+		if !s.Status.Terminal() {
+			continue
+		}
+		if kept < keep {
+			kept++
+			continue
+		}
+		if err := os.RemoveAll(f.runDir(s.ID)); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
 }
 
 func (f *File) logPath(runID, job string, stepIndex int) string {
@@ -136,7 +249,7 @@ func (f *File) LogWriter(runID, job string, stepIndex int) (io.WriteCloser, erro
 	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 }
 
-func (f *File) ReadLogs(runID, job string, stepIndex int) (io.ReadCloser, error) {
+func (f *File) ReadLogs(runID, job string, stepIndex int, offset int64) (io.ReadCloser, error) {
 	if err := checkRunID(runID); err != nil {
 		return nil, err
 	}
@@ -147,7 +260,52 @@ func (f *File) ReadLogs(runID, job string, stepIndex int) (io.ReadCloser, error)
 		}
 		return nil, err
 	}
+	if offset > 0 {
+		// Seeking past EOF is fine — reads just return EOF.
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
 	return file, nil
+}
+
+func (f *File) ReadLogsTail(runID, job string, stepIndex int, maxBytes int64) (io.ReadCloser, bool, error) {
+	if maxBytes <= 0 {
+		rc, err := f.ReadLogs(runID, job, stepIndex, 0)
+		return rc, false, err
+	}
+	if err := checkRunID(runID); err != nil {
+		return nil, false, err
+	}
+	file, err := os.Open(f.logPath(runID, job, stepIndex))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return io.NopCloser(strings.NewReader("")), false, nil
+		}
+		return nil, false, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, false, err
+	}
+	off, length := int64(0), info.Size()
+	truncated := info.Size() > maxBytes
+	if truncated {
+		off, length = info.Size()-maxBytes, maxBytes
+	}
+	// SectionReader is bound to the window observed at Stat, so a concurrent
+	// append can neither push the read past maxBytes nor turn a whole-file read
+	// into a head-of-a-grown-file read — the tail and truncated flag stay
+	// coherent as of Stat.
+	return readCloser{Reader: io.NewSectionReader(file, off, length), Closer: file}, truncated, nil
+}
+
+// readCloser pairs a bounded Reader with the underlying file's Closer.
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // sanitize maps a job name to a safe filename fragment.

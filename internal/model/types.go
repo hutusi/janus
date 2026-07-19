@@ -134,6 +134,33 @@ type Run struct {
 	WorkspaceDir string    `json:"workspace_dir,omitempty"`
 }
 
+// RunSummary is the compact projection of a Run used for listings: it omits
+// the heavy Jobs slice (commands, steps), so listing/pruning/reconciliation can
+// scan history without holding every full record in memory. Its json tags match
+// Run's, so a run.json partial-unmarshals straight into it.
+type RunSummary struct {
+	ID           string    `json:"id"`
+	WorkflowName string    `json:"workflow_name"`
+	Event        Event     `json:"event"`
+	Status       Status    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	StartedAt    time.Time `json:"started_at,omitzero"`
+	FinishedAt   time.Time `json:"finished_at,omitzero"`
+}
+
+// Summary projects a Run to a RunSummary (used by the in-memory store).
+func (r *Run) Summary() *RunSummary {
+	return &RunSummary{
+		ID:           r.ID,
+		WorkflowName: r.WorkflowName,
+		Event:        r.Event,
+		Status:       r.Status,
+		CreatedAt:    r.CreatedAt,
+		StartedAt:    r.StartedAt,
+		FinishedAt:   r.FinishedAt,
+	}
+}
+
 // JobRun is the runtime state of one job within a run.
 type JobRun struct {
 	Name       string     `json:"name"`

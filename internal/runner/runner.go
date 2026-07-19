@@ -13,10 +13,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hutusi/janus/internal/allowlist"
@@ -31,6 +33,17 @@ import (
 // not permitted by the configured allowlist. Handlers map it to HTTP 403.
 var ErrRepoNotAllowed = errors.New("repository not allowed")
 
+// ErrBusy is returned by Trigger when the bounded admission queue — runs
+// executing plus runs waiting for a slot — is full. Handlers map it to HTTP
+// 503 so callers back off and retry instead of piling up checkouts.
+var ErrBusy = errors.New("runner at capacity")
+
+// ErrStoreUnavailable is returned by Trigger when the store cannot record the
+// run (a full/read-only data dir). Handlers map it to HTTP 503 + Retry-After —
+// like ErrBusy, it is Janus's problem, not the repository's, so the event must
+// be retried rather than acknowledged and dropped.
+var ErrStoreUnavailable = errors.New("store unavailable")
+
 // Runner coordinates checkout → parse → match → execute.
 type Runner struct {
 	store        store.Store
@@ -39,12 +52,20 @@ type Runner struct {
 	pipelinePath string
 	keepWS       bool
 	persistent   bool
+	historyLimit int
 	allow        allowlist.Allowlist
+	logger       *slog.Logger
 
-	ctx    context.Context // root context for run execution; cancelled on Shutdown
+	ctx    context.Context // root context for run execution and checkout; cancelled on Shutdown
 	cancel context.CancelFunc
 	sem    chan struct{}  // caps concurrently executing runs
-	wg     sync.WaitGroup // tracks in-flight runs for graceful shutdown
+	admit  chan struct{}  // caps the whole trigger lifecycle: checkout + parse + pending queue
+	wg     sync.WaitGroup // tracks admitted triggers (checkout onward) for graceful shutdown
+
+	admitMu sync.Mutex // guards closing and serializes admission against Shutdown
+	closing bool       // once set (by Shutdown), no new triggers are admitted
+
+	degraded atomic.Bool // latched on a startup failure (e.g. an unwritable store); surfaced via /healthz
 
 	locksMu sync.Mutex             // guards locks
 	locks   map[string]*sync.Mutex // per-repo workspace locks (persistent strategy)
@@ -57,7 +78,9 @@ type Options struct {
 	KeepWS       bool                // keep workspaces after runs (debugging)
 	Persistent   bool                // one reusable workspace per repo, updated in place (workspace_strategy: persistent)
 	MaxRuns      int                 // max concurrent runs (<=0 means 4)
+	HistoryLimit int                 // max terminal runs to retain (<=0 = unlimited); pruned after each run
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
+	Logger       *slog.Logger        // for background events (prune failures); defaults to slog.Default()
 }
 
 // Result reports the outcome of a trigger. Started is false (with a Reason)
@@ -75,6 +98,10 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 	if maxRuns <= 0 {
 		maxRuns = 4
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Runner{
 		store:        st,
@@ -83,11 +110,41 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		pipelinePath: opts.PipelinePath,
 		keepWS:       opts.KeepWS,
 		persistent:   opts.Persistent,
+		historyLimit: opts.HistoryLimit,
 		allow:        opts.Allowlist,
+		logger:       logger,
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
-		locks:        make(map[string]*sync.Mutex),
+		// maxRuns executing plus a 3×maxRuns pending backlog. Derived rather
+		// than configurable: the point is that a trigger burst cannot start
+		// unbounded git processes or workspaces, not the exact queue depth.
+		admit: make(chan struct{}, 4*maxRuns),
+		locks: make(map[string]*sync.Mutex),
+	}
+}
+
+// Degraded reports whether the daemon is in a known-bad state the operator
+// should act on: the engine abandoned a run's terminal state unpersisted, or a
+// startup step (e.g. reconciling interrupted runs) failed against an
+// unwritable store. The daemon surfaces it via /healthz. A restart clears the
+// startup latch, but if storage is still broken the failing startup step
+// re-latches it, so a restart cannot falsely report healthy.
+func (r *Runner) Degraded() bool { return r.degraded.Load() || r.engine.Degraded() }
+
+// MarkDegraded latches the runner into a degraded state (see Degraded).
+func (r *Runner) MarkDegraded() { r.degraded.Store(true) }
+
+// pruneHistory enforces the retention cap (a no-op when unset), logging but
+// not failing on error — pruning is housekeeping, not part of the run.
+func (r *Runner) pruneHistory() {
+	if r.historyLimit <= 0 {
+		return
+	}
+	if n, err := r.store.Prune(r.historyLimit); err != nil {
+		r.logger.Warn("pruning run history failed", "err", err)
+	} else if n > 0 {
+		r.logger.Info("pruned old runs beyond history_limit", "removed", n, "keep", r.historyLimit)
 	}
 }
 
@@ -128,19 +185,157 @@ func (r *Runner) Sweep() error {
 	return nil
 }
 
-// Shutdown stops accepting new run work and waits up to grace for in-flight
-// runs to finish; if they don't, it cancels them (killing their host
-// processes) and waits for the unwind. Call after the HTTP listener is closed.
+// ReconcileInterrupted marks runs left non-terminal by a previous process —
+// a crash or hard kill — as cancelled, so they stop displaying as running
+// forever and log followers terminate. Anything mid-flight becomes cancelled;
+// work that never started becomes skipped. Call once at startup, before
+// serving (like Sweep); the executing goroutines died with the old process,
+// so nothing will ever advance these records again. Returns how many runs
+// were repaired; per-run store errors skip that run, and the first is
+// returned after the pass completes.
+func (r *Runner) ReconcileInterrupted() (int, error) {
+	// Scan compact summaries (bounded memory), then load only the non-terminal
+	// runs — the few a crash left mid-flight — one full record at a time.
+	summaries, err := r.store.ListRuns(0, 0)
+	if err != nil {
+		return 0, err
+	}
+	var repaired int
+	var firstErr error
+	now := time.Now()
+	for _, s := range summaries {
+		if s.Status.Terminal() {
+			continue
+		}
+		run, err := r.store.GetRun(s.ID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		// The summary is a listing cache and can lag behind run.json (the
+		// source of truth). If the full record is actually terminal, the
+		// summary was stale — do NOT repair (that would overwrite a finished
+		// run); rewrite it to heal the sidecar and move on.
+		if run.Status.Terminal() {
+			_ = r.store.UpdateRun(run)
+			continue
+		}
+		for _, jr := range run.Jobs {
+			for _, sr := range jr.Steps {
+				if !sr.Status.Terminal() {
+					if sr.Status == model.StatusRunning {
+						sr.Status = model.StatusCancelled
+						sr.FinishedAt = now
+					} else {
+						sr.Status = model.StatusSkipped
+					}
+				}
+			}
+			if !jr.Status.Terminal() {
+				if jr.Status == model.StatusRunning {
+					jr.Status = model.StatusCancelled
+					jr.FinishedAt = now
+				} else {
+					jr.Status = model.StatusSkipped
+				}
+			}
+		}
+		run.Status = model.StatusCancelled
+		run.FinishedAt = now
+		if err := r.store.UpdateRun(run); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		repaired++
+	}
+	return repaired, firstErr
+}
+
+// admitOne reserves an admission slot and registers the trigger with the
+// shutdown WaitGroup, atomically with respect to Shutdown. It returns ErrBusy
+// if the runner is closing or the queue is full. The returned release must be
+// called exactly once on every exit path — it frees the slot and the wg count,
+// replacing both `<-r.admit` and `wg.Done()`. Acquiring wg here (not after
+// checkout+parse) means Shutdown waits for in-flight checkouts too, and the
+// admitMu-guarded closing check gives a happens-before with Shutdown so no
+// wg.Add can ever race wg.Wait.
+func (r *Runner) admitOne() (release func(), err error) {
+	r.admitMu.Lock()
+	defer r.admitMu.Unlock()
+	if r.closing {
+		return nil, ErrBusy
+	}
+	select {
+	case r.admit <- struct{}{}:
+	default:
+		return nil, ErrBusy
+	}
+	r.wg.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { <-r.admit; r.wg.Done() }) }, nil
+}
+
+// Shutdown stops accepting new triggers and waits up to grace for admitted
+// work (checkout onward) to finish; if it doesn't, it cancels them (killing
+// their host processes) and waits for the unwind. Call after the HTTP listener
+// is closed.
 func (r *Runner) Shutdown(grace time.Duration) {
+	r.admitMu.Lock()
+	r.closing = true
+	r.admitMu.Unlock()
+
 	done := make(chan struct{})
 	go func() { r.wg.Wait(); close(done) }()
 	select {
 	case <-done:
 		r.cancel()
 	case <-time.After(grace):
-		r.cancel() // grace expired: cancel in-flight runs, then wait for unwind
+		r.cancel() // grace expired: cancel in-flight work, then wait for unwind
 		<-done
 	}
+}
+
+// checkoutTimeout bounds a single checkout so a stalled or malicious git
+// server cannot pin an HTTP handler and an admission slot indefinitely. It is
+// a var (not a const) only so tests can shrink it; 10m clears a large shallow
+// clone with margin.
+var checkoutTimeout = 10 * time.Minute
+
+// Event-field length caps. These values come from the webhook body (up to
+// 5 MiB) or the manual API, and flow into the stored run, the unauthenticated
+// dashboard, and interpolation (${{ branch }}, ${{ ref }}); bound them at the
+// single entry point so none of those can be amplified. Generous — real values
+// are tens of bytes.
+const (
+	maxRepoURLLen      = 2 << 10
+	maxRefLen          = 512
+	maxBranchLen       = 512
+	maxPipelinePathLen = 512
+	maxTitleLen        = 4 << 10 // commit/MR title, display only
+)
+
+// validateEvent rejects over-long event fields before any disk work.
+func validateEvent(ev model.Event) error {
+	for _, f := range []struct {
+		name  string
+		value string
+		max   int
+	}{
+		{"repo_url", ev.RepoURL, maxRepoURLLen},
+		{"ref", ev.Ref, maxRefLen},
+		{"branch", ev.Branch, maxBranchLen},
+		{"pipeline_path", ev.PipelinePath, maxPipelinePathLen},
+		{"title", ev.Title, maxTitleLen},
+	} {
+		if len(f.value) > f.max {
+			return fmt.Errorf("%s is too long: %d bytes (max %d)", f.name, len(f.value), f.max)
+		}
+	}
+	return nil
 }
 
 // Trigger checks out the repo at ev's commit, parses the pipeline (the
@@ -152,15 +347,36 @@ func (r *Runner) Shutdown(grace time.Duration) {
 // ErrRepoNotAllowed (before any disk work); an invalid pipeline path and
 // checkout/parse failures return an error; a non-matching event returns
 // Result{Started: false} with nil error.
+//
+// The checkout runs under a context cancelled by ctx (the request), r.ctx
+// (Shutdown), or a deadline — whichever fires first. Honoring request
+// cancellation matters: if a webhook client times out mid-checkout, cancelling
+// here means no run is started for its retry to duplicate. Execution, by
+// contrast, uses r.ctx so it survives the request returning.
 func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
 	}
-	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
+	if err := validateEvent(ev); err != nil {
+		return Result{}, err
+	}
+	// Bounded admission, before any disk work: everything below — the git
+	// checkout, the parse, the run pending its sem slot — consumes processes
+	// and workspace directories, so it must be capped, not just execution.
+	// admitOne also enrolls in the shutdown WaitGroup, so a checkout still in
+	// flight when Shutdown begins is waited on (and then cancelled via r.ctx).
+	release, err := r.admitOne()
 	if err != nil {
 		return Result{}, err
 	}
+
+	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
+	if err != nil {
+		release()
+		return Result{}, err
+	}
 	if err := os.MkdirAll(r.wsRoot, 0o700); err != nil {
+		release()
 		return Result{}, err
 	}
 
@@ -181,23 +397,45 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !reuse {
 		var err error
 		if wsDir, err = os.MkdirTemp(r.wsRoot, "run-*"); err != nil {
+			release()
 			return Result{}, err
 		}
 	}
 
-	ws, err := workspace.Checkout(ctx, workspace.Options{
+	// Cancel the checkout on request cancellation, Shutdown, or the deadline.
+	// AfterFunc bridges r.ctx so Shutdown still kills an in-flight git process;
+	// the WithTimeout parent is the request ctx so a client disconnect aborts it.
+	cctx, cancel := context.WithTimeout(ctx, checkoutTimeout)
+	stop := context.AfterFunc(r.ctx, cancel)
+	ws, err := workspace.Checkout(cctx, workspace.Options{
 		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref,
 		Keep: r.keepWS || reuse, Reuse: reuse,
 	})
+	stop()
+	cancel()
 	if err != nil {
+		// MkdirTemp created wsDir before Checkout validated the target, so a
+		// validation (or any pre-workspace) failure would otherwise leave an
+		// empty run-* dir behind. A persistent dir self-heals, so never nuke it.
+		if !reuse {
+			_ = os.RemoveAll(wsDir)
+		}
 		unlock()
+		release()
 		return Result{}, fmt.Errorf("checkout: %w", err)
 	}
-	// Every pre-execution exit must release both the workspace and the lock —
-	// a leaked repo lock would silently wedge the repo onto the fallback path.
-	abort := func() { _ = ws.Cleanup(); unlock() }
+	// Pin the run's metadata to the exact commit that will run: verifyHEAD
+	// resolved the full 40-char SHA, so ${{ sha }} / JANUS_SHA are correct even
+	// for an abbreviated or ref-only trigger.
+	if ws.Head != "" {
+		ev.SHA = ws.Head
+	}
+	// Every pre-execution exit must release the workspace, the repo lock, and
+	// the admission slot — a leaked repo lock would silently wedge the repo
+	// onto the fallback path, and a leaked slot would shrink capacity forever.
+	abort := func() { _ = ws.Cleanup(); unlock(); release() }
 
-	data, err := os.ReadFile(filepath.Join(ws.Dir, pipelinePath))
+	data, err := pipeline.ReadFile(filepath.Join(ws.Dir, pipelinePath))
 	if err != nil {
 		abort()
 		return Result{}, fmt.Errorf("read %s: %w", pipelinePath, err)
@@ -215,20 +453,29 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 
 	run := r.engine.NewRun(wf, ev, ws.Dir)
 	if err := r.store.SaveRun(run); err != nil {
+		// The store rejected recording a new run (a full/read-only/permission
+		// problem for the local file store — persistent, not transient), so
+		// the daemon can't do its job: latch degraded for /healthz, and return
+		// a typed error so both handlers answer 503 + Retry-After (the event
+		// must be retried, not acknowledged and dropped) rather than a
+		// misleading 200/400.
+		r.MarkDegraded()
 		abort()
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 
-	r.wg.Add(1)
 	go func() {
-		defer r.wg.Done()
+		defer release()                     // frees the admission slot and the shutdown wg count
 		defer unlock()                      // after cleanup: dir settled before the next run can claim it
 		defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
 		// Wait for a run slot; the run stays Pending until one frees.
 		r.sem <- struct{}{}
 		defer func() { <-r.sem }()
-		// r.ctx is cancelled on Shutdown, so in-flight runs are stopped.
-		r.engine.Execute(r.ctx, run, wf, ws.Dir)
+		// r.ctx is cancelled on Shutdown, so in-flight runs are stopped. A
+		// terminal-persist failure is already logged and latched (Degraded())
+		// by the engine, so the returned error is intentionally discarded here.
+		_ = r.engine.Execute(r.ctx, run, wf, ws.Dir)
+		r.pruneHistory()
 	}()
 
 	return Result{RunID: run.ID, Started: true}, nil

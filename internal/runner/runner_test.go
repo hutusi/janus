@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -182,6 +183,343 @@ func waitGone(t *testing.T, path string, timeout time.Duration) {
 			t.Fatalf("%s still exists after %s", path, timeout)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestReconcileInterrupted(t *testing.T) {
+	st := store.NewMemory()
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	// A run as a crashed daemon would leave it: mid-flight, with a finished
+	// step, a running step, and work that never started.
+	orphan := &model.Run{
+		ID: "orphan", Status: model.StatusRunning, CreatedAt: time.Now(), StartedAt: time.Now(),
+		Jobs: []*model.JobRun{
+			{Name: "build", Status: model.StatusRunning, StartedAt: time.Now(), Steps: []*model.StepRun{
+				{Index: 0, Status: model.StatusSuccess},
+				{Index: 1, Status: model.StatusRunning, StartedAt: time.Now()},
+				{Index: 2, Status: model.StatusPending},
+			}},
+			{Name: "deploy", Status: model.StatusPending, Steps: []*model.StepRun{
+				{Index: 0, Status: model.StatusPending},
+			}},
+		},
+	}
+	done := &model.Run{ID: "done", Status: model.StatusSuccess, CreatedAt: time.Now()}
+	for _, run := range []*model.Run{orphan, done} {
+		if err := st.SaveRun(run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := r.ReconcileInterrupted()
+	if err != nil {
+		t.Fatalf("ReconcileInterrupted: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("repaired = %d, want 1", n)
+	}
+
+	got, err := st.GetRun("orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusCancelled || got.FinishedAt.IsZero() {
+		t.Errorf("run = %s (finished %v), want cancelled with FinishedAt set", got.Status, got.FinishedAt)
+	}
+	build := got.Jobs[0]
+	if build.Status != model.StatusCancelled || build.FinishedAt.IsZero() {
+		t.Errorf("running job = %s, want cancelled with FinishedAt set", build.Status)
+	}
+	if s := build.Steps[0].Status; s != model.StatusSuccess {
+		t.Errorf("finished step = %s, must stay success", s)
+	}
+	if s := build.Steps[1].Status; s != model.StatusCancelled {
+		t.Errorf("running step = %s, want cancelled", s)
+	}
+	if s := build.Steps[2].Status; s != model.StatusSkipped {
+		t.Errorf("pending step = %s, want skipped", s)
+	}
+	if s := got.Jobs[1].Status; s != model.StatusSkipped {
+		t.Errorf("pending job = %s, want skipped", s)
+	}
+
+	if d, _ := st.GetRun("done"); d.Status != model.StatusSuccess {
+		t.Errorf("terminal run = %s, must stay untouched", d.Status)
+	}
+}
+
+func TestReconcileIgnoresStaleSidecar(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	// A finished (terminal) run whose sidecar lagged at "running" — as a crash
+	// between the run.json and summary.json writes would leave it.
+	done := &model.Run{ID: "done", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(done); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := json.Marshal(&model.RunSummary{ID: "done", Status: model.StatusRunning, CreatedAt: done.CreatedAt})
+	if err := os.WriteFile(filepath.Join(dir, "runs", "done", "summary.json"), stale, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.ReconcileInterrupted(); err != nil {
+		t.Fatalf("ReconcileInterrupted: %v", err)
+	}
+	// The finished run must NOT be clobbered to cancelled...
+	got, _ := st.GetRun("done")
+	if got.Status != model.StatusSuccess {
+		t.Errorf("reconcile clobbered a terminal run: status = %s, want success", got.Status)
+	}
+	// ...and its stale sidecar must be healed to the real status.
+	sums, _ := st.ListRuns(0, 0)
+	if len(sums) != 1 || sums[0].Status != model.StatusSuccess {
+		t.Errorf("stale sidecar not healed: %+v", sums)
+	}
+}
+
+func TestTriggerAdmissionBound(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// Fill every admission slot by hand: a further trigger must shed with
+	// ErrBusy before doing any disk work.
+	for i := 0; i < cap(r.admit); i++ {
+		r.admit <- struct{}{}
+	}
+	if _, err := r.Trigger(context.Background(), ev); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Trigger at capacity = %v, want ErrBusy", err)
+	}
+
+	// Free one slot: a trigger that fails before checkout (invalid pipeline
+	// path) must release its slot on the way out, not leak it.
+	<-r.admit
+	bad := ev
+	bad.PipelinePath = "../escape.yml"
+	if _, err := r.Trigger(context.Background(), bad); err == nil || errors.Is(err, ErrBusy) {
+		t.Fatalf("invalid pipeline path should fail with its own error, got %v", err)
+	}
+	if got, want := len(r.admit), cap(r.admit)-1; got != want {
+		t.Fatalf("failed trigger leaked its admission slot: len = %d, want %d", got, want)
+	}
+
+	// The still-free slot admits a real run end-to-end.
+	res, err := r.Trigger(context.Background(), ev)
+	if err != nil || !res.Started {
+		t.Fatalf("Trigger after freeing a slot = %+v, %v", res, err)
+	}
+	if run := waitRun(t, st, res.RunID, 15*time.Second); run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+}
+
+func TestTriggerPrunesHistory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, HistoryLimit: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	first, err := r.Trigger(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("first Trigger: %v", err)
+	}
+	waitRun(t, st, first.RunID, 15*time.Second)
+	second, err := r.Trigger(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	waitRun(t, st, second.RunID, 15*time.Second)
+
+	// With history_limit=1, the first (older terminal) run is pruned once the
+	// second finishes; the newest survives.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runs, err := st.ListRuns(0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(runs) == 1 && runs[0].ID == second.RunID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("history not pruned to the newest run: %+v", runs)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestTriggerInvalidTargetLeavesNoWorkspace(t *testing.T) {
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	// Invalid SHA: workspace.Checkout rejects it before creating a
+	// cleanup-capable Workspace, so the runner must remove the run-* dir it made.
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/some/repo", SHA: "not-hex", Ref: "refs/heads/main"}
+
+	if _, err := r.Trigger(context.Background(), ev); err == nil {
+		t.Fatal("Trigger with an invalid SHA should error")
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "run-*"))
+	if len(matches) != 0 {
+		t.Errorf("invalid target leaked workspace dirs: %v", matches)
+	}
+}
+
+func TestTriggerCheckoutHonorsRequestCancellation(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// An already-cancelled request context must abort the checkout — with the
+	// old r.ctx-only code the request cancellation was ignored and this
+	// checkout would succeed.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.Trigger(ctx, ev); err == nil {
+		t.Fatal("Trigger with a cancelled request ctx should fail the checkout")
+	}
+	if runs, _ := st.ListRuns(0, 0); len(runs) != 0 {
+		t.Errorf("a cancelled checkout must not record a run, got %d", len(runs))
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "run-*"))
+	if len(matches) != 0 {
+		t.Errorf("a cancelled checkout leaked workspace dirs: %v", matches)
+	}
+}
+
+func TestRunnerMarkDegraded(t *testing.T) {
+	st := store.NewMemory()
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+	if r.Degraded() {
+		t.Fatal("a fresh runner should not be degraded")
+	}
+	r.MarkDegraded()
+	if !r.Degraded() {
+		t.Error("MarkDegraded should latch Degraded()")
+	}
+}
+
+// saveFailStore rejects SaveRun, as a full/read-only data dir would.
+type saveFailStore struct {
+	store.Store
+}
+
+func (saveFailStore) SaveRun(*model.Run) error { return errors.New("disk full") }
+
+func TestTriggerSaveFailureDegrades(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(saveFailStore{store.NewMemory()}, engine.New(store.NewMemory()),
+		Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	if _, err := r.Trigger(context.Background(), ev); err == nil {
+		t.Fatal("Trigger should fail when SaveRun fails")
+	}
+	if !r.Degraded() {
+		t.Error("a SaveRun failure should latch the runner degraded")
+	}
+}
+
+func TestTriggerRejectsOversizedEventFields(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	for _, ev := range []model.Event{
+		{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: strings.Repeat("b", maxBranchLen+1)},
+		{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: "main", Title: strings.Repeat("t", maxTitleLen+1)},
+	} {
+		if _, err := r.Trigger(context.Background(), ev); err == nil {
+			t.Fatalf("Trigger with an over-long field should error: %+v", ev)
+		}
+	}
+	if runs, _ := st.ListRuns(0, 0); len(runs) != 0 {
+		t.Errorf("an oversized-field trigger must not record a run, got %d", len(runs))
+	}
+}
+
+func TestShutdownRejectsNewTriggers(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	r.Shutdown(time.Second) // no in-flight work: returns immediately after closing the gate
+
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/anything", SHA: "0123456789abcdef0123456789abcdef01234567", Ref: "refs/heads/main"}
+	if _, err := r.Trigger(context.Background(), ev); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Trigger after Shutdown = %v, want ErrBusy (no disk work)", err)
+	}
+}
+
+func TestShutdownWaitsForAdmittedTrigger(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	// Simulate a trigger that has been admitted and is mid-checkout: it holds
+	// an admission slot and a wg count, but has not spawned its run goroutine.
+	release, err := r.admitOne()
+	if err != nil {
+		t.Fatalf("admitOne: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() { r.Shutdown(30 * time.Second); close(done) }()
+
+	// Shutdown must not complete while the admitted trigger is outstanding,
+	// and the closing gate must become visible to new triggers.
+	deadline := time.Now().Add(5 * time.Second)
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/x", SHA: "0123456789abcdef0123456789abcdef01234567", Ref: "refs/heads/main"}
+	for {
+		if _, err := r.Trigger(context.Background(), ev); errors.Is(err, ErrBusy) {
+			break // closing observed
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closing gate never became visible to Trigger")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("Shutdown returned while an admitted trigger was still outstanding")
+	default:
+	}
+
+	release() // the trigger finishes: Shutdown can now drain
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after the trigger released")
+	}
+	if len(r.admit) != 0 {
+		t.Errorf("admission slot leaked: len = %d, want 0", len(r.admit))
 	}
 }
 

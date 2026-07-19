@@ -50,12 +50,18 @@ are rejected.
 ```
 trigger (webhook / manual / CLI)
   → runner.Trigger:
-      workspace.Checkout  (shallow fetch of the SHA, detached checkout)
+      workspace.Checkout  (shallow fetch of the SHA, detached checkout;
+                           a ref-fallback checkout is verified against the
+                           requested SHA — a moved ref fails the run rather
+                           than silently executing a commit the run's
+                           metadata does not identify)
       read + pipeline.Parse  (pipeline_path from the checkout; a manual
                               trigger's pipeline_path field overrides it)
       match event against on:  (manual always matches)
       engine.NewRun + store.SaveRun  → return run id (202)
-  → async (bounded by --max-parallel-runs):
+  → async (bounded by --max-parallel-runs; the whole trigger — checkout,
+    parse, pending queue — is capped at 4× that, beyond which the API
+    sheds load with 503):
       engine.Execute:
         buildGraph (indegree + dependents, Kahn cycle guard)
         readiness-driven scheduler:
@@ -78,7 +84,9 @@ trigger (webhook / manual / CLI)
   serializes a consistent snapshot. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
 - Workspaces are per-run and removed on completion; a startup **sweep** clears
-  orphans left by a crash. Under `workspace_strategy: persistent`, each repo
+  orphans left by a crash, and runs left `pending`/`running` by a crash are
+  marked `cancelled` at startup (their goroutines died with the old process —
+  nothing would ever finish them). Under `workspace_strategy: persistent`, each repo
   instead gets one reusable `persist-*` directory, updated by fetch +
   hard-reset and serialized by a per-repo **try-lock** — a concurrent trigger
   for the same repo falls back to a fresh per-run dir rather than blocking.

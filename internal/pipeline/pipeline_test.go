@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,81 @@ jobs:
 	}
 	if test := wf.Jobs["test"]; test == nil || len(test.Needs) != 1 || test.Needs[0] != "build" {
 		t.Errorf("test.needs = %+v, want [build]", test)
+	}
+}
+
+func TestParseRejectsOversizedPipelines(t *testing.T) {
+	var manyJobs strings.Builder
+	manyJobs.WriteString("name: ci\non: { push: {} }\njobs:\n")
+	for i := 0; i < maxJobs+1; i++ {
+		fmt.Fprintf(&manyJobs, "  j%d:\n    steps:\n      - run: echo hi\n", i)
+	}
+
+	var manySteps strings.Builder
+	manySteps.WriteString("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n")
+	for i := 0; i < maxStepsPerJob+1; i++ {
+		manySteps.WriteString("      - run: echo hi\n")
+	}
+
+	longName := "name: ci\non: { push: {} }\njobs:\n  " + strings.Repeat("j", maxJobNameLen+1) + ":\n    steps:\n      - run: echo hi\n"
+	longCmd := "name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: " + strings.Repeat("x", maxCommandBytes+1) + "\n"
+
+	cases := map[string]struct{ src, want string }{
+		"too many jobs":  {manyJobs.String(), "too many jobs"},
+		"too many steps": {manySteps.String(), "too many steps"},
+		"long job name":  {longName, "job name too long"},
+		"long command":   {longCmd, "`run` is too long"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.src))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Parse error = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+
+	// A generous-but-in-limits pipeline still parses.
+	var ok strings.Builder
+	ok.WriteString("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n")
+	for i := 0; i < 50; i++ {
+		ok.WriteString("      - run: echo hi\n")
+	}
+	if _, err := Parse([]byte(ok.String())); err != nil {
+		t.Fatalf("a 50-step pipeline should be valid: %v", err)
+	}
+}
+
+func TestReadFileSizeCap(t *testing.T) {
+	dir := t.TempDir()
+	small := filepath.Join(dir, "ok.yml")
+	if err := os.WriteFile(small, []byte("name: ci\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(small); err != nil {
+		t.Errorf("a small file should read: %v", err)
+	}
+
+	big := filepath.Join(dir, "big.yml")
+	if err := os.WriteFile(big, make([]byte, MaxFileBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(big); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Errorf("a >MaxFileBytes file should be rejected, got %v", err)
+	}
+}
+
+func TestParseAcceptsFullJobNameCharset(t *testing.T) {
+	const src = `
+name: ci
+on: { push: {} }
+jobs:
+  build_X-1:
+    steps:
+      - run: echo hi
+`
+	if _, err := Parse([]byte(src)); err != nil {
+		t.Fatalf("letters/digits/'-'/'_' job names should be accepted: %v", err)
 	}
 }
 
@@ -368,6 +444,81 @@ jobs:
 `,
 			wantInErr: "unsupported interpolation",
 		},
+		{
+			name: "interpolation: unterminated placeholder in run",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    steps:
+      - run: echo ${{ branch
+`,
+			wantInErr: "unterminated ${{",
+		},
+		{
+			name: "interpolation: unterminated placeholder in env",
+			src: `
+name: ci
+on: { push: {} }
+env: { REF: "${{ ref" }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "unterminated ${{",
+		},
+		{
+			name: "job name with slash",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a/b:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "letters, digits",
+		},
+		{
+			name: "job name with space",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  "a b":
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "letters, digits",
+		},
+		{
+			name: "job name with dot",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a.b:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "letters, digits",
+		},
+		{
+			name: "multiple YAML documents",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+---
+name: second
+`,
+			wantInErr: "multiple YAML documents",
+		},
 	}
 
 	for _, tc := range tests {
@@ -406,8 +557,30 @@ func TestInterpolate(t *testing.T) {
 		{"${{branch}}-${{short_sha}}", "main-abcdef1"}, // no inner spaces
 	}
 	for _, tc := range tests {
-		if got := ctx.Interpolate(tc.in); got != tc.want {
+		got, err := ctx.Interpolate(tc.in, 1<<20)
+		if err != nil {
+			t.Errorf("Interpolate(%q): unexpected error %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
 			t.Errorf("Interpolate(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestInterpolateBounded(t *testing.T) {
+	ctx := Context{Env: map[string]string{"BIG": strings.Repeat("x", 1000)}}
+	// Many references to a large value expand past the cap → error, not OOM.
+	cmd := strings.Repeat("${{ env.BIG }}", 100) // ~100 KiB expanded
+	if _, err := ctx.Interpolate(cmd, 4096); err == nil {
+		t.Error("interpolation exceeding max should error")
+	}
+	// A literal string longer than max also errors (the tail is counted).
+	if _, err := ctx.Interpolate(strings.Repeat("a", 5000), 4096); err == nil {
+		t.Error("a literal longer than max should error")
+	}
+	// Comfortably under the cap → no error, correct output.
+	if got, err := ctx.Interpolate("hi ${{ env.BIG }}", 1<<20); err != nil || got != "hi "+strings.Repeat("x", 1000) {
+		t.Errorf("under-cap interpolation = %q, %v", got, err)
 	}
 }

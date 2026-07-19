@@ -98,6 +98,7 @@ func runServe(args []string) error {
 	fs.String("pipeline-path", def.PipelinePath, "in-repo path to the pipeline file")
 	fs.Int("max-parallel-jobs", def.MaxParallelJobs, "maximum jobs to run concurrently within a run")
 	fs.Int("max-parallel-runs", def.MaxParallelRuns, "maximum runs to execute concurrently")
+	fs.Int("history-limit", def.HistoryLimit, "maximum terminal runs to retain; oldest (and their logs) are pruned (0 = unlimited)")
 	fs.Duration("step-timeout", time.Duration(def.StepTimeout), "fail any step that runs longer than this (0 = no timeout)")
 	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
 	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run) or "persistent" (one reusable dir per repo)`)
@@ -161,14 +162,30 @@ func runServe(args []string) error {
 		PipelinePath: cfg.PipelinePath,
 		KeepWS:       cfg.KeepWorkspaces,
 		MaxRuns:      cfg.MaxParallelRuns,
+		HistoryLimit: cfg.HistoryLimit,
 		Allowlist:    allow,
 		Persistent:   cfg.WorkspaceStrategy == "persistent",
+		Logger:       logger,
 	})
 	if cfg.WorkspaceStrategy == "persistent" {
 		logger.Info("persistent workspaces enabled; builds reuse per-repo directories (not hermetic)")
 	}
 	if err := rn.Sweep(); err != nil {
 		logger.Warn("workspace sweep failed", "err", err)
+	}
+	if n, err := rn.ReconcileInterrupted(); err != nil {
+		// The store rejected a write at startup (e.g. a full or read-only data
+		// dir), so a run is still stale and the store is unhealthy. Latch
+		// degraded so /healthz reports 503 rather than a false 200 on restart.
+		rn.MarkDegraded()
+		logger.Warn("reconciling interrupted runs failed; marking unhealthy", "err", err)
+	} else if n > 0 {
+		logger.Info("marked runs interrupted by the previous process as cancelled", "count", n)
+	}
+	if n, err := st.Prune(cfg.HistoryLimit); err != nil {
+		logger.Warn("pruning run history failed", "err", err)
+	} else if n > 0 {
+		logger.Info("pruned old runs beyond history_limit at startup", "removed", n, "keep", cfg.HistoryLimit)
 	}
 
 	opts := []server.Option{server.WithLogger(logger)}
@@ -183,9 +200,15 @@ func runServe(args []string) error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           server.New(st, rn, version, opts...).Handler(),
+		Addr:    cfg.Addr,
+		Handler: server.New(st, rn, version, opts...).Handler(),
+		// ReadTimeout bounds reading a request (headers + body), so a
+		// slow-loris POST cannot pin a connection open. WriteTimeout must stay
+		// unset: the ?follow=1 log stream is a deliberately long-lived
+		// response, and a write deadline would sever it mid-run.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -206,12 +229,14 @@ func runServe(args []string) error {
 		logger.Info("shutting down; stopping listener and waiting for in-flight runs")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return err
-		}
+		// The runner must shut down even when HTTP shutdown times out (a
+		// lingering log-follow connection is enough to exceed the deadline) —
+		// returning early here would exit the process with build process
+		// groups still alive.
+		err := srv.Shutdown(shutdownCtx)
 		// Wait up to 30s for in-flight runs; cancel (kill processes) if they overrun.
 		rn.Shutdown(30 * time.Second)
-		return nil
+		return err
 	}
 }
 
@@ -245,7 +270,7 @@ func runValidate(args []string) error {
 		return errors.New("usage: janus validate <file>")
 	}
 	path := fs.Arg(0)
-	data, err := os.ReadFile(path)
+	data, err := pipeline.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -281,7 +306,10 @@ func runRun(args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	// Ctrl-C must drive the engine's cancellation path (process-group kill,
+	// run marked cancelled) rather than just dying with orphaned children.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch}
 
 	var dir string
@@ -306,6 +334,9 @@ func runRun(args []string) error {
 		defer func() { _ = ws.Cleanup() }()
 		dir = ws.Dir
 		ev.RepoURL, ev.SHA, ev.Ref = *repo, *sha, *ref
+		if ws.Head != "" { // the exact commit checked out, not the abbreviation supplied
+			ev.SHA = ws.Head
+		}
 		if ev.Branch == "" {
 			ev.Branch = strings.TrimPrefix(*ref, "refs/heads/")
 		}
@@ -320,7 +351,7 @@ func runRun(args []string) error {
 		dir = abs
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, *file))
+	data, err := pipeline.ReadFile(filepath.Join(dir, *file))
 	if err != nil {
 		return err
 	}
@@ -331,11 +362,16 @@ func runRun(args []string) error {
 
 	st := store.NewMemory()
 	eng := engine.New(st, engine.WithMaxParallelJobs(*maxJobs), engine.WithStepTimeout(*stepTimeout), engine.WithTee(os.Stdout))
-	run, err := eng.Run(ctx, wf, ev, dir)
-	if err != nil {
-		return err
+	run, runErr := eng.Run(ctx, wf, ev, dir)
+	if run == nil {
+		return runErr // SaveRun failed: no run to summarize
 	}
 	printRunSummary(run)
+	if runErr != nil {
+		// The steps ran, but the final state could not be persisted — a
+		// distinct failure from an ordinary failed run.
+		return fmt.Errorf("run %s: steps completed but persisting the final state failed: %w", run.ID, runErr)
+	}
 	if run.Status != model.StatusSuccess {
 		return fmt.Errorf("run %s finished: %s", run.ID, run.Status)
 	}

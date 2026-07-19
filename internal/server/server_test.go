@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +19,7 @@ import (
 	"github.com/hutusi/janus/internal/allowlist"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
+	"github.com/hutusi/janus/internal/pipeline"
 	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
 	"github.com/hutusi/janus/internal/store"
@@ -79,6 +83,29 @@ func newTestServerAllow(t *testing.T, entries ...string) *httptest.Server {
 		t.Fatalf("allowlist.New: %v", err)
 	}
 	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow})
+	srv := New(st, rn, "test",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithProvider(provider.GitLab{}, testGitLabSecret),
+		WithAPIToken(testAPIToken),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// saveFailStore rejects SaveRun, as a full/read-only data dir would.
+type saveFailStore struct {
+	store.Store
+}
+
+func (saveFailStore) SaveRun(*model.Run) error { return errors.New("disk full") }
+
+// newTestServerStore builds an allow-all server over the given store (used to
+// inject failure). Providers + token are wired like newTestServer.
+func newTestServerStore(t *testing.T, st store.Store) *httptest.Server {
+	t.Helper()
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, engine.New(st), runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow})
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithProvider(provider.GitLab{}, testGitLabSecret),
@@ -215,12 +242,259 @@ jobs:
 		t.Errorf("logs = %q, want it to contain the echoed line", logs)
 	}
 
+	// Following a terminal step streams its full output and terminates.
+	followed := getText(t, ts.URL+"/api/runs/"+tr.RunID+"/logs?job=build&step=0&follow=1")
+	if !strings.Contains(followed, "hello from janus on main") {
+		t.Errorf("followed logs = %q, want the full step output", followed)
+	}
+
 	// Dashboard pages render.
 	if body := getText(t, ts.URL+"/"); !strings.Contains(body, tr.RunID[:8]) {
 		t.Errorf("index page does not list the run")
 	}
 	if code := statusOf(t, ts.URL+"/runs/"+tr.RunID); code != http.StatusOK {
 		t.Errorf("run page status = %d, want 200", code)
+	}
+}
+
+// terminalFailStore fails every terminal UpdateRun, so a completed run cannot
+// persist its final state — which degrades the engine.
+type terminalFailStore struct {
+	store.Store
+}
+
+func (terminalFailStore) UpdateRun(run *model.Run) error {
+	if run.Status.Terminal() {
+		return errors.New("disk full")
+	}
+	return nil
+}
+
+func TestRunPageBoundsLogs(t *testing.T) {
+	runPageStepTailBytes = 32
+	t.Cleanup(func() { runPageStepTailBytes = 64 << 10 })
+
+	st := store.NewMemory()
+	eng := engine.New(st)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	run := &model.Run{ID: "big", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := st.LogWriter("big", "build", 0)
+	_, _ = io.WriteString(w, strings.Repeat("A", 100)+"TAILMARK")
+	_ = w.Close()
+
+	body := getText(t, ts.URL+"/runs/big")
+	if !strings.Contains(body, "TAILMARK") {
+		t.Error("run page should show the tail of the log")
+	}
+	if !strings.Contains(body, "earlier output truncated") {
+		t.Error("run page should mark the truncation")
+	}
+	if strings.Contains(body, strings.Repeat("A", 100)) {
+		t.Error("run page should NOT contain the full (head) of an oversized log")
+	}
+
+	// A small log renders whole with no marker.
+	small := &model.Run{ID: "small", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	_ = st.SaveRun(small)
+	w2, _ := st.LogWriter("small", "build", 0)
+	_, _ = io.WriteString(w2, "tiny")
+	_ = w2.Close()
+	body2 := getText(t, ts.URL+"/runs/small")
+	if !strings.Contains(body2, "tiny") || strings.Contains(body2, "truncated") {
+		t.Errorf("small log should render whole with no marker:\n%s", body2)
+	}
+}
+
+func TestRunPageTotalBudget(t *testing.T) {
+	runPageStepTailBytes = 64
+	runPageTotalBytes = 200
+	t.Cleanup(func() { runPageStepTailBytes, runPageTotalBytes = 64<<10, 1<<20 })
+
+	st := store.NewMemory()
+	eng := engine.New(st)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// 20 steps, each with a 64-byte log — far past the 200-byte page budget.
+	steps := make([]*model.StepRun, 20)
+	for i := range steps {
+		steps[i] = &model.StepRun{Index: i, Status: model.StatusSuccess}
+	}
+	run := &model.Run{ID: "many", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: steps}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for i := range steps {
+		w, _ := st.LogWriter("many", "build", i)
+		_, _ = io.WriteString(w, strings.Repeat("x", 64))
+		_ = w.Close()
+	}
+
+	body := getText(t, ts.URL+"/runs/many")
+	// The rendered log content must be bounded near the total budget, not the
+	// full 20×64 = 1280 bytes. Count the log payload ('x') rather than the
+	// whole HTML (which also carries a bounded per-step status table).
+	if xs := strings.Count(body, "x"); int64(xs) > runPageTotalBytes {
+		t.Errorf("log content not bounded by the total budget: %d 'x' bytes rendered", xs)
+	}
+	if !strings.Contains(body, "page size limit reached") {
+		t.Error("run page should note that remaining step logs were omitted")
+	}
+}
+
+// countingStore counts ReadLogsTail calls to prove the renderer stops reading
+// once the page budget is spent.
+type countingStore struct {
+	store.Store
+	tailReads int
+}
+
+func (c *countingStore) ReadLogsTail(runID, job string, step int, maxBytes int64) (io.ReadCloser, bool, error) {
+	c.tailReads++
+	return c.Store.ReadLogsTail(runID, job, step, maxBytes)
+}
+
+func TestWriteRunLogsTailStopsReadingWhenFull(t *testing.T) {
+	cs := &countingStore{Store: store.NewMemory()}
+	srv := New(cs, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+
+	const total, perStep int64 = 100, 100
+	steps := make([]*model.StepRun, 500)
+	for i := range steps {
+		steps[i] = &model.StepRun{Index: i, Status: model.StatusSuccess}
+		w, _ := cs.LogWriter("r", "build", i)
+		_, _ = io.WriteString(w, strings.Repeat("x", 200)) // each step overflows the budget
+		_ = w.Close()
+	}
+	run := &model.Run{ID: "r", Status: model.StatusSuccess,
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: steps}}}
+
+	var buf bytes.Buffer
+	srv.writeRunLogsTail(&buf, run, perStep, total)
+
+	// The budget is spent within the first step or two — the render must not
+	// have read all 500 step logs from the store.
+	if cs.tailReads > 3 {
+		t.Errorf("renderer read %d step logs, want it to stop once the budget was spent", cs.tailReads)
+	}
+}
+
+func TestWriteRunLogsTailBounded(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+
+	// A long job name (would blow a header) plus several oversized step logs —
+	// everything (headers, markers, tails) must stay within the total budget.
+	const total, perStep int64 = 500, 100
+	longName := strings.Repeat("j", 300)
+	steps := make([]*model.StepRun, 10)
+	for i := range steps {
+		steps[i] = &model.StepRun{Index: i, Status: model.StatusSuccess}
+		w, _ := st.LogWriter("r", longName, i)
+		_, _ = io.WriteString(w, strings.Repeat("x", 400))
+		_ = w.Close()
+	}
+	run := &model.Run{ID: "r", Status: model.StatusSuccess,
+		Jobs: []*model.JobRun{{Name: longName, Status: model.StatusSuccess, Steps: steps}}}
+
+	var buf bytes.Buffer
+	srv.writeRunLogsTail(&buf, run, perStep, total)
+
+	const trailerMax = 160 // the fixed "page size limit reached …" trailer
+	if int64(buf.Len()) > total+trailerMax {
+		t.Errorf("rendered logs = %d bytes, want <= %d (budget %d + trailer)", buf.Len(), total+trailerMax, total)
+	}
+	if !strings.Contains(buf.String(), "page size limit reached") {
+		t.Error("a truncated render should end with the page-limit trailer")
+	}
+}
+
+func TestRunPageTruncatesLongCommand(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	longCmd := strings.Repeat("Z", 5000)
+	run := &model.Run{ID: "cmd", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess,
+			Steps: []*model.StepRun{{Index: 0, Command: longCmd, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	body := getText(t, ts.URL+"/runs/cmd")
+	if strings.Contains(body, longCmd) {
+		t.Error("run page should truncate a very long command, not render it whole")
+	}
+	if !strings.Contains(body, "…") {
+		t.Error("truncated command should show an ellipsis")
+	}
+}
+
+func TestDashboardTruncatesLongBranch(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	longBranch := strings.Repeat("B", 5000)
+	run := &model.Run{ID: "br", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		WorkflowName: "ci", Event: model.Event{Kind: model.EventPush, Branch: longBranch},
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess, Steps: []*model.StepRun{{Index: 0, Status: model.StatusSuccess}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/runs/br"} {
+		body := getText(t, ts.URL+path)
+		if strings.Contains(body, longBranch) {
+			t.Errorf("%s renders the full long branch, want it truncated", path)
+		}
+	}
+}
+
+func TestHealthDegraded(t *testing.T) {
+	wf, err := pipeline.Parse([]byte("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: echo hi\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	st := terminalFailStore{store.NewMemory()}
+	eng := engine.New(st, engine.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	// Run a trivial pipeline: its steps succeed but the terminal write fails,
+	// so the engine latches degraded.
+	if _, err := eng.Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir()); err == nil {
+		t.Fatal("expected a terminal-persist error to degrade the engine")
+	}
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("degraded /healthz status = %d, want 503", resp.StatusCode)
+	}
+	var body struct{ Status string }
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Status != "degraded" {
+		t.Errorf("status = %q, want degraded", body.Status)
 	}
 }
 
@@ -289,6 +563,98 @@ func TestTriggerValidation(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for missing repo_url", resp.StatusCode)
+	}
+}
+
+func TestTriggerStoreUnavailableReturns503(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, "name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: echo hi\n")
+	ts := newTestServerStore(t, saveFailStore{store.NewMemory()})
+
+	body, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/heads/main", "branch": "main"})
+	resp := postTrigger(t, ts, string(body))
+	defer func() { _ = resp.Body.Close() }()
+	// A storage failure is Janus's problem: 503 (retriable), not a 400 client error.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (store unavailable)", resp.StatusCode)
+	}
+}
+
+func TestTriggerStrictJSON(t *testing.T) {
+	ts := newTestServer(t)
+	for name, body := range map[string]string{
+		"unknown field":         `{"repo_url": "/tmp/x", "ref": "refs/heads/main", "bogus": 1}`,
+		"trailing object":       `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}{"more": true}`,
+		"trailing close-array":  `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}]`,
+		"trailing close-object": `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}}`,
+		"trailing garbage":      `{"repo_url": "/tmp/x", "ref": "refs/heads/main"}xyz`,
+	} {
+		resp := postTrigger(t, ts, body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, resp.StatusCode)
+		}
+	}
+}
+
+func TestListRunsPagination(t *testing.T) {
+	st := store.NewMemory()
+	base := time.Now()
+	for i := 0; i < 3; i++ { // n0 newest … n2 oldest
+		run := &model.Run{ID: "n" + string(rune('0'+i)), Status: model.StatusSuccess, CreatedAt: base.Add(time.Duration(-i) * time.Minute)}
+		if err := st.SaveRun(run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eng := engine.New(st)
+	allow, _ := allowlist.New([]string{"*"})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	srv := New(st, rn, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))), WithAPIToken(testAPIToken))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp := apiGet(t, ts.URL+"/api/runs?limit=1&offset=1")
+	defer func() { _ = resp.Body.Close() }()
+	var runs []model.RunSummary
+	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != "n1" {
+		t.Fatalf("limit=1&offset=1 = %+v, want the 2nd-newest (n1)", runs)
+	}
+}
+
+func TestListRunsReturnsSummariesNotJobs(t *testing.T) {
+	st := store.NewMemory()
+	// A run with a heavy jobs slice — the list must not carry it.
+	run := &model.Run{ID: "r", WorkflowName: "ci", Status: model.StatusSuccess, CreatedAt: time.Now(),
+		Event: model.Event{Kind: model.EventPush, Branch: "main"},
+		Jobs:  []*model.JobRun{{Name: "build", Steps: []*model.StepRun{{Index: 0, Command: "secret-heavy-command"}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))), WithAPIToken(testAPIToken))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	body := getText(t, ts.URL+"/api/runs")
+	// The summary carries the listing fields but not the jobs/commands.
+	if !strings.Contains(body, `"id":"r"`) || !strings.Contains(body, `"branch":"main"`) {
+		t.Errorf("list should carry summary fields: %s", body)
+	}
+	if strings.Contains(body, "secret-heavy-command") || strings.Contains(body, `"jobs"`) {
+		t.Errorf("list must not carry the heavy jobs slice: %s", body)
+	}
+}
+
+func TestTriggerBodyTooLarge(t *testing.T) {
+	ts := newTestServer(t)
+	resp := postTrigger(t, ts, `{"repo_url": "`+strings.Repeat("a", maxTriggerBody)+`"}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
 	}
 }
 

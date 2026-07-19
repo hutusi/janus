@@ -15,8 +15,8 @@
 
   <main>
     <p class="muted">
-      workflow <strong>{{.Run.WorkflowName}}</strong> ·
-      {{.Run.Event.Kind}} on {{.Run.Event.Branch}} ·
+      workflow <strong>{{trunc 200 .Run.WorkflowName}}</strong> ·
+      {{.Run.Event.Kind}} on {{trunc 200 .Run.Event.Branch}} ·
       created {{reltime .Run.CreatedAt}}
       {{if .Refresh}}· <em>auto-refreshing…</em>{{end}}
     </p>
@@ -24,12 +24,12 @@
     <div class="jobs">
       {{range .Run.Jobs}}
       <div class="job">
-        <span class="status status-{{.Status}}">{{.Status}}</span> <strong>{{.Name}}</strong>
-        {{if .Needs}}<span class="muted">needs {{.Needs}}</span>{{end}}
+        <span class="status status-{{.Status}}">{{.Status}}</span> <strong>{{trunc 200 .Name}}</strong>
+        {{if .Needs}}<span class="muted">needs {{needs .Needs}}</span>{{end}}
         <div class="steps">
           {{range .Steps}}
           <div><span class="status status-{{.Status}}">{{.Status}}</span>
-            <code>{{.Command}}</code> {{if ne .ExitCode 0}}<span class="muted">exit {{.ExitCode}}</span>{{end}}</div>
+            <code>{{trunc 1000 .Command}}</code> {{if ne .ExitCode 0}}<span class="muted">exit {{.ExitCode}}</span>{{end}}</div>
           {{end}}
         </div>
       </div>

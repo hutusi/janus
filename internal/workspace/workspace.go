@@ -9,12 +9,52 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var (
+	// shaRe matches a full or abbreviated hex commit. The 7-char minimum keeps
+	// the fetch/verify from accepting an ambiguously short prefix.
+	shaRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+	// refRe is a conservative subset of git's ref grammar: it must start
+	// alphanumeric (so it can never be read as a `-option`) and use only a
+	// safe alphabet. hasBadRefSeq below rejects the remaining forbidden runs.
+	refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@-]*$`)
+)
+
+// validateTarget rejects SHAs and refs that git could parse as options (e.g.
+// "--upload-pack=/bin/sh") or resolve ambiguously, before any git process
+// runs. These values come from the webhook payload or the manual API, so they
+// are untrusted; validation — not a `--` terminator — is the guarantee, since
+// `git fetch` does not portably honor `--` before a refspec. A validated SHA
+// is hex and a validated ref starts alphanumeric, so neither can be an option,
+// and the checkout/reset target is only ever such a SHA or the literal
+// "FETCH_HEAD".
+func validateTarget(sha, ref string) error {
+	if sha != "" && !shaRe.MatchString(sha) {
+		return fmt.Errorf("workspace: invalid SHA %q (want 7-64 hex characters)", sha)
+	}
+	if ref != "" && (!refRe.MatchString(ref) || hasBadRefSeq(ref)) {
+		return fmt.Errorf("workspace: invalid ref %q", ref)
+	}
+	return nil
+}
+
+// hasBadRefSeq flags the multi-character sequences git check-ref-format
+// forbids that refRe's alphabet alone cannot exclude.
+func hasBadRefSeq(ref string) bool {
+	return strings.Contains(ref, "..") ||
+		strings.Contains(ref, "@{") ||
+		strings.Contains(ref, "//") ||
+		strings.HasSuffix(ref, ".lock") ||
+		strings.HasSuffix(ref, "/")
+}
 
 // Options configures a checkout.
 type Options struct {
@@ -29,12 +69,15 @@ type Options struct {
 // Workspace is a checked-out repository on disk.
 type Workspace struct {
 	Dir  string
+	Head string // full 40-char SHA actually checked out (set after verifyHEAD)
 	keep bool
 }
 
 // Checkout shallow-fetches the requested commit into opt.Dir and checks it out
 // detached. It tries fetch-by-SHA first (some servers disable it) and falls
-// back to fetching opt.Ref. With opt.Reuse, an existing checkout in opt.Dir is
+// back to fetching opt.Ref; either way the checked-out HEAD is then verified
+// against opt.SHA, so a run can never silently execute a different commit than
+// the one it records. With opt.Reuse, an existing checkout in opt.Dir is
 // updated in place instead; if that fails for any reason the directory is
 // rebuilt from scratch. The caller must call Cleanup when finished.
 func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
@@ -43,6 +86,9 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 	}
 	if opt.SHA == "" && opt.Ref == "" {
 		return nil, fmt.Errorf("workspace: a SHA or Ref is required")
+	}
+	if err := validateTarget(opt.SHA, opt.Ref); err != nil {
+		return nil, err
 	}
 	if opt.Reuse {
 		if ws, err := reuseCheckout(ctx, opt); err == nil {
@@ -69,35 +115,59 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 		}
 	}
 
-	// Prefer fetching the exact commit. If the server refuses fetch-by-SHA we
-	// fall back to the ref — but a shallow ref fetch only contains the ref tip,
-	// so we must then check out FETCH_HEAD, not the (possibly-absent) SHA.
-	fetchedSHA := false
-	if opt.SHA != "" {
-		if err := ws.git(ctx, "fetch", "--depth", "1", "origin", opt.SHA); err == nil {
-			fetchedSHA = true
-		}
-	}
-	if !fetchedSHA {
-		if opt.Ref == "" {
-			_ = ws.Cleanup()
-			return nil, fmt.Errorf("workspace: fetch by SHA %q failed and no Ref to fall back to", opt.SHA)
-		}
-		if err := ws.git(ctx, "fetch", "--depth", "1", "origin", opt.Ref); err != nil {
-			_ = ws.Cleanup()
-			return nil, err
-		}
-	}
-
-	target := "FETCH_HEAD"
-	if fetchedSHA {
-		target = opt.SHA
+	target, err := ws.fetchTarget(ctx, opt)
+	if err != nil {
+		_ = ws.Cleanup()
+		return nil, err
 	}
 	if err := ws.git(ctx, "checkout", "-q", "--detach", target); err != nil {
 		_ = ws.Cleanup()
 		return nil, err
 	}
+	if err := ws.verifyHEAD(ctx, opt.SHA); err != nil {
+		_ = ws.Cleanup()
+		return nil, err
+	}
 	return ws, nil
+}
+
+// fetchTarget shallow-fetches the commit to run and returns the rev to
+// materialize: opt.SHA itself when the server allows fetch-by-SHA, otherwise
+// "FETCH_HEAD" after falling back to fetching opt.Ref — a shallow ref fetch
+// only contains the ref tip, so the (possibly-absent) SHA must not be named.
+func (w *Workspace) fetchTarget(ctx context.Context, opt Options) (string, error) {
+	if opt.SHA != "" {
+		if err := w.git(ctx, "fetch", "--depth", "1", "origin", opt.SHA); err == nil {
+			return opt.SHA, nil
+		}
+	}
+	if opt.Ref == "" {
+		return "", fmt.Errorf("workspace: fetch by SHA %q failed and no Ref to fall back to", opt.SHA)
+	}
+	if err := w.git(ctx, "fetch", "--depth", "1", "origin", opt.Ref); err != nil {
+		return "", err
+	}
+	return "FETCH_HEAD", nil
+}
+
+// verifyHEAD resolves the checked-out commit, records it on w.Head, and — when
+// a SHA was requested — fails unless HEAD matches it. After the ref fallback in
+// fetchTarget the materialized commit is whatever the ref points at *now*; if
+// the branch moved (or was rewritten) between the event and the checkout,
+// running it would silently execute code the run's recorded SHA does not
+// identify. Prefix match: events carry the full 40-char SHA, but `janus run
+// --sha` may abbreviate. With an empty SHA (ref-only runs) it only records
+// Head, so callers can pin metadata to the exact commit that ran.
+func (w *Workspace) verifyHEAD(ctx context.Context, sha string) error {
+	head, err := w.gitOut(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if sha != "" && !strings.HasPrefix(head, strings.ToLower(sha)) {
+		return fmt.Errorf("workspace: checked-out commit %s is not the requested SHA %s (the ref moved after the event; re-trigger, or omit the SHA to run the current tip)", head, sha)
+	}
+	w.Head = head
+	return nil
 }
 
 // reuseCheckout updates an existing checkout in place: fetch the commit and
@@ -113,25 +183,14 @@ func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 	if err := ws.git(ctx, "remote", "set-url", "origin", opt.RepoURL); err != nil {
 		return nil, err
 	}
-	fetchedSHA := false
-	if opt.SHA != "" {
-		if err := ws.git(ctx, "fetch", "--depth", "1", "origin", opt.SHA); err == nil {
-			fetchedSHA = true
-		}
-	}
-	if !fetchedSHA {
-		if opt.Ref == "" {
-			return nil, fmt.Errorf("workspace: fetch by SHA %q failed and no Ref to fall back to", opt.SHA)
-		}
-		if err := ws.git(ctx, "fetch", "--depth", "1", "origin", opt.Ref); err != nil {
-			return nil, err
-		}
-	}
-	target := "FETCH_HEAD"
-	if fetchedSHA {
-		target = opt.SHA
+	target, err := ws.fetchTarget(ctx, opt)
+	if err != nil {
+		return nil, err
 	}
 	if err := ws.git(ctx, "reset", "-q", "--hard", target); err != nil {
+		return nil, err
+	}
+	if err := ws.verifyHEAD(ctx, opt.SHA); err != nil {
 		return nil, err
 	}
 	return ws, nil
@@ -152,4 +211,18 @@ func (w *Workspace) git(ctx context.Context, args ...string) error {
 		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// gitOut runs git in the workspace and returns its trimmed stdout.
+func (w *Workspace) gitOut(ctx context.Context, args ...string) (string, error) {
+	full := append([]string{"-C", w.Dir}, args...)
+	out, err := exec.CommandContext(ctx, "git", full...).Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }

@@ -33,9 +33,10 @@ existing file without `--force`); see the
 | `data_dir` | `--data-dir` | _(empty)_ | Directory for persistent run history. **Empty = in-memory** (lost on restart). |
 | `workspace_root` | `--workspace-root` | `$TMPDIR/janus-workspaces` | Where per-run checkouts are created (and swept on startup). |
 | `pipeline_path` | `--pipeline-path` | `.janus/ci.yml` | Path to the pipeline file **inside each triggered repository** — not one server-wide pipeline; different repos naturally run their own committed pipelines. A manual trigger may override it per run via the request's `pipeline_path` field, naming a file **relative to the configured file's directory** (`"release.yml"` → `.janus/release.yml`; subdirectories allowed, escapes rejected) — so only files deliberately placed with the pipelines are runnable, and callers need not know where pipelines live. Webhooks always use the configured path. |
-| `max_parallel_jobs` | `--max-parallel-jobs` | `4` | Max jobs running concurrently **within** one run. |
-| `max_parallel_runs` | `--max-parallel-runs` | `4` | Max runs executing concurrently (excess runs queue as `pending`). |
-| `step_timeout` | `--step-timeout` | `0s` | Fail any step running longer than this (e.g. `"10m"`). `0` disables. |
+| `max_parallel_jobs` | `--max-parallel-jobs` | `4` | Max jobs running concurrently **within** one run. `0` means the default; negatives are a startup error. |
+| `max_parallel_runs` | `--max-parallel-runs` | `4` | Max runs executing concurrently. Excess runs queue as `pending`, bounded at 4× this cap (checkout and parse count too); beyond that, triggers get `503` with `Retry-After`. `0` means the default; negatives are a startup error. |
+| `history_limit` | `--history-limit` | `1000` | Max terminal runs to retain. When exceeded, the oldest terminal runs — and their logs — are deleted after each run finishes and at startup; running/pending runs are never pruned. **The default is nonzero, so the first startup after upgrading prunes terminal runs beyond 1000 (and their logs).** Set `0` for unlimited retention; negatives are a startup error. This bounds the retained **run count** and the flat-file store's per-list scan (which reads every run directory) — it is **not** a disk-usage cap: a single runaway step log can still grow without limit, so bound total disk with OS quotas. |
+| `step_timeout` | `--step-timeout` | `0s` | Fail any step running longer than this (e.g. `"10m"`). `0` disables; negatives are a startup error. |
 | `keep_workspaces` | `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
 | `workspace_strategy` | `--workspace-strategy` | `"fresh"` | `"fresh"`: a new directory per run, removed afterward. `"persistent"`: one reusable directory per repo — see [Persistent workspaces](#persistent-workspaces). Any other value is a startup error. |
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
@@ -45,7 +46,8 @@ existing file without `--force`); see the
 In YAML, `step_timeout` is a string (`"10m"`, `"30s"`); on the flag it is a Go
 duration (`--step-timeout 10m`). `allow_repos` is a YAML list; the
 `--allow-repos` flag is a comma-separated string that **replaces** (not merges
-with) the file list.
+with) the file list. The config file is a single YAML document — a second
+`---` document is an error, not silently ignored.
 
 Notes:
 
@@ -59,7 +61,9 @@ Notes:
 - The HTML dashboard (`/`, `/runs/{id}`) is **not** behind the API token. Put a
   reverse proxy in front if it must be protected.
 - On `SIGINT`/`SIGTERM`, Janus stops accepting requests and waits up to 30s for
-  in-flight runs to finish.
+  in-flight runs to finish; overrunning runs are cancelled (process-group
+  kill) and recorded as `cancelled`. After a crash or hard kill, the next
+  startup marks the orphaned `pending`/`running` runs `cancelled`.
 
 ### Repository allowlist
 
@@ -78,8 +82,15 @@ being used to run an attacker-controlled repo.
   - `https://gitlab.example.com/acme` → any repo under the `acme` group, but
     **not** `…/acmecorp` and **not** the look-alike host
     `https://gitlab.example.com.evil.com/…`.
-  - A trailing `.git` and the default port (`:443`/`:80`/`:22`) are normalized,
-    and scheme + host are matched case-insensitively (paths are case-sensitive).
+  - A trailing `.git` and each scheme's default port (`https` 443, `http` 80,
+    `ssh` 22, `git` 9418) are normalized, and scheme + host are matched
+    case-insensitively (paths are case-sensitive). Userinfo is **significant**:
+    `ssh://git@host/…` and `ssh://root@host/…` are different authorities
+    (git connects as that user) and do not match each other.
+  - URLs whose path contains `.` or `..` segments — literal or percent-encoded
+    (`%2e`, `%2f`, `%25`) — are **always denied**: git or the filesystem could
+    resolve them across the prefix boundary after the match. An allowlist
+    *entry* containing such segments is a **startup error**.
 - **Each scheme/host is explicit.** `http://` does not match an `https://` entry.
   A bare host with no scheme (e.g. `gitlab.example.com`) is a **startup error**.
 - **Scope.** The allowlist gates `POST /api/trigger` and `/webhooks/*` only.

@@ -44,8 +44,11 @@ func shellArgv(stepShell string) []string {
 
 // hostEnvAllow is the curated set of host environment variables passed through
 // to jobs. The Janus daemon's own environment is otherwise NOT inherited, so
-// its configuration/secrets never leak into builds. It lists both unix and
-// Windows names; os.LookupEnv skips those absent on the current host.
+// its configuration/secrets are not handed to builds via the environment.
+// That is the extent of the guarantee: jobs run as the same OS user as the
+// daemon — no isolation — so anything that user can read stays reachable.
+// It lists both unix and Windows names; os.LookupEnv skips those absent on
+// the current host.
 var hostEnvAllow = []string{
 	// unix
 	"PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR",
@@ -218,14 +221,39 @@ func (e *Engine) prepare(rs *runState, job *model.Job, step model.Step) (cmdStr,
 	}
 	sort.Strings(keys)
 	env = make([]string, 0, len(keys))
+	totalEnv := 0
 	for _, k := range keys {
-		env = append(env, k+"="+ictx.Interpolate(merged[k]))
+		v, ierr := ictx.Interpolate(merged[k], maxInterpolatedEnvValue)
+		if ierr != nil {
+			return "", "", nil, fmt.Errorf("env %s: %w", k, ierr)
+		}
+		totalEnv += len(k) + 1 + len(v)
+		if totalEnv > maxInterpolatedTotalEnv {
+			return "", "", nil, fmt.Errorf("interpolated environment exceeds %d bytes", maxInterpolatedTotalEnv)
+		}
+		env = append(env, k+"="+v)
 	}
 
-	cmdStr = ictx.Interpolate(step.Run)
-	dir, err = resolveDir(rs.workDir, ictx.Interpolate(step.WorkingDir))
+	if cmdStr, err = ictx.Interpolate(step.Run, maxInterpolatedCmd); err != nil {
+		return "", "", nil, fmt.Errorf("run: %w", err)
+	}
+	wd, err := ictx.Interpolate(step.WorkingDir, maxInterpolatedDir)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("working-directory: %w", err)
+	}
+	dir, err = resolveDir(rs.workDir, wd)
 	return cmdStr, dir, env, err
 }
+
+// Interpolation-output limits: a small template can expand into an arbitrarily
+// large string, so each materialized value is bounded before it reaches the
+// shell / process environment. Generous — real values are kilobytes.
+const (
+	maxInterpolatedCmd      = 1 << 20
+	maxInterpolatedDir      = 4 << 10
+	maxInterpolatedEnvValue = 64 << 10
+	maxInterpolatedTotalEnv = 1 << 20
+)
 
 // resolveDir joins a step's working-directory onto the workspace root and
 // rejects paths that would escape the workspace.

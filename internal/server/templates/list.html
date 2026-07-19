@@ -24,10 +24,10 @@
         {{range .Runs}}
         <tr>
           <td><a href="/runs/{{.ID}}"><code>{{shortID .ID}}</code></a></td>
-          <td>{{.WorkflowName}}</td>
+          <td>{{trunc 200 .WorkflowName}}</td>
           <td><span class="status status-{{.Status}}">{{.Status}}</span></td>
           <td>{{.Event.Kind}}</td>
-          <td>{{.Event.Branch}}</td>
+          <td>{{trunc 200 .Event.Branch}}</td>
           <td class="muted">{{reltime .CreatedAt}}</td>
         </tr>
         {{end}}

@@ -51,7 +51,7 @@ jobs:                                     # required: at least one job
 | `on.merge_request.branches`| top level        | —        | Run on merge requests targeting these branches. |
 | `on.merge_request.branches-ignore` | top level | —       | Run on merge requests except those **targeting** these branches. Mutually exclusive with `branches`. |
 | `env`                      | top / job / step | —        | Environment variables, merged in that order. |
-| `jobs.<id>`                | top level        | yes      | A job; the map key is the job name. |
+| `jobs.<id>`                | top level        | yes      | A job; the map key is the job name (letters, digits, `-`, `_` only). |
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
 | `jobs.<id>.steps[].run`    | step             | yes      | Command to run on the host via the step shell. |
 | `jobs.<id>.steps[].shell`  | step             | —        | Shell for `run`: `sh`/`bash`/`cmd`/`powershell`/`pwsh`. Default: `/bin/sh` (unix), `cmd` (Windows). |
@@ -97,6 +97,11 @@ Anything else inside `${{ ... }}` — operators, function calls, `secrets.*`,
 `github.*`, `steps.*`, `matrix.*` — is a validation error. There is no
 expression evaluation by design.
 
+Interpolation is size-bounded: a step whose materialized command (>1 MiB),
+working-directory (>4 KiB), any environment value (>64 KiB), or total
+environment (>1 MiB) exceeds the limit **fails** rather than expanding
+without bound — so a large value referenced many times can't exhaust memory.
+
 ## Environment precedence
 
 For each step, variables merge in this order (later wins):
@@ -107,8 +112,10 @@ workflow env  →  job env  →  step env
 
 Janus also injects a curated base for every step (e.g. `CI=true`, `PATH`,
 `HOME`, and `JANUS_*` values for the ref/sha/branch). It does **not** pass the
-Janus daemon's full environment into jobs, so daemon configuration never leaks
-into builds.
+Janus daemon's full environment into jobs, so daemon configuration is not
+handed to builds via the environment. That is the extent of the guarantee:
+jobs run as the same OS user as the daemon (no isolation), so anything that
+user can read remains reachable — see the security model in the README.
 
 ## What is rejected (and why)
 
@@ -122,6 +129,15 @@ These produce a clear validation error rather than running:
 - `runs-on:`, `container:`, `services:` — jobs run as host processes.
 - `secrets:` — use host environment variables.
 - `cache:`, `permissions:`, `concurrency:`, `outputs:`, step `id:`/`name:`.
+- Job names outside `[A-Za-z0-9_-]` — the store derives log-file names from
+  the job name, and a wider charset would let two jobs share one file.
+- Absurd sizes — a pipeline file over 1 MiB (rejected at read, before parsing),
+  more than 256 jobs, more than 256 steps in a job, a job name over 256
+  characters, or a step `run` over 64 KiB. Generous limits that only reject the
+  pathological, so per-run artifacts stay finite.
+- A second YAML document (`---`) in the file — it would be silently ignored,
+  hiding part of the file from validation.
+- An unterminated `${{` — it would reach the shell verbatim.
 - Any other unknown key (caught structurally), and cyclic / unknown `needs`.
 
 ## Execution model (summary)
@@ -130,7 +146,9 @@ These produce a clear validation error rather than running:
   their `needs` allow, and a job's steps run sequentially.
 - A step fails on the first non-zero exit; that fails the job.
 - On the first job failure the run is **fail-fast**: in-flight processes are
-  cancelled and not-yet-started jobs are marked skipped.
+  cancelled and not-yet-started jobs are marked skipped. The run itself is
+  `failed` — the run-level `cancelled` status is reserved for external
+  interruption (daemon shutdown, Ctrl-C on `janus run`).
 
 See [architecture.md](architecture.md) for the full lifecycle. Runnable sample
 pipelines live in [examples/](../examples/).

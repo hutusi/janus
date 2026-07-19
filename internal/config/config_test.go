@@ -25,6 +25,9 @@ func TestLoadEmptyPathReturnsDefaults(t *testing.T) {
 	if cfg.Addr != ":8080" || cfg.PipelinePath != ".janus/ci.yml" || cfg.MaxParallelJobs != 4 {
 		t.Errorf("Load(\"\") did not return defaults: %+v", cfg)
 	}
+	if cfg.HistoryLimit != 1000 {
+		t.Errorf("default history_limit = %d, want 1000", cfg.HistoryLimit)
+	}
 }
 
 func TestLoadOverlaysFileOnDefaults(t *testing.T) {
@@ -62,6 +65,43 @@ func TestLoadRejectsBadDuration(t *testing.T) {
 	path := writeFile(t, "step_timeout: \"banana\"\n")
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for bad duration, got nil")
+	}
+}
+
+func TestLoadRejectsMultipleDocuments(t *testing.T) {
+	path := writeFile(t, "addr: \":9000\"\n---\naddr: \":9001\"\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for a second YAML document, got nil")
+	}
+}
+
+func TestValidateRejectsNonsenseValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(c *Config)
+	}{
+		{"negative max_parallel_runs", func(c *Config) { c.MaxParallelRuns = -1 }},
+		{"negative max_parallel_jobs", func(c *Config) { c.MaxParallelJobs = -2 }},
+		{"negative history_limit", func(c *Config) { c.HistoryLimit = -1 }},
+		{"negative step_timeout", func(c *Config) { c.StepTimeout = Duration(-5 * time.Second) }},
+		{"empty workspace_root", func(c *Config) { c.WorkspaceRoot = "" }},
+		{"empty pipeline_path", func(c *Config) { c.PipelinePath = "  " }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Defaults()
+			tc.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Error("Validate should reject the value, got nil")
+			}
+		})
+	}
+
+	// Zero caps stay allowed: they mean "use the default" downstream.
+	cfg := Defaults()
+	cfg.MaxParallelRuns, cfg.MaxParallelJobs = 0, 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("zero caps should be valid (they mean the default): %v", err)
 	}
 }
 

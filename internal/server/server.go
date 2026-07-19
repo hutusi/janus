@@ -140,5 +140,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	if s.runner != nil && s.runner.Degraded() {
+		// A run's terminal state could not be persisted, so stored history is
+		// stale. Report unhealthy (503) so monitoring notices; a restart clears
+		// the latch.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status":  "degraded",
+			"version": s.version,
+			"reason":  "a run's final state could not be persisted; stored history may be stale (see logs)",
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": s.version})
 }
