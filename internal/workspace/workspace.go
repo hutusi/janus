@@ -208,11 +208,13 @@ func (w *Workspace) Cleanup() error {
 }
 
 // gitEnv returns base (the daemon's environment) hardened so a checkout can
-// never block on an interactive prompt: GIT_TERMINAL_PROMPT=0 disables
+// never block until the checkout deadline: GIT_TERMINAL_PROMPT=0 disables
 // credential prompts, and — unless the operator already chose an SSH transport
-// via GIT_SSH_COMMAND or GIT_SSH — ssh runs with BatchMode=yes so host-key and
-// passphrase prompts fail immediately instead of hanging until the checkout
-// deadline. Host keys are still verified; the operator provisions known_hosts.
+// via GIT_SSH_COMMAND or GIT_SSH — ssh runs with BatchMode=yes (host-key and
+// passphrase prompts fail immediately), a bounded connect (an unreachable
+// advertised host fails in ~10s instead of the ~2min TCP timeout), and
+// keepalive probes that abort a stalled connection in ~60s. Host keys are
+// still verified; the operator provisions known_hosts.
 func gitEnv(base []string) []string {
 	env := append(append([]string{}, base...), "GIT_TERMINAL_PROMPT=0")
 	for _, kv := range base {
@@ -220,7 +222,7 @@ func gitEnv(base []string) []string {
 			return env
 		}
 	}
-	return append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+	return append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4")
 }
 
 // gitCmd builds the git invocation for this workspace with the hardened env.

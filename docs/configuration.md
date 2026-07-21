@@ -132,9 +132,16 @@ trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
 `$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Janus enforces
 this: checkout git runs with `GIT_TERMINAL_PROMPT=0` and, unless the service
 environment already sets `GIT_SSH_COMMAND` or `GIT_SSH`, with
-`GIT_SSH_COMMAND=ssh -o BatchMode=yes` — so an unprovisioned `known_hosts` or a
-key that needs a passphrase fails the checkout in seconds instead of hanging on
-a prompt until the checkout deadline (and past the platform's webhook timeout).
+`GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10
+-o ServerAliveInterval=15 -o ServerAliveCountMax=4` — so an unprovisioned
+`known_hosts` or a key that needs a passphrase fails the checkout in seconds
+instead of hanging on a prompt until the checkout deadline (and past the
+platform's webhook timeout). The connect bound and keepalive probes cover the
+network-shaped hangs too: a `git_ssh_url` advertising a host or port
+unreachable from the Janus server (a Docker-internal hostname is the classic
+case) fails in ~10 s with `Connection timed out`, and a connection that stalls
+mid-transfer is aborted in ~60 s — in every case the delivery gets a named
+error instead of an opaque read-timeout.
 Host keys are deliberately still verified; nothing is auto-accepted. One caveat:
 the batch-mode default takes precedence over a `core.sshCommand` in the service
 user's gitconfig — if you need a custom ssh invocation, set `GIT_SSH_COMMAND` in

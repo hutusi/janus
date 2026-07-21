@@ -122,7 +122,11 @@ See [configuration.md](configuration.md#repository-allowlist) for matching rules
   key and `known_hosts`. A host missing from `known_hosts` or a
   passphrase-protected key fails fast (`Host key verification failed.` /
   `Permission denied`) rather than blocking; an operator-set `GIT_SSH_COMMAND`
-  or `GIT_SSH` is respected verbatim and must itself be non-interactive.
+  or `GIT_SSH` is respected verbatim and must itself be non-interactive. If the
+  platform advertises an SSH URL that is unreachable from the Janus host (a
+  Docker-internal hostname or wrong port in `git_ssh_url`), the delivery fails
+  with `Connection timed out` / `Could not resolve hostname` naming it — fix
+  the platform's external SSH domain/port setting rather than Janus.
 - **Same-repo merge requests:** the fallback ref fetch assumes the MR source
   branch exists in the project. Fork MRs are out of scope for v1.
 - GitHub/Gitea are not implemented — the `provider.Provider` interface is the

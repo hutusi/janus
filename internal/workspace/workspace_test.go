@@ -381,8 +381,8 @@ func TestGitEnv(t *testing.T) {
 	if v, _ := last(env, "GIT_TERMINAL_PROMPT"); v != "GIT_TERMINAL_PROMPT=0" {
 		t.Errorf("default: GIT_TERMINAL_PROMPT entry = %q, want GIT_TERMINAL_PROMPT=0", v)
 	}
-	if v, _ := last(env, "GIT_SSH_COMMAND"); v != "GIT_SSH_COMMAND=ssh -o BatchMode=yes" {
-		t.Errorf("default: GIT_SSH_COMMAND entry = %q, want batch-mode ssh", v)
+	if v, _ := last(env, "GIT_SSH_COMMAND"); v != "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4" {
+		t.Errorf("default: GIT_SSH_COMMAND entry = %q, want batch-mode ssh with bounded connect and keepalive", v)
 	}
 
 	env = gitEnv([]string{"GIT_SSH_COMMAND=ssh -i /custom/key"})
