@@ -84,6 +84,59 @@ func TestGitLabParseMergeRequest(t *testing.T) {
 	}
 }
 
+// TestGitLabCloneURL covers the clone_url selection: whichever URL is chosen
+// becomes Event.RepoURL, the single string the allowlist gates and the
+// workspace clones.
+func TestGitLabCloneURL(t *testing.T) {
+	const (
+		httpURL = "https://gitlab.example.com/acme/app.git"
+		sshURL  = "git@gitlab.example.com:acme/app.git"
+	)
+	tests := []struct {
+		name    string
+		gl      GitLab
+		event   string
+		payload string
+		want    string
+	}{
+		{"push default is http", GitLab{}, "Push Hook", "gitlab_push.json", httpURL},
+		{"push ssh", GitLab{SSH: true}, "Push Hook", "gitlab_push.json", sshURL},
+		{"mr default is http", GitLab{}, "Merge Request Hook", "gitlab_merge_request.json", httpURL},
+		{"mr ssh", GitLab{SSH: true}, "Merge Request Hook", "gitlab_merge_request.json", sshURL},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/webhooks/gitlab", nil)
+			r.Header.Set("X-Gitlab-Event", tc.event)
+			ev, err := tc.gl.Parse(r, payload(t, tc.payload))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if ev.RepoURL != tc.want {
+				t.Errorf("RepoURL = %q, want %q", ev.RepoURL, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitLabCloneURLMissing pins the deliberate refusal to fall back to the
+// other transport: a platform that omits git_ssh_url must produce an error
+// naming the missing field, not a silent HTTPS clone.
+func TestGitLabCloneURLMissing(t *testing.T) {
+	body := `{"ref":"refs/heads/main","after":"da1560886d4f094c3e6c9ef40349f7d38b5d27d7",
+	          "project":{"git_http_url":"https://gitlab.example.com/acme/app.git"}}`
+	r := httptest.NewRequest("POST", "/webhooks/gitlab", nil)
+	r.Header.Set("X-Gitlab-Event", "Push Hook")
+
+	ev, err := GitLab{SSH: true}.Parse(r, []byte(body))
+	if err == nil {
+		t.Fatalf("missing git_ssh_url: got RepoURL %q, want an error", ev.RepoURL)
+	}
+	if errors.Is(err, ErrIgnoredEvent) {
+		t.Errorf("got ErrIgnoredEvent, want a descriptive parse error: %v", err)
+	}
+}
+
 func TestGitLabParseIgnored(t *testing.T) {
 	gl := GitLab{}
 

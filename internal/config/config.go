@@ -56,6 +56,7 @@ type Config struct {
 	StepTimeout       Duration `yaml:"step_timeout"`
 	KeepWorkspaces    bool     `yaml:"keep_workspaces"`
 	WorkspaceStrategy string   `yaml:"workspace_strategy"`
+	CloneURL          string   `yaml:"clone_url"`
 	GitLabSecret      string   `yaml:"gitlab_secret"`
 	APIToken          string   `yaml:"api_token"`
 	AllowRepos        []string `yaml:"allow_repos"`
@@ -74,6 +75,7 @@ func Defaults() Config {
 		StepTimeout:       0,
 		KeepWorkspaces:    false,
 		WorkspaceStrategy: "fresh",
+		CloneURL:          "http",
 	}
 }
 
@@ -87,6 +89,11 @@ func (c Config) Validate() error {
 	case "", "fresh", "persistent": // "" = fresh
 	default:
 		return fmt.Errorf("workspace_strategy: %q is not valid (use \"fresh\" or \"persistent\")", c.WorkspaceStrategy)
+	}
+	switch c.CloneURL {
+	case "", "http", "ssh": // "" = http
+	default:
+		return fmt.Errorf("clone_url: %q is not valid (use \"http\" or \"ssh\")", c.CloneURL)
 	}
 	if c.MaxParallelRuns < 0 {
 		return fmt.Errorf("max_parallel_runs: %d is not valid (must be >= 0; 0 means the default)", c.MaxParallelRuns)
@@ -179,6 +186,8 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.KeepWorkspaces = g.Get().(bool)
 		case "workspace-strategy":
 			c.WorkspaceStrategy = g.Get().(string)
+		case "clone-url":
+			c.CloneURL = g.Get().(string)
 		case "gitlab-secret":
 			c.GitLabSecret = g.Get().(string)
 		case "api-token":
