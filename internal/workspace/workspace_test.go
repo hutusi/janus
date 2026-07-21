@@ -365,6 +365,47 @@ func TestValidateTarget(t *testing.T) {
 	}
 }
 
+func TestGitEnv(t *testing.T) {
+	// last returns the final entry for key; exec.Cmd uses the last duplicate.
+	last := func(env []string, key string) (string, bool) {
+		v, ok := "", false
+		for _, kv := range env {
+			if strings.HasPrefix(kv, key+"=") {
+				v, ok = kv, true
+			}
+		}
+		return v, ok
+	}
+
+	env := gitEnv([]string{"PATH=/usr/bin"})
+	if v, _ := last(env, "GIT_TERMINAL_PROMPT"); v != "GIT_TERMINAL_PROMPT=0" {
+		t.Errorf("default: GIT_TERMINAL_PROMPT entry = %q, want GIT_TERMINAL_PROMPT=0", v)
+	}
+	if v, _ := last(env, "GIT_SSH_COMMAND"); v != "GIT_SSH_COMMAND=ssh -o BatchMode=yes" {
+		t.Errorf("default: GIT_SSH_COMMAND entry = %q, want batch-mode ssh", v)
+	}
+
+	env = gitEnv([]string{"GIT_SSH_COMMAND=ssh -i /custom/key"})
+	if v, _ := last(env, "GIT_SSH_COMMAND"); v != "GIT_SSH_COMMAND=ssh -i /custom/key" {
+		t.Errorf("operator GIT_SSH_COMMAND not preserved: last entry %q", v)
+	}
+
+	env = gitEnv([]string{"GIT_SSH=/usr/local/bin/myssh"})
+	if v, ok := last(env, "GIT_SSH_COMMAND"); ok {
+		t.Errorf("operator GIT_SSH set, but GIT_SSH_COMMAND appended: %q", v)
+	}
+
+	env = gitEnv([]string{"GIT_TERMINAL_PROMPT=1"})
+	if v, _ := last(env, "GIT_TERMINAL_PROMPT"); v != "GIT_TERMINAL_PROMPT=0" {
+		t.Errorf("prompt hardening must win over inherited value: last entry %q", v)
+	}
+
+	env = gitEnv([]string{"GIT_SSHX=1", "GIT_SSH_COMMANDX=1"})
+	if _, ok := last(env, "GIT_SSH_COMMAND"); !ok {
+		t.Error("similarly-prefixed vars must not suppress the batch-mode default")
+	}
+}
+
 func TestCheckoutRejectsOptionInjection(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

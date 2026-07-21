@@ -83,6 +83,11 @@ trigger (webhook / manual / CLI)
   persists under it — so parallel job goroutines never race, and the store always
   serializes a consistent snapshot. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
+- Checkout git subprocesses run non-interactively (`GIT_TERMINAL_PROMPT=0`,
+  ssh `BatchMode=yes` unless the operator sets `GIT_SSH_COMMAND`/`GIT_SSH`) —
+  `workspace.Checkout` runs *synchronously* on the webhook request path, so a
+  credential or host-key prompt would otherwise pin the response until the
+  checkout deadline, long past the platform's webhook timeout.
 - Workspaces are per-run and removed on completion; a startup **sweep** clears
   orphans left by a crash, and runs left `pending`/`running` by a crash are
   marked `cancelled` at startup (their goroutines died with the old process —

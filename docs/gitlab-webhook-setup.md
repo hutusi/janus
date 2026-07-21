@@ -106,12 +106,18 @@ See [configuration.md](configuration.md#repository-allowlist) for matching rules
 
 - **Authentication to clone:** private repos rely on the host's git
   configuration (SSH agent, credential helper, `.netrc`). Janus does not manage
-  credentials.
+  credentials. Checkouts run git non-interactively (`GIT_TERMINAL_PROMPT=0`,
+  ssh in `BatchMode`), so missing credentials fail the delivery in seconds with
+  the git/ssh error in the `200 {"status":"error"}` body — they never hang the
+  webhook response waiting on a prompt.
 - **Cloning over SSH:** Janus checks out the payload's `git_http_url` by
   default. Set [`clone_url: "ssh"`](configuration.md#ssh-clone-urls) to use
   `git_ssh_url` instead — note that `allow_repos` entries must then be written
   in the SSH form the platform sends, and the service user still needs its own
-  key and `known_hosts`.
+  key and `known_hosts`. A host missing from `known_hosts` or a
+  passphrase-protected key fails fast (`Host key verification failed.` /
+  `Permission denied`) rather than blocking; an operator-set `GIT_SSH_COMMAND`
+  or `GIT_SSH` is respected verbatim and must itself be non-interactive.
 - **Same-repo merge requests:** the fallback ref fetch assumes the MR source
   branch exists in the project. Fork MRs are out of scope for v1.
 - GitHub/Gitea are not implemented — the `provider.Provider` interface is the

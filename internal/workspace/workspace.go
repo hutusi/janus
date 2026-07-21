@@ -4,7 +4,10 @@
 // instead updates an existing checkout in place (fetch + hard reset), keeping
 // untracked files such as dependency and build caches. Private-repo
 // authentication is the host git configuration's responsibility (SSH agent,
-// credential helper, .netrc); Janus does not manage credentials in v1.
+// credential helper, .netrc); Janus does not manage credentials in v1. Git runs
+// non-interactively (terminal prompts disabled, ssh in batch mode), so missing
+// credentials or an unprovisioned known_hosts fail the checkout fast instead of
+// blocking on a prompt no one can answer.
 package workspace
 
 import (
@@ -204,9 +207,31 @@ func (w *Workspace) Cleanup() error {
 	return os.RemoveAll(w.Dir)
 }
 
+// gitEnv returns base (the daemon's environment) hardened so a checkout can
+// never block on an interactive prompt: GIT_TERMINAL_PROMPT=0 disables
+// credential prompts, and — unless the operator already chose an SSH transport
+// via GIT_SSH_COMMAND or GIT_SSH — ssh runs with BatchMode=yes so host-key and
+// passphrase prompts fail immediately instead of hanging until the checkout
+// deadline. Host keys are still verified; the operator provisions known_hosts.
+func gitEnv(base []string) []string {
+	env := append(append([]string{}, base...), "GIT_TERMINAL_PROMPT=0")
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") || strings.HasPrefix(kv, "GIT_SSH=") {
+			return env
+		}
+	}
+	return append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+}
+
+// gitCmd builds the git invocation for this workspace with the hardened env.
+func (w *Workspace) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", w.Dir}, args...)...)
+	cmd.Env = gitEnv(os.Environ())
+	return cmd
+}
+
 func (w *Workspace) git(ctx context.Context, args ...string) error {
-	full := append([]string{"-C", w.Dir}, args...)
-	out, err := exec.CommandContext(ctx, "git", full...).CombinedOutput()
+	out, err := w.gitCmd(ctx, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
@@ -215,8 +240,7 @@ func (w *Workspace) git(ctx context.Context, args ...string) error {
 
 // gitOut runs git in the workspace and returns its trimmed stdout.
 func (w *Workspace) gitOut(ctx context.Context, args ...string) (string, error) {
-	full := append([]string{"-C", w.Dir}, args...)
-	out, err := exec.CommandContext(ctx, "git", full...).Output()
+	out, err := w.gitCmd(ctx, args...).Output()
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {

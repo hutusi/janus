@@ -129,8 +129,18 @@ design.
 Janus still manages no credentials. The **service user** needs a passphrase-less
 key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
 trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
-`$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Verify as that
-user, with the SSH URL — that is what Janus will now clone:
+`$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Janus enforces
+this: checkout git runs with `GIT_TERMINAL_PROMPT=0` and, unless the service
+environment already sets `GIT_SSH_COMMAND` or `GIT_SSH`, with
+`GIT_SSH_COMMAND=ssh -o BatchMode=yes` — so an unprovisioned `known_hosts` or a
+key that needs a passphrase fails the checkout in seconds instead of hanging on
+a prompt until the checkout deadline (and past the platform's webhook timeout).
+Host keys are deliberately still verified; nothing is auto-accepted. One caveat:
+the batch-mode default takes precedence over a `core.sshCommand` in the service
+user's gitconfig — if you need a custom ssh invocation, set `GIT_SSH_COMMAND` in
+the service environment (e.g. `janus.env`) and include `-o BatchMode=yes`
+yourself. Verify as that user, with the SSH URL — that is what Janus will now
+clone:
 
 ```sh
 sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git
