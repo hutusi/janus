@@ -179,6 +179,31 @@ func TestValidateWorkspaceStrategy(t *testing.T) {
 	}
 }
 
+func TestValidateCloneURL(t *testing.T) {
+	tests := []struct {
+		value   string
+		wantErr bool
+	}{
+		{"", false}, // = http
+		{"http", false},
+		{"ssh", false},
+		{"SSH", true}, // case-sensitive, like every other enum value
+		{"https", true},
+		{"git", true},
+	}
+	for _, tc := range tests {
+		cfg := Defaults()
+		cfg.CloneURL = tc.value
+		err := cfg.Validate()
+		if tc.wantErr && err == nil {
+			t.Errorf("Validate(%q) = nil, want error", tc.value)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("Validate(%q) = %v, want nil", tc.value, err)
+		}
+	}
+}
+
 func TestOverlayEnv(t *testing.T) {
 	t.Setenv("JANUS_GITLAB_SECRET", "from-env")
 	t.Setenv("JANUS_API_TOKEN", "tok-env")

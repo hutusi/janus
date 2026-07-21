@@ -39,6 +39,7 @@ existing file without `--force`); see the
 | `step_timeout` | `--step-timeout` | `0s` | Fail any step running longer than this (e.g. `"10m"`). `0` disables; negatives are a startup error. |
 | `keep_workspaces` | `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
 | `workspace_strategy` | `--workspace-strategy` | `"fresh"` | `"fresh"`: a new directory per run, removed afterward. `"persistent"`: one reusable directory per repo — see [Persistent workspaces](#persistent-workspaces). Any other value is a startup error. |
+| `clone_url` | `--clone-url` | `"http"` | Which clone URL from the webhook payload to check out: `"http"` (the payload's `git_http_url`) or `"ssh"` (`git_ssh_url`). The chosen URL *is* the run's repo URL — it is what the allowlist gates, what the workspace clones, and what the run record shows — so switching to `"ssh"` means `allow_repos` entries must be written in SSH form too. See [SSH clone URLs](#ssh-clone-urls). Any other value is a startup error. |
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
 | `allow_repos` | `--allow-repos` (comma-separated) | _(empty)_ | Repositories permitted to run. See "Repository allowlist" below. |
@@ -101,6 +102,42 @@ allow_repos:
   - https://gitlab.example.com/acme
   - https://gitlab.example.com/platform
 ```
+
+### SSH clone URLs
+
+By default Janus checks out the payload's `git_http_url`. If the host can only
+clone over SSH — deploy keys, or HTTPS blocked outright — set:
+
+```yaml
+clone_url: "ssh"
+allow_repos:
+  - "git@gitlab.example.com:acme"
+```
+
+**`allow_repos` must move to the SSH form as well**, and in the *exact* form
+your platform emits. The two forms do not cross-match: normalization only
+canonicalizes strings containing `://`, so scp-style `git@host:group/repo` is
+compared opaquely — its host is case-sensitive, and it will never match an
+`ssh://git@host/group/repo` entry. Copy `git_ssh_url` verbatim out of a webhook
+delivery and write your entry in that shape. GitLab sends scp-style on port 22
+and `ssh://…` when the SSH port is non-default.
+
+Leaving `allow_repos` on `https://` while setting `clone_url: "ssh"` yields
+`403 rejected` — the allowlist gates the same string that gets cloned, by
+design.
+
+Janus still manages no credentials. The **service user** needs a passphrase-less
+key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
+trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
+`$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Verify as that
+user, with the SSH URL — that is what Janus will now clone:
+
+```sh
+sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git
+```
+
+If the platform omits `git_ssh_url` from its payload, the delivery fails with
+`400` naming the missing field rather than quietly cloning over HTTPS.
 
 ### Persistent workspaces
 

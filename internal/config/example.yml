@@ -19,6 +19,9 @@ step_timeout: "0s"                  # fail a step that runs longer than this (0 
 keep_workspaces: false              # keep workspaces after runs (debugging)
 workspace_strategy: "fresh"         # "fresh" = new dir per run; "persistent" = one reusable dir per repo
                                     # (fetch + reset in place; caches like node_modules survive — faster, not hermetic)
+clone_url: "http"                   # which clone URL from the webhook payload to check out: "http" or "ssh"
+                                    # ("ssh" needs a key + known_hosts for the service user, and allow_repos
+                                    #  entries written in the SSH form the platform sends)
 
 # Secrets — prefer the JANUS_GITLAB_SECRET / JANUS_API_TOKEN env vars over the file.
 gitlab_secret: ""                   # enables POST /webhooks/gitlab when set

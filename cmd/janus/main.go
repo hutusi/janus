@@ -102,6 +102,7 @@ func runServe(args []string) error {
 	fs.Duration("step-timeout", time.Duration(def.StepTimeout), "fail any step that runs longer than this (0 = no timeout)")
 	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
 	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run) or "persistent" (one reusable dir per repo)`)
+	fs.String("clone-url", def.CloneURL, `which clone URL from the webhook payload to check out: "http" or "ssh"`)
 	fs.String("gitlab-secret", "", "GitLab webhook secret token (overrides config/env; enables /webhooks/gitlab)")
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
 	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
@@ -190,8 +191,9 @@ func runServe(args []string) error {
 
 	opts := []server.Option{server.WithLogger(logger)}
 	if cfg.GitLabSecret != "" {
-		opts = append(opts, server.WithProvider(provider.GitLab{}, cfg.GitLabSecret))
-		logger.Info("gitlab webhook enabled at /webhooks/gitlab")
+		ssh := cfg.CloneURL == "ssh"
+		opts = append(opts, server.WithProvider(provider.GitLab{SSH: ssh}, cfg.GitLabSecret))
+		logger.Info("gitlab webhook enabled at /webhooks/gitlab", "clone_url", cfg.CloneURL)
 	} else {
 		logger.Warn("no gitlab-secret set; /webhooks/gitlab is disabled")
 	}
