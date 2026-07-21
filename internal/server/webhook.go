@@ -56,6 +56,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Logged before Trigger because checkout runs synchronously in it — during
+	// a hang this is the only evidence of what is being cloned.
+	s.logger.Info("webhook trigger accepted", "provider", name, "event", ev.Kind, "repo", ev.RepoURL, "branch", ev.Branch)
 	res, err := s.runner.Trigger(r.Context(), *ev)
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
 		// A rejected repo is a policy decision (or an attack / misconfig) — a

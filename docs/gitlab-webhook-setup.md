@@ -66,6 +66,11 @@ not disable the hook). A started run returns `202` with `{"run_id"}`.
 | 401  | Secret token mismatch. |
 | 404  | `gitlab` provider not configured (no `--gitlab-secret`). |
 
+Every accepted delivery logs `webhook trigger accepted` with the clone URL
+*before* the synchronous checkout starts — if a delivery stalls (the platform
+reports a read timeout), that line in the service journal shows exactly which
+URL Janus was fetching when it hung.
+
 ## Multiple repositories
 
 One Janus server serves any number of projects — there is **no per-repo
