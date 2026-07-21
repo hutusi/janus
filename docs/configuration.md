@@ -130,8 +130,7 @@ Janus still manages no credentials. The **service user** needs a passphrase-less
 key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
 trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
 `$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Verify as that
-user, using the HTTPS URL — the payload's URL is unchanged, only the field Janus
-reads is:
+user, with the SSH URL — that is what Janus will now clone:
 
 ```sh
 sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git
