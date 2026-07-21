@@ -16,10 +16,14 @@ const maxWebhookBody = 5 << 20 // 5 MiB
 
 // handleWebhook verifies, normalizes, and acts on a provider webhook.
 //
-// Status codes: 404 unknown provider, 401 bad signature, 400 unreadable/malformed
-// payload, 200 for ignored or non-matching events, 200 (with an error note,
-// logged) when the repo's pipeline is missing/invalid, and 202 when a run starts.
-// Non-error outcomes stay 2xx so providers don't disable the hook.
+// Status codes: 404 unknown provider, 401 bad signature, 400 unreadable/
+// malformed payload, 200 for ignored event types, and 202 when a run is
+// recorded and accepted. The 202 is written before any git work — checkout,
+// parse, and `on:` matching happen in the background so a provider's short
+// delivery timeout never races the checkout; those outcomes (failed with a
+// reason, skipped for a non-matching event) land on the run record instead of
+// the response. Non-error outcomes stay 2xx so providers don't disable the
+// hook.
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("provider")
 	reg, ok := s.providers[name]
@@ -56,10 +60,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Logged before Trigger because checkout runs synchronously in it — during
-	// a hang this is the only evidence of what is being cloned.
+	// Logged before Trigger so every delivery leaves evidence of what will be
+	// cloned, even if the background checkout later stalls.
 	s.logger.Info("webhook trigger accepted", "provider", name, "event", ev.Kind, "repo", ev.RepoURL, "branch", ev.Branch)
-	res, err := s.runner.Trigger(r.Context(), *ev)
+	res, err := s.runner.Trigger(*ev)
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
 		// A rejected repo is a policy decision (or an attack / misconfig) — a
 		// hard 403, distinct from the 2xx "no pipeline" case below.
@@ -85,16 +89,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		// The push/MR is valid; a missing or invalid .janus/ci.yml (or a
-		// checkout problem) is the repository's concern. Stay 2xx, but log it.
+		// Synchronous validation failed (an over-long event field). The
+		// push/MR itself is the repository's concern — stay 2xx, but log it.
 		s.logger.Warn("webhook trigger did not run", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch, "err", err)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "error", "error": err.Error()})
 		return
 	}
-	if !res.Started {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": res.Reason})
-		return
-	}
-	s.logger.Info("webhook started run", "provider", name, "run_id", res.RunID, "event", ev.Kind, "branch", ev.Branch)
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started", "run_id": res.RunID})
+	s.logger.Info("webhook recorded run", "provider", name, "run_id", res.RunID, "event", ev.Kind, "branch", ev.Branch)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "run_id": res.RunID})
 }

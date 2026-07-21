@@ -257,6 +257,36 @@ jobs:
 	}
 }
 
+func TestTriggerCheckoutFailureIsAsync(t *testing.T) {
+	ts := newTestServer(t)
+
+	// An unclonable repo is still a 202: the manual API records the run and
+	// returns before checkout, and the failure lands on the run record.
+	body, _ := json.Marshal(map[string]string{
+		"repo_url": "/nonexistent/repo", "sha": "0123456789abcdef0123456789abcdef01234567", "ref": "refs/heads/main",
+	})
+	resp := postTrigger(t, ts, string(body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("trigger status = %d, want 202; body=%s", resp.StatusCode, b)
+	}
+	var tr struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&tr)
+	if tr.RunID == "" {
+		t.Fatal("empty run_id")
+	}
+	run := pollRun(t, ts, tr.RunID, 15*time.Second)
+	if run.Status != model.StatusFailed {
+		t.Errorf("run status = %s, want failed", run.Status)
+	}
+	if !strings.Contains(run.Reason, "checkout") {
+		t.Errorf("run reason = %q, want it to name the checkout", run.Reason)
+	}
+}
+
 // terminalFailStore fails every terminal UpdateRun, so a completed run cannot
 // persist its final state — which degrades the engine.
 type terminalFailStore struct {

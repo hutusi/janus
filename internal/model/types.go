@@ -123,10 +123,14 @@ func (s Status) Terminal() bool {
 
 // Run is a single execution of a workflow.
 type Run struct {
-	ID           string    `json:"id"`
-	WorkflowName string    `json:"workflow_name"`
-	Event        Event     `json:"event"`
-	Status       Status    `json:"status"`
+	ID           string `json:"id"`
+	WorkflowName string `json:"workflow_name"`
+	Event        Event  `json:"event"`
+	Status       Status `json:"status"`
+	// Reason records why a run reached a terminal state before executing any
+	// job: a checkout or pipeline-parse failure, or an event that did not match
+	// the workflow's on: filters. Empty for runs that executed.
+	Reason       string    `json:"reason,omitempty"`
 	Jobs         []*JobRun `json:"jobs"`
 	CreatedAt    time.Time `json:"created_at"`
 	StartedAt    time.Time `json:"started_at,omitzero"`

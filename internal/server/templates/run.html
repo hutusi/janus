@@ -20,6 +20,7 @@
       created {{reltime .Run.CreatedAt}}
       {{if .Refresh}}· <em>auto-refreshing…</em>{{end}}
     </p>
+    {{if .Run.Reason}}<p class="muted">reason: {{trunc 1000 .Run.Reason}}</p>{{end}}
 
     <div class="jobs">
       {{range .Run.Jobs}}

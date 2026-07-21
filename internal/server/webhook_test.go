@@ -57,8 +57,8 @@ jobs:
 		RunID  string `json:"run_id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&body)
-	if body.Status != "started" || body.RunID == "" {
-		t.Fatalf("body = %+v, want started with a run_id", body)
+	if body.Status != "accepted" || body.RunID == "" {
+		t.Fatalf("body = %+v, want accepted with a run_id", body)
 	}
 
 	run := pollRun(t, ts, body.RunID, 15*time.Second)
@@ -132,18 +132,28 @@ jobs:
 `)
 	ts := newTestServer(t)
 
-	// Push to a branch the workflow does not listen on: accepted but ignored.
+	// Push to a branch the workflow does not listen on: the delivery is
+	// accepted (matching happens after the background checkout), and the run
+	// is recorded as skipped with the non-match reason.
 	resp := gitlabPush(t, ts, repo, sha, "dev", testGitLabSecret)
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (ignored)", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (accepted)", resp.StatusCode)
 	}
 	var body struct {
 		Status string `json:"status"`
+		RunID  string `json:"run_id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&body)
-	if body.Status != "ignored" {
-		t.Errorf("status = %q, want ignored", body.Status)
+	if body.Status != "accepted" || body.RunID == "" {
+		t.Fatalf("body = %+v, want accepted with a run_id", body)
+	}
+	run := pollRun(t, ts, body.RunID, 15*time.Second)
+	if run.Status != model.StatusSkipped {
+		t.Errorf("run status = %s, want skipped", run.Status)
+	}
+	if run.Reason == "" {
+		t.Error("a skipped run should record why the event did not match")
 	}
 }
 
@@ -172,26 +182,61 @@ jobs:
 		RunID  string `json:"run_id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&started)
-	if started.Status != "started" || started.RunID == "" {
-		t.Fatalf("feature push body = %+v, want started with a run_id", started)
+	if started.Status != "accepted" || started.RunID == "" {
+		t.Fatalf("feature push body = %+v, want accepted with a run_id", started)
 	}
 	run := pollRun(t, ts, started.RunID, 15*time.Second)
 	if run.Status != model.StatusSuccess {
 		t.Errorf("run status = %s, want success", run.Status)
 	}
 
-	// A push to the ignored branch is accepted but starts nothing.
+	// A push to the ignored branch is accepted but executes nothing: the run
+	// is recorded as skipped after the background match.
 	resp2 := gitlabPush(t, ts, repo, sha, "master", testGitLabSecret)
 	defer func() { _ = resp2.Body.Close() }()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("master push status = %d, want 200 (ignored)", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusAccepted {
+		t.Fatalf("master push status = %d, want 202 (accepted)", resp2.StatusCode)
 	}
 	var ignored struct {
 		Status string `json:"status"`
+		RunID  string `json:"run_id"`
 	}
 	_ = json.NewDecoder(resp2.Body).Decode(&ignored)
-	if ignored.Status != "ignored" {
-		t.Errorf("master push status = %q, want ignored", ignored.Status)
+	if ignored.Status != "accepted" || ignored.RunID == "" {
+		t.Fatalf("master push body = %+v, want accepted with a run_id", ignored)
+	}
+	if run := pollRun(t, ts, ignored.RunID, 15*time.Second); run.Status != model.StatusSkipped {
+		t.Errorf("master push run status = %s, want skipped", run.Status)
+	}
+}
+
+func TestWebhookCheckoutFailureRecordsFailedRun(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	ts := newTestServer(t)
+
+	// An unclonable repo is accepted like any delivery — the checkout failure
+	// lands on the run record, not the response (which is long gone by then).
+	resp := gitlabPush(t, ts, "/nonexistent/repo", "0123456789abcdef0123456789abcdef01234567", "main", testGitLabSecret)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (accepted)", resp.StatusCode)
+	}
+	var body struct {
+		Status string `json:"status"`
+		RunID  string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Status != "accepted" || body.RunID == "" {
+		t.Fatalf("body = %+v, want accepted with a run_id", body)
+	}
+	run := pollRun(t, ts, body.RunID, 15*time.Second)
+	if run.Status != model.StatusFailed {
+		t.Errorf("run status = %s, want failed", run.Status)
+	}
+	if !strings.Contains(run.Reason, "checkout") {
+		t.Errorf("run reason = %q, want it to name the checkout", run.Reason)
 	}
 }
 

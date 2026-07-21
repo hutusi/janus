@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -107,7 +106,7 @@ func TestTriggerPersistentUsesRepoDir(t *testing.T) {
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Persistent: true})
 	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
 
-	res, err := r.Trigger(context.Background(), ev)
+	res, err := r.Trigger(ev)
 	if err != nil {
 		t.Fatalf("Trigger: %v", err)
 	}
@@ -127,7 +126,7 @@ func TestTriggerPersistentUsesRepoDir(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res2, err := r.Trigger(context.Background(), ev)
+	res2, err := r.Trigger(ev)
 	if err != nil {
 		t.Fatalf("second Trigger: %v", err)
 	}
@@ -155,7 +154,7 @@ func TestTriggerPersistentContentionFallsBackToFresh(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	res, err := r.Trigger(context.Background(), model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
+	res, err := r.Trigger(model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
 	if err != nil {
 		t.Fatalf("Trigger under contention: %v", err)
 	}
@@ -299,16 +298,16 @@ func TestTriggerAdmissionBound(t *testing.T) {
 	for i := 0; i < cap(r.admit); i++ {
 		r.admit <- struct{}{}
 	}
-	if _, err := r.Trigger(context.Background(), ev); !errors.Is(err, ErrBusy) {
+	if _, err := r.Trigger(ev); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Trigger at capacity = %v, want ErrBusy", err)
 	}
 
-	// Free one slot: a trigger that fails before checkout (invalid pipeline
-	// path) must release its slot on the way out, not leak it.
+	// Free one slot: an invalid pipeline path fails validation before taking
+	// a slot at all, so the freed slot must remain free.
 	<-r.admit
 	bad := ev
 	bad.PipelinePath = "../escape.yml"
-	if _, err := r.Trigger(context.Background(), bad); err == nil || errors.Is(err, ErrBusy) {
+	if _, err := r.Trigger(bad); err == nil || errors.Is(err, ErrBusy) {
 		t.Fatalf("invalid pipeline path should fail with its own error, got %v", err)
 	}
 	if got, want := len(r.admit), cap(r.admit)-1; got != want {
@@ -316,8 +315,8 @@ func TestTriggerAdmissionBound(t *testing.T) {
 	}
 
 	// The still-free slot admits a real run end-to-end.
-	res, err := r.Trigger(context.Background(), ev)
-	if err != nil || !res.Started {
+	res, err := r.Trigger(ev)
+	if err != nil || res.RunID == "" {
 		t.Fatalf("Trigger after freeing a slot = %+v, %v", res, err)
 	}
 	if run := waitRun(t, st, res.RunID, 15*time.Second); run.Status != model.StatusSuccess {
@@ -335,12 +334,12 @@ func TestTriggerPrunesHistory(t *testing.T) {
 	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, HistoryLimit: 1, Allowlist: allow})
 	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
 
-	first, err := r.Trigger(context.Background(), ev)
+	first, err := r.Trigger(ev)
 	if err != nil {
 		t.Fatalf("first Trigger: %v", err)
 	}
 	waitRun(t, st, first.RunID, 15*time.Second)
-	second, err := r.Trigger(context.Background(), ev)
+	second, err := r.Trigger(ev)
 	if err != nil {
 		t.Fatalf("second Trigger: %v", err)
 	}
@@ -373,16 +372,54 @@ func TestTriggerInvalidTargetLeavesNoWorkspace(t *testing.T) {
 	// cleanup-capable Workspace, so the runner must remove the run-* dir it made.
 	ev := model.Event{Kind: model.EventManual, RepoURL: "/some/repo", SHA: "not-hex", Ref: "refs/heads/main"}
 
-	if _, err := r.Trigger(context.Background(), ev); err == nil {
-		t.Fatal("Trigger with an invalid SHA should error")
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
 	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusFailed || !strings.Contains(run.Reason, "checkout") {
+		t.Fatalf("run = %s (%q), want failed with a checkout reason", run.Status, run.Reason)
+	}
+	// The workspace is removed before the run turns terminal, so no polling.
 	matches, _ := filepath.Glob(filepath.Join(root, "run-*"))
 	if len(matches) != 0 {
 		t.Errorf("invalid target leaked workspace dirs: %v", matches)
 	}
 }
 
-func TestTriggerCheckoutHonorsRequestCancellation(t *testing.T) {
+func TestTriggerCheckoutFailureRecordsFailedRun(t *testing.T) {
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/nonexistent/repo", SHA: "0123456789abcdef0123456789abcdef01234567", Ref: "refs/heads/main"}
+
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	// The pending run is recorded synchronously, before Trigger returns — the
+	// caller's 202 always names a fetchable run.
+	if _, err := st.GetRun(res.RunID); err != nil {
+		t.Fatalf("run not fetchable immediately after Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	if !strings.Contains(run.Reason, "checkout") {
+		t.Errorf("run reason = %q, want it to name the checkout", run.Reason)
+	}
+	if len(run.Jobs) != 0 {
+		t.Errorf("a pre-execution failure should have no jobs, got %d", len(run.Jobs))
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "run-*"))
+	if len(matches) != 0 {
+		t.Errorf("a failed checkout leaked workspace dirs: %v", matches)
+	}
+}
+
+func TestTriggerNonMatchingEventRecordsSkippedRun(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -391,22 +428,27 @@ func TestTriggerCheckoutHonorsRequestCancellation(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
-	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+	// echoPipeline runs on push to main only; a push to another branch is
+	// checked out and parsed, then recorded as skipped instead of executed.
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/feature", Branch: "feature"}
 
-	// An already-cancelled request context must abort the checkout — with the
-	// old r.ctx-only code the request cancellation was ignored and this
-	// checkout would succeed.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := r.Trigger(ctx, ev); err == nil {
-		t.Fatal("Trigger with a cancelled request ctx should fail the checkout")
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
 	}
-	if runs, _ := st.ListRuns(0, 0); len(runs) != 0 {
-		t.Errorf("a cancelled checkout must not record a run, got %d", len(runs))
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped", run.Status)
+	}
+	if run.Reason == "" {
+		t.Error("a skipped run should record why it did not match")
+	}
+	if len(run.Jobs) != 0 {
+		t.Errorf("a skipped run should have no jobs, got %d", len(run.Jobs))
 	}
 	matches, _ := filepath.Glob(filepath.Join(root, "run-*"))
 	if len(matches) != 0 {
-		t.Errorf("a cancelled checkout leaked workspace dirs: %v", matches)
+		t.Errorf("a skipped trigger leaked workspace dirs: %v", matches)
 	}
 }
 
@@ -439,7 +481,7 @@ func TestTriggerSaveFailureDegrades(t *testing.T) {
 		Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
 	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
 
-	if _, err := r.Trigger(context.Background(), ev); err == nil {
+	if _, err := r.Trigger(ev); err == nil {
 		t.Fatal("Trigger should fail when SaveRun fails")
 	}
 	if !r.Degraded() {
@@ -456,7 +498,7 @@ func TestTriggerRejectsOversizedEventFields(t *testing.T) {
 		{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: strings.Repeat("b", maxBranchLen+1)},
 		{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: "main", Title: strings.Repeat("t", maxTitleLen+1)},
 	} {
-		if _, err := r.Trigger(context.Background(), ev); err == nil {
+		if _, err := r.Trigger(ev); err == nil {
 			t.Fatalf("Trigger with an over-long field should error: %+v", ev)
 		}
 	}
@@ -473,7 +515,7 @@ func TestShutdownRejectsNewTriggers(t *testing.T) {
 	r.Shutdown(time.Second) // no in-flight work: returns immediately after closing the gate
 
 	ev := model.Event{Kind: model.EventManual, RepoURL: "/anything", SHA: "0123456789abcdef0123456789abcdef01234567", Ref: "refs/heads/main"}
-	if _, err := r.Trigger(context.Background(), ev); !errors.Is(err, ErrBusy) {
+	if _, err := r.Trigger(ev); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Trigger after Shutdown = %v, want ErrBusy (no disk work)", err)
 	}
 }
@@ -498,7 +540,7 @@ func TestShutdownWaitsForAdmittedTrigger(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	ev := model.Event{Kind: model.EventManual, RepoURL: "/x", SHA: "0123456789abcdef0123456789abcdef01234567", Ref: "refs/heads/main"}
 	for {
-		if _, err := r.Trigger(context.Background(), ev); errors.Is(err, ErrBusy) {
+		if _, err := r.Trigger(ev); errors.Is(err, ErrBusy) {
 			break // closing observed
 		}
 		if time.Now().After(deadline) {
@@ -529,7 +571,7 @@ func TestTriggerRejectsDisallowedRepo(t *testing.T) {
 	allow, _ := allowlist.New([]string{"https://allowed.example.com"})
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
 
-	_, err := r.Trigger(context.Background(), model.Event{
+	_, err := r.Trigger(model.Event{
 		Kind:    model.EventManual,
 		RepoURL: "https://evil.example.com/x.git",
 		Ref:     "refs/heads/main",

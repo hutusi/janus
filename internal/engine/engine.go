@@ -152,17 +152,25 @@ type jobResult struct {
 	status model.Status
 }
 
-// NewRun builds a pending run record for wf, with one JobRun per job and one
-// StepRun per step. It does not execute or persist anything; pass it to Execute.
-func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *model.Run {
-	run := &model.Run{
-		ID:           newRunID(),
-		WorkflowName: wf.Name,
-		Event:        ev,
-		Status:       model.StatusPending,
-		CreatedAt:    time.Now(),
-		WorkspaceDir: workDir,
+// NewPendingRun builds a pending "shell" run for ev: a recordable run identity
+// with no workflow name or jobs yet, because the pipeline is only known after
+// the checkout. PopulateRun fills it in once the workflow is parsed; until then
+// the run must eventually reach a terminal state via the caller (the store
+// never prunes non-terminal runs).
+func (e *Engine) NewPendingRun(ev model.Event) *model.Run {
+	return &model.Run{
+		ID:        newRunID(),
+		Event:     ev,
+		Status:    model.StatusPending,
+		CreatedAt: time.Now(),
 	}
+}
+
+// PopulateRun fills a shell run (NewPendingRun) with wf's identity and job
+// tree: one JobRun per job and one StepRun per step, all pending.
+func (e *Engine) PopulateRun(run *model.Run, wf *model.Workflow, workDir string) {
+	run.WorkflowName = wf.Name
+	run.WorkspaceDir = workDir
 	names := make([]string, 0, len(wf.Jobs))
 	for name := range wf.Jobs {
 		names = append(names, name)
@@ -176,6 +184,13 @@ func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *mod
 		}
 		run.Jobs = append(run.Jobs, jr)
 	}
+}
+
+// NewRun builds a pending run record for wf, with one JobRun per job and one
+// StepRun per step. It does not execute or persist anything; pass it to Execute.
+func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *model.Run {
+	run := e.NewPendingRun(ev)
+	e.PopulateRun(run, wf, workDir)
 	return run
 }
 

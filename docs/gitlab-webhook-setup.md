@@ -52,24 +52,28 @@ The event is matched against the workflow's `on:` filters:
   `branches-ignore: [main]` runs for MRs landing anywhere else. For merge
   requests, `${{ branch }}` is the target branch.
 
-A non-matching event returns `200` with `{"status":"ignored"}` (so GitLab does
-not disable the hook). A started run returns `202` with `{"run_id"}`.
+Matching happens *after* the delivery is answered: every accepted event gets a
+`202` with `{"status":"accepted","run_id":...}` immediately, and the checkout,
+parse, and `on:` match run in the background. A non-matching event's run is
+recorded as **skipped** (with the reason on the run); a checkout or pipeline
+error is recorded as **failed**. The delivery response never waits on git, so
+GitLab's ~10-second webhook timeout cannot fail a delivery whose clone is
+merely slow.
 
 ## 4. Response codes
 
 | Code | Meaning |
 |------|---------|
-| 202  | A run was started (`run_id` in the body). |
-| 200  | Event accepted but no run (ignored type, or branch didn't match). |
-| 200  | `{"status":"error"}` — the repo's `.janus/ci.yml` is missing/invalid, or checkout failed (logged server-side). |
+| 202  | Delivery accepted; a run was recorded (`run_id` in the body). Its outcome — success, failed + reason (bad checkout/pipeline), or skipped + reason (branch didn't match) — appears on the run in the dashboard and `GET /api/runs/{id}`. |
+| 200  | Ignored event type (branch deletion, MR merge/close, non-push/MR hooks). |
 | 403  | `{"status":"rejected"}` — the repository is not in the allowlist (see below). |
+| 503  | Janus is at capacity or its store is unavailable (`Retry-After` set) — GitLab retries rather than dropping the event. |
 | 401  | Secret token mismatch. |
 | 404  | `gitlab` provider not configured (no `--gitlab-secret`). |
 
 Every accepted delivery logs `webhook trigger accepted` with the clone URL
-*before* the synchronous checkout starts — if a delivery stalls (the platform
-reports a read timeout), that line in the service journal shows exactly which
-URL Janus was fetching when it hung.
+before any git work — if a run sits pending unusually long, that line in the
+service journal shows exactly which URL its background checkout is fetching.
 
 ## Multiple repositories
 
@@ -112,9 +116,9 @@ See [configuration.md](configuration.md#repository-allowlist) for matching rules
 - **Authentication to clone:** private repos rely on the host's git
   configuration (SSH agent, credential helper, `.netrc`). Janus does not manage
   credentials. Checkouts run git non-interactively (`GIT_TERMINAL_PROMPT=0`,
-  ssh in `BatchMode`), so missing credentials fail the delivery in seconds with
-  the git/ssh error in the `200 {"status":"error"}` body — they never hang the
-  webhook response waiting on a prompt.
+  ssh in `BatchMode`), so missing credentials fail the run in seconds with the
+  git/ssh error recorded as its reason — never hanging on a prompt no daemon
+  can answer.
 - **Cloning over SSH:** Janus checks out the payload's `git_http_url` by
   default. Set [`clone_url: "ssh"`](configuration.md#ssh-clone-urls) to use
   `git_ssh_url` instead — note that `allow_repos` entries must then be written
@@ -124,8 +128,8 @@ See [configuration.md](configuration.md#repository-allowlist) for matching rules
   `Permission denied`) rather than blocking; an operator-set `GIT_SSH_COMMAND`
   or `GIT_SSH` is respected verbatim and must itself be non-interactive. If the
   platform advertises an SSH URL that is unreachable from the Janus host (a
-  Docker-internal hostname or wrong port in `git_ssh_url`), the delivery fails
-  with `Connection timed out` / `Could not resolve hostname` naming it — fix
+  Docker-internal hostname or wrong port in `git_ssh_url`), the run fails with
+  `Connection timed out` / `Could not resolve hostname` as its reason — fix
   the platform's external SSH domain/port setting rather than Janus.
 - **Same-repo merge requests:** the fallback ref fetch assumes the MR source
   branch exists in the project. Fork MRs are out of scope for v1.
