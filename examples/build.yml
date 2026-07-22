@@ -1,13 +1,14 @@
-# Build pipeline — runs on every push to any branch except master.
+# Build pipeline — runs on every push to any branch except master/main.
 #
 # GitLab sends a Push Hook for each pushed branch, so `push` with
 # `branches-ignore` covers every feature branch with no list to maintain.
-# master is excluded because release.yml owns it (build + publish); with this
-# file as the repo's only pipeline, a push to master starts no run at all.
+# master/main are excluded because release.yml owns them (build + publish) —
+# the two files are complementary filters, and a second webhook with
+# `?pipeline_path=release.yml` routes every push through both (see README.md).
 name: build
 on:
   push:
-    branches-ignore: [master]
+    branches-ignore: [master, main]
 env:
   OUT_DIR: out            # build output directory to verify
 jobs:

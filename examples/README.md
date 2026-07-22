@@ -6,18 +6,35 @@ grammar.
 
 | File | What it does |
 |------|--------------|
-| [`build.yml`](build.yml) | On every push to any branch **except** `master`, builds the pushed branch and verifies the `out/` output. |
-| [`release.yml`](release.yml) | On every update to `master`, the same build, then publishes `out/` to a separate "pages" repository. |
+| [`build.yml`](build.yml) | On every push to any branch **except** `master`/`main`, builds the pushed branch and verifies the `out/` output. |
+| [`release.yml`](release.yml) | On every update to `master`/`main`, the same build, then publishes `out/` to a separate "pages" repository. |
 
 ## How Janus uses these
 
-Janus loads **one** pipeline file per repository per trigger — by default
-`.janus/ci.yml` (configurable with `--pipeline-path`). So pick the model that fits:
+Janus loads **one** pipeline file per trigger — by default `.janus/ci.yml`
+(configurable with `--pipeline-path`; a trigger may name another committed file).
+There is deliberately no `if:` or per-job branch condition in the pipeline
+grammar — branch routing is done by *pairing files with complementary `on:`
+filters*, one trigger each. Pick the model that fits:
 
-- **Build every branch on CI, release on demand** — copy `build.yml` to `.janus/ci.yml`
-  so a webhook builds each non-master push. **Pushes to `master` then start no run at
-  all** (the webhook answers `200 {"status":"ignored"}`). Publish explicitly when you
-  want to:
+- **Branch routing: build every branch, release master/main** — the two files
+  are complementary (`branches-ignore: [master, main]` vs
+  `branches: [master, main]`). Commit build.yml's content as `.janus/ci.yml`
+  and release.yml as `.janus/release.yml`, then register **two webhooks** on
+  the project (GitLab allows any number, same URL + secret):
+
+  - `https://janus.example.com/webhooks/gitlab` — runs `.janus/ci.yml`
+  - `https://janus.example.com/webhooks/gitlab?pipeline_path=release.yml` —
+    runs `.janus/release.yml`
+
+  Every push is delivered to both hooks; each file's `on:` filter decides which
+  one executes. A feature push executes the build workflow while the release
+  delivery records a `skipped` run (with the non-match reason on the run); a
+  `master`/`main` push does the reverse. Both deliveries always answer
+  `202 {"status":"accepted"}`.
+
+- **Build every branch on CI, release on demand** — commit only the build
+  pipeline as `.janus/ci.yml` and publish explicitly when you want to:
 
   ```sh
   janus run --file .janus/release.yml .
@@ -26,20 +43,21 @@ Janus loads **one** pipeline file per repository per trigger — by default
   or keep both files in `.janus/` and trigger the release through the API's
   `pipeline_path` override (`{"pipeline_path": "release.yml", ...}`).
 
-- **Build + deploy on every master merge** — use `release.yml` as your `.janus/ci.yml`.
+- **Build + deploy on every master/main merge only** — use `release.yml` as
+  your `.janus/ci.yml`; feature pushes then record `skipped` runs.
 
 ## Triggers: a denylist for CI, `push` for releases
 
-`build.yml` uses `branches-ignore: [master]` — an exact-match **denylist**, so every
-other pushed branch builds with no list to maintain. GitLab sends a Push Hook per
-pushed branch; Janus matches the branch against the filter and builds that branch.
+`build.yml` uses `branches-ignore: [master, main]` — an exact-match **denylist**, so
+every other pushed branch builds with no list to maintain. GitLab sends a Push Hook
+per pushed branch; Janus matches the branch against the filter and builds that branch.
 
-`release.yml` still fires on a **push to `master`**. When a merge request is merged,
-GitLab sends a Push Hook to the target branch — Janus runs on that. Janus deliberately
-*ignores* the MR `merge` action (it only acts on `open`/`reopen`/`update`), so
-`on: merge_request` would **not** fire when an MR lands. Janus can't distinguish a
-merge-commit push from a direct push to `master` — if you want runs only for merged
-MRs, protect `master` so it can't be pushed to directly.
+`release.yml` fires on a **push to `master` or `main`**. When a merge request is
+merged, GitLab sends a Push Hook to the target branch — Janus runs on that. Janus
+deliberately *ignores* the MR `merge` action (it only acts on
+`open`/`reopen`/`update`), so `on: merge_request` would **not** fire when an MR
+lands. Janus can't distinguish a merge-commit push from a direct push — if you want
+runs only for merged MRs, protect the branch so it can't be pushed to directly.
 
 ## "Update the branch to the latest"
 
@@ -52,8 +70,6 @@ clone), so the build step uses:
 git fetch --depth 1 origin "${{ branch }}"
 git reset --hard FETCH_HEAD
 ```
-
-(`release.yml` pins `master` instead of interpolating the branch.)
 
 Each step runs from the workspace root via the step shell — `/bin/sh -c` by default
 on unix (these examples are POSIX; on Windows set `shell: sh`, or write cmd/PowerShell).

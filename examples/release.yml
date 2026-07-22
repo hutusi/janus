@@ -1,12 +1,12 @@
-# Release pipeline — on every update to master (e.g. a merged merge request),
-# build, then publish the output to a separate "pages" repo.
+# Release pipeline — on every update to master/main (e.g. a merged merge
+# request), build, then publish the output to a separate "pages" repo.
 #
 # Janus ignores the GitLab MR "merge" action and fires on the resulting push, so the
 # trigger is `push`, not `merge_request`. Janus can't tell a merge-commit push from a
-# direct push to master — enforce "merged MR only" with branch protection on master.
+# direct push — enforce "merged MR only" with branch protection on master/main.
 #
-# Same build job as build.yml, pinned to master, plus a deploy job. All jobs in a run
-# share one workspace directory, so `deploy` sees the `out/` produced by `build`.
+# Same build job as build.yml, restricted to master/main, plus a deploy job. All jobs
+# in a run share one workspace directory, so `deploy` sees the `out/` from `build`.
 #
 # Auth: Janus forwards only PATH/HOME/LANG/LC_ALL/TZ/TMPDIR to steps (no secrets, no
 # SSH_AUTH_SOCK). Configure a passphraseless SSH deploy key for the Janus host user
@@ -15,7 +15,7 @@
 name: release
 on:
   push:
-    branches: [master]
+    branches: [master, main]
 env:
   OUT_DIR: out
   PAGES_REPO_URL: "git@gitlab.example.com:your-group/your-pages.git"
@@ -25,10 +25,11 @@ env:
 jobs:
   build:
     steps:
-      # Update master to the latest (see build.yml for why fetch+reset, not checkout/pull).
+      # Update the pushed branch (master or main) to the latest (see build.yml
+      # for why fetch+reset, not checkout/pull).
       - run: |
           set -e
-          git fetch --depth 1 origin master
+          git fetch --depth 1 origin "${{ branch }}"
           git reset --hard FETCH_HEAD
       # Install dependencies and build.
       - run: npm install && npm run build
