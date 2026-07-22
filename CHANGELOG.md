@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-22
+
 ### Added
 
 - **Job-level `working-directory`** — a job may declare a default working directory for its steps, layered like `env:` (a step's own `working-directory` overrides it; `.` returns to the workspace root), so a job living in a subdirectory no longer repeats the key on every step. The job value gets the same treatment as the step value: `${{ }}` interpolation with the 4 KiB cap, resolution relative to the workspace, and the workspace-escape guard. Steps remain stateless shells — a `cd` inside one step still never affects the next.
@@ -91,5 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The example config now defaults `data_dir`/`workspace_root` to a cwd-relative `./janus-data` (created on demand, no sudo) instead of `/var/lib/janus`.
 
-[unreleased]: https://github.com/hutusi/janus/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/hutusi/janus/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hutusi/janus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hutusi/janus/releases/tag/v0.1.0
