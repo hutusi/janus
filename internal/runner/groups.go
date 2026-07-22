@@ -18,9 +18,27 @@ import (
 // before the global semaphore, so a queued group member cannot starve
 // unrelated repos. All cancellation goes through the members' per-run cancel
 // funcs, which the waits and the execution already select on.
+//
+// "Newer" means TRIGGER order (the seq assigned synchronously in Trigger),
+// not arrival order at enter: members enter only after their checkout+parse,
+// and checkout durations vary, so an older trigger can reach the registry
+// last. The seen high-water mark refuses such stale arrivals — even when the
+// newer run has already finished and left — so an out-of-order checkout can
+// never make a stale commit supersede or outlive a newer one.
 type groupReg struct {
 	mu     sync.Mutex
 	groups map[string]*groupEntry
+	// seen records the newest member ever admitted per key. It deliberately
+	// never shrinks (precedent: Runner.locks) — a few dozen bytes per distinct
+	// (repo, group) pair is the price of refusing stale arrivals after the
+	// group has emptied.
+	seen map[string]groupNewest
+}
+
+// groupNewest identifies the newest member ever admitted to a group.
+type groupNewest struct {
+	seq   uint64
+	runID string
 }
 
 type groupEntry struct {
@@ -29,23 +47,36 @@ type groupEntry struct {
 }
 
 type groupMember struct {
+	seq    uint64 // trigger order, assigned synchronously in Trigger
 	runID  string
 	cancel context.CancelCauseFunc
 	ready  chan struct{} // closed when the running slot frees up for this member
 }
 
 func newGroupReg() *groupReg {
-	return &groupReg{groups: make(map[string]*groupEntry)}
+	return &groupReg{
+		groups: make(map[string]*groupEntry),
+		seen:   make(map[string]groupNewest),
+	}
 }
 
-// enter registers runID as the group's sole waiting member. Any current waiter
-// is superseded — cancelled with cause "superseded by run <runID>" — and with
+// enter registers runID as the group's sole waiting member. An arrival older
+// (by seq) than the newest ever admitted is stale — its checkout simply
+// finished late — and is cancelled on the spot with cause "superseded by run
+// <newest>", never registered (leave on it no-ops). Past that gate the
+// arrival is strictly the newest, so any current waiter is superseded —
+// cancelled with cause "superseded by run <runID>" — and with
 // cancelInProgress the running member is cancelled the same way. When nothing
 // is running, the returned member's ready channel is already closed.
-func (g *groupReg) enter(key, runID string, cancel context.CancelCauseFunc, cancelInProgress bool) *groupMember {
-	m := &groupMember{runID: runID, cancel: cancel, ready: make(chan struct{})}
+func (g *groupReg) enter(key string, seq uint64, runID string, cancel context.CancelCauseFunc, cancelInProgress bool) *groupMember {
+	m := &groupMember{seq: seq, runID: runID, cancel: cancel, ready: make(chan struct{})}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if newest := g.seen[key]; seq < newest.seq {
+		m.cancel(fmt.Errorf("superseded by run %s", newest.runID))
+		return m
+	}
+	g.seen[key] = groupNewest{seq: seq, runID: runID}
 	e := g.groups[key]
 	if e == nil {
 		e = &groupEntry{}

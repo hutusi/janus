@@ -80,7 +80,8 @@ type Runner struct {
 	cancelsMu sync.Mutex
 	cancels   map[string]context.CancelCauseFunc
 
-	groups *groupReg // concurrency-group membership (workflows with a concurrency: key)
+	groups *groupReg     // concurrency-group membership (workflows with a concurrency: key)
+	seq    atomic.Uint64 // trigger-order counter; stamped synchronously in Trigger so group ordering cannot be skewed by checkout duration
 }
 
 // Options configures a Runner.
@@ -453,6 +454,10 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 	}
 
 	run := r.engine.NewPendingRun(ev)
+	// The trigger-order stamp is taken here, in the synchronous path, so
+	// concurrency-group ordering reflects when triggers arrived — not when
+	// their checkouts happen to finish (see groupReg).
+	seq := r.seq.Add(1)
 	// The per-run context makes every wait and the execution itself
 	// individually cancellable (Cancel, a concurrency-group supersede) while
 	// still inheriting Shutdown's r.ctx. Register before SaveRun so any
@@ -471,7 +476,7 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 
-	go r.runTrigger(runCtx, cancelRun, run, ev, pipelinePath, release)
+	go r.runTrigger(runCtx, cancelRun, seq, run, ev, pipelinePath, release)
 	return Result{RunID: run.ID}, nil
 }
 
@@ -481,7 +486,7 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 // covering in-flight checkouts, and it must leave the run in a terminal state
 // on every path — the store never prunes non-terminal runs, so an unsettled
 // run would leak forever.
-func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCauseFunc, run *model.Run, ev model.Event, pipelinePath string, release func()) {
+func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCauseFunc, seq uint64, run *model.Run, ev model.Event, pipelinePath string, release func()) {
 	defer release()
 	defer cancelRun(nil) // release the context's resources on every path
 	// Deregister only after the terminal state is recorded (defers run LIFO),
@@ -622,7 +627,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// group holds no slot, so a busy group cannot starve unrelated repos.
 	var member *groupMember
 	if groupKey != "" {
-		member = r.groups.enter(groupKey, run.ID, cancelRun, wf.Concurrency.CancelInProgress)
+		member = r.groups.enter(groupKey, seq, run.ID, cancelRun, wf.Concurrency.CancelInProgress)
 		defer r.groups.leave(groupKey, member)
 		select {
 		case <-member.ready:

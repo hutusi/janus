@@ -109,7 +109,10 @@ expression language.
 
 - A newer trigger **supersedes** the waiting run — it finishes `cancelled` with
   the reason `superseded by run <id>` and never executes. Pushing five commits
-  in quick succession runs the first and the last, not all five.
+  in quick succession runs the first and the last, not all five. "Newer" is
+  **trigger order**, even when checkouts finish out of order: an older trigger
+  whose checkout completes late is itself cancelled as superseded rather than
+  displacing (or outliving) a newer run with a stale commit.
 - With `cancel-in-progress: true` the newer trigger also cancels the run
   currently *executing* (its processes are killed); with the default `false`
   the executing run finishes and the newest waiter starts.
