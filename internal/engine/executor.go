@@ -152,6 +152,19 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, job *model.Job, jr *
 	if timedOut {
 		_, _ = fmt.Fprintf(w, "\njanus: step timed out after %s\n", e.stepTimeout)
 	}
+	var ee *exec.ExitError
+	if runErr != nil && !errors.As(runErr, &ee) && ctx.Err() == nil && !timedOut {
+		// The process never ran (missing working directory, absent shell
+		// binary) — without this line the step log would be empty and the
+		// only evidence a bare exit -1. Go blames the shell binary
+		// ("fork/exec /bin/sh: ...") even when the real cause is the working
+		// directory, so name the directory explicitly when it is the problem.
+		if _, serr := os.Stat(dir); serr != nil {
+			_, _ = fmt.Fprintf(w, "janus: working-directory: %v\n", serr)
+		} else {
+			_, _ = fmt.Fprintf(w, "janus: %v\n", runErr)
+		}
+	}
 	code, status := classify(ctx, timedOut, runErr)
 	rs.update(func() {
 		sr.Status = status

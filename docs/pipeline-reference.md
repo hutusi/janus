@@ -75,7 +75,10 @@ next. The working directory is declarative instead: the job's
 `working-directory` is the default for its steps, a step's own value overrides
 it, and both are resolved relative to the workspace at run time (a path
 escaping the workspace fails the step; an absolute path is anchored under the
-workspace, not taken literally).
+workspace, not taken literally). The directory must exist in the checkout — a
+missing one fails the step with the reason written to its log
+(`janus: working-directory: … no such file or directory`); create it in an
+earlier step if the repo doesn't contain it.
 
 ### Job-level branch filters
 

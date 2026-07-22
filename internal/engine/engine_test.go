@@ -287,6 +287,33 @@ jobs:
 	}
 }
 
+func TestRunMissingWorkingDirNamesError(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    working-directory: missing-dir
+    steps:
+      - run: pwd
+`)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if run.Status != model.StatusFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	step := jobRun(run, "build").Steps[0]
+	if step.Status != model.StatusFailed || step.ExitCode != -1 {
+		t.Fatalf("step = %s exit %d, want failed exit -1", step.Status, step.ExitCode)
+	}
+	// The process never started, so the log's only content must be the
+	// janus-written reason — previously it was empty, leaving a bare exit -1.
+	log := readStepLog(t, st, run.ID, "build", 0)
+	if !strings.Contains(log, "janus:") || !strings.Contains(log, "missing-dir") {
+		t.Errorf("step log = %q, want a janus: line naming the missing directory", log)
+	}
+}
+
 func TestResolveDir(t *testing.T) {
 	ws := t.TempDir()
 	if got, err := resolveDir(ws, ""); err != nil || got != ws {
