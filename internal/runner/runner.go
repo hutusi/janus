@@ -79,6 +79,8 @@ type Runner struct {
 	// the concurrency-group supersede path both act through it.
 	cancelsMu sync.Mutex
 	cancels   map[string]context.CancelCauseFunc
+
+	groups *groupReg // concurrency-group membership (workflows with a concurrency: key)
 }
 
 // Options configures a Runner.
@@ -130,7 +132,36 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		admit:   make(chan struct{}, 4*maxRuns),
 		locks:   make(map[string]*sync.Mutex),
 		cancels: make(map[string]context.CancelCauseFunc),
+		groups:  newGroupReg(),
 	}
+}
+
+// maxGroupExpanded bounds the expanded concurrency-group string — it becomes
+// a registry key held for the run's lifetime and is stored on the run record.
+const maxGroupExpanded = 1 << 10
+
+// expandGroup materializes wf's concurrency group for ev: the group template
+// interpolated with the event and the workflow-level env (resolved verbatim in
+// a single pass — job/step env does not exist yet, and the group must be
+// deterministic at admission time), or the implicit "<name>-<branch|ref>"
+// group when the template is empty. sha/short_sha never appear: validation
+// rejects them in group templates.
+func expandGroup(wf *model.Workflow, ev model.Event) (string, error) {
+	tpl := strings.TrimSpace(wf.Concurrency.Group)
+	if tpl == "" {
+		target := ev.Branch
+		if target == "" {
+			target = ev.Ref
+		}
+		return wf.Name + "-" + target, nil
+	}
+	ictx := pipeline.Context{
+		Env:    wf.Env,
+		Ref:    ev.Ref,
+		Branch: ev.Branch,
+		Event:  string(ev.Kind),
+	}
+	return ictx.Interpolate(tpl, maxGroupExpanded)
 }
 
 // Cancel requests cancellation of a non-terminal run, recording reason as its
@@ -559,6 +590,25 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		return
 	}
 
+	// The concurrency group is expanded before the populated-run update so a
+	// queued run already displays it. The group is only knowable here — the
+	// pipeline lives in the checkout — so admission (ErrBusy/503) behavior is
+	// unchanged, and a superseded run has still consumed an admission slot for
+	// its lifetime.
+	var groupKey string
+	if wf.Concurrency != nil {
+		group, err := expandGroup(wf, ev)
+		if err != nil {
+			abort()
+			finish(model.StatusFailed, fmt.Sprintf("concurrency.group: %v", err))
+			return
+		}
+		run.ConcurrencyGroup = group
+		// NUL joins the repo scope to the group: it cannot appear in either
+		// part, so distinct (repo, group) pairs never collide.
+		groupKey = ev.RepoURL + "\x00" + group
+	}
+
 	r.engine.PopulateRun(run, wf, ws.Dir)
 	if err := r.store.UpdateRun(run); err != nil {
 		// Not fatal: the run executes anyway, and the engine persists on every
@@ -567,6 +617,21 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	}
 	defer unlock()                      // after cleanup: dir settled before the next run can claim it
 	defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
+
+	// Group gate, ordered before the global run slot: a member waiting for its
+	// group holds no slot, so a busy group cannot starve unrelated repos.
+	var member *groupMember
+	if groupKey != "" {
+		member = r.groups.enter(groupKey, run.ID, cancelRun, wf.Concurrency.CancelInProgress)
+		defer r.groups.leave(groupKey, member)
+		select {
+		case <-member.ready:
+		case <-runCtx.Done():
+			finish(model.StatusCancelled, cancelReason(runCtx, "cancelled while queued for its concurrency group"))
+			return
+		}
+	}
+
 	// Wait for a run slot; the run stays Pending until one frees, and a cancel
 	// (Cancel, group supersede, Shutdown) releases it from the queue.
 	select {
@@ -576,6 +641,12 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		return
 	}
 	defer func() { <-r.sem }()
+	// Re-check the group under its lock: a supersede can land between the run
+	// slot acquire and here.
+	if member != nil && !r.groups.claim(groupKey, member, runCtx) {
+		finish(model.StatusCancelled, cancelReason(runCtx, "cancelled while queued for its concurrency group"))
+		return
+	}
 	// From here Execute owns the run's terminal state (and reconciliation
 	// covers a crash), so the terminal-state net must stand down.
 	settled = true

@@ -818,3 +818,208 @@ func TestCancelUnknownRun(t *testing.T) {
 		t.Fatal("Cancel of an unknown run should return false")
 	}
 }
+
+// --- Concurrency groups -------------------------------------------------------
+
+const groupSleepPipeline = `name: ci
+on: { push: { branches: [main] } }
+concurrency:
+  group: g-${{ branch }}
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`
+
+// waitGroupWaiter polls until runID is the registered waiter of the group, so
+// a later trigger deterministically supersedes it (enter order, not trigger
+// order, decides who supersedes whom).
+func waitGroupWaiter(t *testing.T, r *Runner, key, runID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		r.groups.mu.Lock()
+		e := r.groups.groups[key]
+		ok := e != nil && e.pending != nil && e.pending.runID == runID
+		r.groups.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s never became the waiter of group %q", runID, key)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestGroupSupersedesQueuedRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, groupSleepPipeline)
+	r, st := newCancelTestRunner(t, 4)
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+	groupKey := repo + "\x00" + "g-main"
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	runA := waitStatus(t, st, resA.RunID, model.StatusRunning, 15*time.Second)
+	if runA.ConcurrencyGroup != "g-main" {
+		t.Fatalf("run A concurrency group = %q, want g-main", runA.ConcurrencyGroup)
+	}
+
+	// B queues behind A in the group (holding no run slot: MaxRuns is 4).
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	waitGroupWaiter(t, r, groupKey, resB.RunID, 15*time.Second)
+
+	// C supersedes B: only the newest waiter survives.
+	resC, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger C: %v", err)
+	}
+	runB := waitRun(t, st, resB.RunID, 15*time.Second)
+	if runB.Status != model.StatusCancelled {
+		t.Fatalf("run B status = %s, want cancelled", runB.Status)
+	}
+	if want := "superseded by run " + resC.RunID; runB.Reason != want {
+		t.Errorf("run B reason = %q, want %q", runB.Reason, want)
+	}
+
+	// Without cancel-in-progress A kept running; once it stops, C executes.
+	if got, _ := st.GetRun(resA.RunID); got.Status != model.StatusRunning {
+		t.Fatalf("run A status = %s, want still running", got.Status)
+	}
+	if !r.Cancel(resA.RunID, "cancelled via API") {
+		t.Fatal("Cancel A")
+	}
+	waitRun(t, st, resA.RunID, 15*time.Second)
+	waitStatus(t, st, resC.RunID, model.StatusRunning, 15*time.Second)
+	if !r.Cancel(resC.RunID, "cancelled via API") {
+		t.Fatal("Cancel C")
+	}
+	waitRun(t, st, resC.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+}
+
+func TestGroupCancelInProgressCancelsRunningRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// No group: key — exercises the implicit <name>-<branch> group too.
+	repo, sha := initGitRepo(t, `name: ci
+on: { push: { branches: [main] } }
+concurrency:
+  cancel-in-progress: true
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`)
+	r, st := newCancelTestRunner(t, 4)
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	runA := waitStatus(t, st, resA.RunID, model.StatusRunning, 15*time.Second)
+	if runA.ConcurrencyGroup != "ci-main" {
+		t.Fatalf("run A concurrency group = %q, want the implicit ci-main", runA.ConcurrencyGroup)
+	}
+
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	runA = waitRun(t, st, resA.RunID, 15*time.Second)
+	if runA.Status != model.StatusCancelled {
+		t.Fatalf("run A status = %s, want cancelled", runA.Status)
+	}
+	if want := "superseded by run " + resB.RunID; runA.Reason != want {
+		t.Errorf("run A reason = %q, want %q", runA.Reason, want)
+	}
+
+	waitStatus(t, st, resB.RunID, model.StatusRunning, 15*time.Second)
+	if !r.Cancel(resB.RunID, "cancelled via API") {
+		t.Fatal("Cancel B")
+	}
+	waitRun(t, st, resB.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+}
+
+func TestGroupsAreRepoScoped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Identical literal group in two different repos: both run concurrently.
+	pipeline := `name: ci
+on: { push: { branches: [main] } }
+concurrency:
+  group: shared
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`
+	repo1, sha1 := initGitRepo(t, pipeline)
+	repo2, sha2 := initGitRepo(t, pipeline)
+	r, st := newCancelTestRunner(t, 2)
+
+	res1, err := r.Trigger(model.Event{Kind: model.EventPush, RepoURL: repo1, SHA: sha1, Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger repo1: %v", err)
+	}
+	res2, err := r.Trigger(model.Event{Kind: model.EventPush, RepoURL: repo2, SHA: sha2, Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger repo2: %v", err)
+	}
+	waitStatus(t, st, res1.RunID, model.StatusRunning, 15*time.Second)
+	waitStatus(t, st, res2.RunID, model.StatusRunning, 15*time.Second)
+
+	r.Cancel(res1.RunID, "cancelled via API")
+	r.Cancel(res2.RunID, "cancelled via API")
+	waitRun(t, st, res1.RunID, 15*time.Second)
+	waitRun(t, st, res2.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+}
+
+func TestUngroupedRunsExecuteIndependently(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	r, st := newCancelTestRunner(t, 4)
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	for _, id := range []string{resA.RunID, resB.RunID} {
+		run := waitRun(t, st, id, 15*time.Second)
+		if run.Status != model.StatusSuccess {
+			t.Fatalf("run %s status = %s, want success (no concurrency key)", id, run.Status)
+		}
+		if run.ConcurrencyGroup != "" {
+			t.Errorf("run %s concurrency group = %q, want empty", id, run.ConcurrencyGroup)
+		}
+	}
+}

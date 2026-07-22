@@ -109,6 +109,22 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   writing it mid-flight would race `runState`), and cancellation is
   best-effort: a run whose last process exits before the cancel is observed
   still finishes on its own terms.
+- **Concurrency groups** (a workflow's `concurrency:` key) are enforced by a
+  runner-side registry keyed by `(repo URL, expanded group)`: per group **at
+  most one run executes and at most one waits** — a newer arrival supersedes
+  the waiter (cancelled via its per-run context, reason
+  `superseded by run <id>`), and with `cancel-in-progress` it cancels the
+  executing member too. The group gate is ordered *before* the global run
+  semaphore, so a run waiting for its group holds no run slot and cannot
+  starve other repos; after acquiring a slot the member re-checks its
+  membership under the registry lock (a supersede can land in between). The
+  newcomer's turn begins only when the previous member has fully unwound
+  (processes killed), so "one running" holds even mid-handover. Empty group
+  entries are deleted; the registry is in-memory only (startup reconciliation
+  already settles orphans). The group is only knowable *after* checkout+parse
+  — the pipeline lives in the repo — so admission (`ErrBusy`/503) is
+  unaffected and a superseded run still consumed an admission slot for its
+  lifetime.
 - Checkout git subprocesses run non-interactively (`GIT_TERMINAL_PROMPT=0`,
   ssh `BatchMode=yes` + bounded connect + keepalive unless the operator sets
   `GIT_SSH_COMMAND`/`GIT_SSH`) — a credential or host-key prompt, an
