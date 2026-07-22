@@ -152,3 +152,17 @@ func TestMemoryReadLogsOffset(t *testing.T) {
 		t.Errorf("offset past end = %q, want empty", got)
 	}
 }
+
+func TestMemoryCountRuns(t *testing.T) {
+	st := NewMemory()
+	if n, err := st.CountRuns(); err != nil || n != 0 {
+		t.Fatalf("empty CountRuns = %d, %v; want 0, nil", n, err)
+	}
+	base := time.Now()
+	for i := 0; i < 3; i++ {
+		_ = st.SaveRun(sampleRun("c"+string(rune('0'+i)), base.Add(time.Duration(-i)*time.Minute)))
+	}
+	if n, err := st.CountRuns(); err != nil || n != 3 {
+		t.Fatalf("CountRuns = %d, %v; want 3, nil", n, err)
+	}
+}

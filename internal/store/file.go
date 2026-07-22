@@ -148,6 +148,16 @@ func (f *File) ListRuns(limit, offset int) ([]*model.RunSummary, error) {
 	return page(sums, limit, offset), nil
 }
 
+// CountRuns counts via allSummaries so the total always matches what ListRuns
+// actually lists (unreadable run dirs are excluded from both).
+func (f *File) CountRuns() (int, error) {
+	sums, err := f.allSummaries()
+	if err != nil {
+		return 0, err
+	}
+	return len(sums), nil
+}
+
 // maxSummaryFileBytes bounds a summary.json read. A summary is a handful of
 // capped fields, so this is small; it only guards against a corrupt sidecar.
 const maxSummaryFileBytes = 64 << 10

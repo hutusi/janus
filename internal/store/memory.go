@@ -92,6 +92,12 @@ func (m *Memory) ListRuns(limit, offset int) ([]*model.RunSummary, error) {
 	return sums, nil
 }
 
+func (m *Memory) CountRuns() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.runs), nil
+}
+
 // sortedLocked returns all runs newest-first. Caller holds m.mu.
 func (m *Memory) sortedLocked() []*model.Run {
 	runs := make([]*model.Run, 0, len(m.order))

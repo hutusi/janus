@@ -37,6 +37,12 @@
       </tbody>
     </table>
     {{end}}
+    {{if .Pages}}
+    <nav class="pager muted">
+      {{range .Pages}}{{if eq . $.Page}}<strong>{{.}}</strong>{{else if eq . 1}}<a href="/">1</a>{{else}}<a href="/?page={{.}}">{{.}}</a>{{end}}
+      {{end}}
+    </nav>
+    {{end}}
   </main>
   {{template "elapsedscript"}}
 </body>
@@ -95,6 +101,9 @@
   .status-cancelled { background: #ef6c0033; color: #ef6c00; }
   .status-skipped   { background: #61616133; color: #757575; }
   .status-pending   { background: #61616133; color: #757575; }
+  .pager { margin-top: 1rem; }
+  .pager a, .pager strong { padding: .1rem .45rem; }
+  .pager strong { background: #8882; border-radius: 3px; }
   .jobs { margin: 1rem 0; }
   .job { margin: .4rem 0; }
   .steps { margin: .2rem 0 .6rem 1.2rem; }
