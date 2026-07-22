@@ -384,8 +384,10 @@ func TestGitEnv(t *testing.T) {
 	if v, _ := last(env, "GIT_SSH_COMMAND"); v != "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4" {
 		t.Errorf("default: GIT_SSH_COMMAND entry = %q, want batch-mode ssh with bounded connect and keepalive", v)
 	}
-	if v, _ := last(env, "GIT_ASKPASS"); v != "GIT_ASKPASS=echo" {
-		t.Errorf("default: GIT_ASKPASS entry = %q, want echo (empty answers, no blocking helper)", v)
+	// Set-but-empty disables askpass resolution entirely; a no-op *program*
+	// would echo git's prompt argument back as the credential.
+	if v, _ := last(env, "GIT_ASKPASS"); v != "GIT_ASKPASS=" {
+		t.Errorf("default: GIT_ASKPASS entry = %q, want set-but-empty", v)
 	}
 
 	env = gitEnv([]string{"GIT_SSH_COMMAND=ssh -i /custom/key"}, false, false)
@@ -448,17 +450,33 @@ func TestGitConfigSet(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 
 	ctx := context.Background()
-	if gitConfigSet(ctx, "core.sshCommand") {
+	dir := t.TempDir() // not a repository: only global/system scope applies
+	if gitConfigSet(ctx, dir, "core.sshCommand") {
 		t.Error("empty config: core.sshCommand should not be reported configured")
 	}
 	if err := os.WriteFile(cfg, []byte("[core]\n\tsshCommand = ssh -i /custom/key\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !gitConfigSet(ctx, "core.sshCommand") {
-		t.Error("core.sshCommand set in gitconfig should be reported configured")
+	if !gitConfigSet(ctx, dir, "core.sshCommand") {
+		t.Error("core.sshCommand set in the global gitconfig should be reported configured")
 	}
-	if gitConfigSet(ctx, "core.askpass") {
+	if gitConfigSet(ctx, dir, "core.askpass") {
 		t.Error("core.askpass absent should not be reported configured")
+	}
+
+	// The workspace's own local config counts too — the probe runs in the
+	// checkout's context, exactly where the fetch's git would resolve it.
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"-C", repo, "init", "-q"},
+		{"-C", repo, "config", "core.askpass", "/usr/local/bin/my-askpass"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if !gitConfigSet(ctx, repo, "core.askpass") {
+		t.Error("core.askpass in the workspace-local config should be reported configured")
 	}
 }
 

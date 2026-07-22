@@ -137,9 +137,12 @@ gitconfig), with `GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10
 -o ServerAliveInterval=15 -o ServerAliveCountMax=4` — so an unprovisioned
 `known_hosts` or a key that needs a passphrase fails the checkout in seconds
 instead of hanging on a prompt until the checkout deadline. Likewise, unless
-`GIT_ASKPASS` or `core.askpass` is configured, `GIT_ASKPASS=echo` answers any
-credential question with an empty string (`GIT_TERMINAL_PROMPT` alone does not
-stop askpass helpers, and a blocking helper would pin the checkout slot). The
+`GIT_ASKPASS` or `core.askpass` is configured, `GIT_ASKPASS` is set *empty*,
+which disables askpass resolution entirely so credential requests hit the
+blocked terminal path and fail immediately (`GIT_TERMINAL_PROMPT` alone does
+not stop askpass helpers, and a blocking helper would pin the checkout slot).
+The gitconfig checks run inside the workspace being checked out, so local
+config and `includeIf "gitdir:"` rules count as configured too. The
 connect bound and keepalive probes cover the network-shaped hangs too: a
 `git_ssh_url` advertising a host or port unreachable from the Janus server (a
 Docker-internal hostname is the classic case) fails in ~10 s with
