@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -653,5 +654,167 @@ func TestMatches(t *testing.T) {
 				t.Errorf("matches() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- Per-run cancellation -----------------------------------------------------
+
+const sleepPipeline = `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`
+
+// waitStatus polls the store until run id reaches status.
+func waitStatus(t *testing.T, st store.Store, id string, want model.Status, timeout time.Duration) *model.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		run, err := st.GetRun(id)
+		if err == nil && run.Status == want {
+			return run
+		}
+		if time.Now().After(deadline) {
+			last := "unknown"
+			if err == nil {
+				last = string(run.Status)
+			}
+			t.Fatalf("run %s did not reach %s within %s (last: %s)", id, want, timeout, last)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// waitSlotsFree polls until the runner's admission and run slots are all
+// released, catching leaks on the cancel paths.
+func waitSlotsFree(t *testing.T, r *Runner, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for len(r.admit) != 0 || len(r.sem) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("slots leaked: admit=%d sem=%d", len(r.admit), len(r.sem))
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func newCancelTestRunner(t *testing.T, maxRuns int) (*Runner, store.Store) {
+	t.Helper()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: maxRuns, Allowlist: allow})
+	return r, st
+}
+
+func TestCancelRunningRunKillsProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, sleepPipeline)
+	r, st := newCancelTestRunner(t, 2)
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	waitStatus(t, st, res.RunID, model.StatusRunning, 15*time.Second)
+
+	start := time.Now()
+	if !r.Cancel(res.RunID, "cancelled via API") {
+		t.Fatal("Cancel returned false for a running run")
+	}
+	// Idempotent while teardown may still be in flight.
+	r.Cancel(res.RunID, "again")
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("cancel took %s; the sleeping process was not killed", elapsed)
+	}
+	if run.Status != model.StatusCancelled {
+		t.Fatalf("run status = %s, want cancelled", run.Status)
+	}
+	if run.Reason != "cancelled via API" {
+		t.Errorf("reason = %q, want %q", run.Reason, "cancelled via API")
+	}
+	waitSlotsFree(t, r, 5*time.Second)
+	// Once settled the run is deregistered; a late Cancel reports unknown.
+	if r.Cancel(res.RunID, "late") {
+		t.Error("Cancel on a settled run should return false")
+	}
+}
+
+func TestCancelPendingRunQueuedForSlot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, sleepPipeline)
+	r, st := newCancelTestRunner(t, 1)
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	waitStatus(t, st, resA.RunID, model.StatusRunning, 15*time.Second)
+
+	// B checks out and parses, then queues pending on the single run slot.
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		run, err := st.GetRun(resB.RunID)
+		if err == nil && len(run.Jobs) > 0 {
+			break // populated: past parse, at (or headed for) the slot wait
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run B never got populated")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if !r.Cancel(resB.RunID, "cancelled via API") {
+		t.Fatal("Cancel returned false for the queued run")
+	}
+	runB := waitRun(t, st, resB.RunID, 15*time.Second)
+	if runB.Status != model.StatusCancelled {
+		t.Fatalf("run B status = %s, want cancelled", runB.Status)
+	}
+	if runB.Reason != "cancelled via API" {
+		t.Errorf("run B reason = %q, want %q", runB.Reason, "cancelled via API")
+	}
+	// The queued run never started; its jobs and steps settle as skipped.
+	for _, jr := range runB.Jobs {
+		if !jr.Status.Terminal() {
+			t.Errorf("job %s status = %s, want terminal", jr.Name, jr.Status)
+		}
+		for _, sr := range jr.Steps {
+			if !sr.Status.Terminal() {
+				t.Errorf("job %s step %d status = %s, want terminal", jr.Name, sr.Index, sr.Status)
+			}
+		}
+	}
+
+	// A was untouched by B's cancel; stop it too and drain.
+	if !r.Cancel(resA.RunID, "cancelled via API") {
+		t.Fatal("Cancel returned false for run A")
+	}
+	waitRun(t, st, resA.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+}
+
+func TestCancelUnknownRun(t *testing.T) {
+	r, _ := newCancelTestRunner(t, 1)
+	if r.Cancel("no-such-run", "cancelled via API") {
+		t.Fatal("Cancel of an unknown run should return false")
 	}
 }

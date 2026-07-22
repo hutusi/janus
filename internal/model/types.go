@@ -153,9 +153,10 @@ type Run struct {
 	WorkflowName string `json:"workflow_name"`
 	Event        Event  `json:"event"`
 	Status       Status `json:"status"`
-	// Reason records why a run reached a terminal state before executing any
-	// job: a checkout or pipeline-parse failure, or an event that did not match
-	// the workflow's on: filters. Empty for runs that executed.
+	// Reason records why a run reached a terminal state other than by its jobs
+	// finishing: a checkout or pipeline-parse failure, an event that did not
+	// match the workflow's on: filters, or a cancellation ("cancelled via
+	// API", "superseded by run <id>"). Empty for runs that ran to completion.
 	Reason string    `json:"reason,omitempty"`
 	Jobs   []*JobRun `json:"jobs"`
 	// ConcurrencyGroup is the expanded (repo-scoped at runtime, but stored

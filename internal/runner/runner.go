@@ -72,6 +72,13 @@ type Runner struct {
 
 	locksMu sync.Mutex             // guards locks
 	locks   map[string]*sync.Mutex // per-repo workspace locks (persistent strategy)
+
+	// cancels maps a run ID to the cancel func of its per-run context, from
+	// registration (before the pending run is saved, so any non-terminal run
+	// fetchable from the store has an entry) until the run settles. Cancel and
+	// the concurrency-group supersede path both act through it.
+	cancelsMu sync.Mutex
+	cancels   map[string]context.CancelCauseFunc
 }
 
 // Options configures a Runner.
@@ -120,9 +127,50 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		// maxRuns executing plus a 3×maxRuns pending backlog. Derived rather
 		// than configurable: the point is that a trigger burst cannot start
 		// unbounded git processes or workspaces, not the exact queue depth.
-		admit: make(chan struct{}, 4*maxRuns),
-		locks: make(map[string]*sync.Mutex),
+		admit:   make(chan struct{}, 4*maxRuns),
+		locks:   make(map[string]*sync.Mutex),
+		cancels: make(map[string]context.CancelCauseFunc),
 	}
+}
+
+// Cancel requests cancellation of a non-terminal run, recording reason as its
+// stored Reason. It reports whether the run was known (still registered); a
+// false return means the ID is unknown or the run already settled. Cancelling
+// is asynchronous and best-effort: a run whose last process exits before the
+// cancel is observed still finishes on its own terms, and repeated calls are
+// no-ops.
+func (r *Runner) Cancel(runID, reason string) bool {
+	r.cancelsMu.Lock()
+	cancel, ok := r.cancels[runID]
+	r.cancelsMu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel(errors.New(reason))
+	return true
+}
+
+func (r *Runner) registerCancel(runID string, cancel context.CancelCauseFunc) {
+	r.cancelsMu.Lock()
+	r.cancels[runID] = cancel
+	r.cancelsMu.Unlock()
+}
+
+func (r *Runner) unregisterCancel(runID string) {
+	r.cancelsMu.Lock()
+	delete(r.cancels, runID)
+	r.cancelsMu.Unlock()
+}
+
+// cancelReason prefers the per-run cancel cause ("cancelled via API",
+// "superseded by run X") over fallback. A plain context.Canceled — shutdown
+// cancelling the root context — carries no message worth storing, so the
+// fallback stands.
+func cancelReason(ctx context.Context, fallback string) string {
+	if c := context.Cause(ctx); c != nil && !errors.Is(c, context.Canceled) {
+		return c.Error()
+	}
+	return fallback
 }
 
 // Degraded reports whether the daemon is in a known-bad state the operator
@@ -374,17 +422,25 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 	}
 
 	run := r.engine.NewPendingRun(ev)
+	// The per-run context makes every wait and the execution itself
+	// individually cancellable (Cancel, a concurrency-group supersede) while
+	// still inheriting Shutdown's r.ctx. Register before SaveRun so any
+	// non-terminal run fetchable from the store already has a cancel entry.
+	runCtx, cancelRun := context.WithCancelCause(r.ctx)
+	r.registerCancel(run.ID, cancelRun)
 	if err := r.store.SaveRun(run); err != nil {
 		// The store rejected recording a new run (a full/read-only/permission
 		// problem for the local file store — persistent, not transient), so
 		// the daemon can't do its job: latch degraded for /healthz, and return
 		// a typed error so both handlers answer 503 + Retry-After.
 		r.MarkDegraded()
+		r.unregisterCancel(run.ID)
+		cancelRun(nil)
 		release()
 		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 
-	go r.runTrigger(run, ev, pipelinePath, release)
+	go r.runTrigger(runCtx, cancelRun, run, ev, pipelinePath, release)
 	return Result{RunID: run.ID}, nil
 }
 
@@ -394,8 +450,13 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 // covering in-flight checkouts, and it must leave the run in a terminal state
 // on every path — the store never prunes non-terminal runs, so an unsettled
 // run would leak forever.
-func (r *Runner) runTrigger(run *model.Run, ev model.Event, pipelinePath string, release func()) {
+func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCauseFunc, run *model.Run, ev model.Event, pipelinePath string, release func()) {
 	defer release()
+	defer cancelRun(nil) // release the context's resources on every path
+	// Deregister only after the terminal state is recorded (defers run LIFO),
+	// so Cancel never observes a registered-but-unsettled gap; a Cancel racing
+	// completion is a harmless no-op on the already-cancelled context.
+	defer r.unregisterCancel(run.ID)
 	// Terminal-state net: any exit that has not settled the run — including a
 	// panic unwinding through this frame — records a failure first. No recover:
 	// a panic still crashes the daemon as before, but not with a forever-
@@ -439,11 +500,12 @@ func (r *Runner) runTrigger(run *model.Run, ev model.Event, pipelinePath string,
 		}
 	}
 
-	// The checkout is bounded by its deadline or Shutdown (r.ctx) — never by
-	// the originating HTTP request: the caller already answered its client,
-	// and a webhook platform hanging up must not cancel work it was just told
-	// is underway.
-	cctx, cancel := context.WithTimeout(r.ctx, checkoutTimeout)
+	// The checkout is bounded by its deadline or the per-run context (which
+	// Shutdown, Cancel, and a group supersede all cancel) — never by the
+	// originating HTTP request: the caller already answered its client, and a
+	// webhook platform hanging up must not cancel work it was just told is
+	// underway.
+	cctx, cancel := context.WithTimeout(runCtx, checkoutTimeout)
 	ws, err := workspace.Checkout(cctx, workspace.Options{
 		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref,
 		Keep: r.keepWS || reuse, Reuse: reuse,
@@ -457,10 +519,10 @@ func (r *Runner) runTrigger(run *model.Run, ev model.Event, pipelinePath string,
 			_ = os.RemoveAll(wsDir)
 		}
 		unlock()
-		if r.ctx.Err() != nil {
-			// Shutdown killed the checkout — the trigger was interrupted, it
-			// did not fail.
-			finish(model.StatusCancelled, fmt.Sprintf("checkout: %v", err))
+		if runCtx.Err() != nil {
+			// Shutdown or a cancel killed the checkout — the trigger was
+			// interrupted, it did not fail.
+			finish(model.StatusCancelled, cancelReason(runCtx, fmt.Sprintf("checkout: %v", err)))
 		} else {
 			finish(model.StatusFailed, fmt.Sprintf("checkout: %v", err))
 		}
@@ -503,19 +565,36 @@ func (r *Runner) runTrigger(run *model.Run, ev model.Event, pipelinePath string,
 		// status change (and latches Degraded if the terminal write fails too).
 		r.logger.Warn("populated run could not be persisted; executing anyway", "run_id", run.ID, "err", err)
 	}
+	defer unlock()                      // after cleanup: dir settled before the next run can claim it
+	defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
+	// Wait for a run slot; the run stays Pending until one frees, and a cancel
+	// (Cancel, group supersede, Shutdown) releases it from the queue.
+	select {
+	case r.sem <- struct{}{}:
+	case <-runCtx.Done():
+		finish(model.StatusCancelled, cancelReason(runCtx, "cancelled while waiting for a run slot"))
+		return
+	}
+	defer func() { <-r.sem }()
 	// From here Execute owns the run's terminal state (and reconciliation
 	// covers a crash), so the terminal-state net must stand down.
 	settled = true
-
-	defer unlock()                      // after cleanup: dir settled before the next run can claim it
-	defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
-	// Wait for a run slot; the run stays Pending until one frees.
-	r.sem <- struct{}{}
-	defer func() { <-r.sem }()
-	// r.ctx is cancelled on Shutdown, so in-flight runs are stopped. A
-	// terminal-persist failure is already logged and latched (Degraded())
-	// by the engine, so the returned error is intentionally discarded here.
-	_ = r.engine.Execute(r.ctx, run, wf, ws.Dir)
+	// The per-run context is cancelled on Shutdown too, so in-flight runs are
+	// stopped. A terminal-persist failure is already logged and latched
+	// (Degraded()) by the engine, so the returned error is intentionally
+	// discarded here.
+	_ = r.engine.Execute(runCtx, run, wf, ws.Dir)
+	// Execute classifies an externally-cancelled run but cannot know why; the
+	// cause is only attachable now that its goroutines have joined and the run
+	// is single-owner again (writing Reason mid-flight would race runState).
+	if run.Status == model.StatusCancelled && run.Reason == "" {
+		if reason := cancelReason(runCtx, ""); reason != "" {
+			run.Reason = reason
+			if err := r.store.UpdateRun(run); err != nil {
+				r.logger.Warn("cancel reason could not be persisted", "run_id", run.ID, "err", err)
+			}
+		}
+	}
 	r.pruneHistory()
 }
 
@@ -533,6 +612,19 @@ func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) {
 	run.Status = status
 	run.Reason = reason
 	run.FinishedAt = time.Now()
+	// A cancelled run may already be populated (cancelled while queued for a
+	// run slot or behind its concurrency group); settle its never-started
+	// jobs/steps so a terminal run never keeps pending jobs.
+	for _, jr := range run.Jobs {
+		for _, sr := range jr.Steps {
+			if !sr.Status.Terminal() {
+				sr.Status = model.StatusSkipped
+			}
+		}
+		if !jr.Status.Terminal() {
+			jr.Status = model.StatusSkipped
+		}
+	}
 	if err := r.store.UpdateRun(run); err != nil {
 		r.logger.Error("run outcome could not be persisted", "run_id", run.ID, "status", status, "err", err)
 		r.MarkDegraded()

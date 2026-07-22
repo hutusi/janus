@@ -95,6 +95,20 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   pre-execution outcomes directly), and stores snapshot on write, so no other
   goroutine can observe a partial mutation. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
+- Every run executes under a **per-run cancellable context** (a
+  `WithCancelCause` child of the runner's root context, so Shutdown still
+  reaches everything). Its cancel func lives in a registry keyed by run ID from
+  *before* the pending run is saved until the run settles — the invariant is
+  that any non-terminal run fetchable from the store can be cancelled
+  (`Runner.Cancel`, backing `POST /api/runs/{id}/cancel`, and the
+  concurrency-group supersede path). Every pre-execution wait — the checkout,
+  the run-slot queue — selects on this context, and `Execute` receives it, so
+  one mechanism cancels a run at any stage. The human-readable cause
+  ("cancelled via API", "superseded by run X") becomes the run's `Reason`; it
+  is attached only *after* `Execute` returns (the run is single-owner again —
+  writing it mid-flight would race `runState`), and cancellation is
+  best-effort: a run whose last process exits before the cancel is observed
+  still finishes on its own terms.
 - Checkout git subprocesses run non-interactively (`GIT_TERMINAL_PROMPT=0`,
   ssh `BatchMode=yes` + bounded connect + keepalive unless the operator sets
   `GIT_SSH_COMMAND`/`GIT_SSH`) — a credential or host-key prompt, an
