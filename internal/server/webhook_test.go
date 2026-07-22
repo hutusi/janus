@@ -285,6 +285,60 @@ func TestWebhookPipelinePathEscapeRejected(t *testing.T) {
 	}
 }
 
+func TestWebhookMergedPipelineRoutesByBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// One pipeline for every branch: build always runs, deploy only on
+	// master/main via its job-level branch filter.
+	repo, sha := initGitRepo(t, `name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: echo building
+  deploy:
+    needs: [build]
+    branches: [master, main]
+    steps:
+      - run: echo releasing
+`)
+	ts := newTestServer(t)
+
+	deliver := func(branch string) *model.Run {
+		t.Helper()
+		resp := gitlabPush(t, ts, repo, sha, branch, testGitLabSecret)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("%s push status = %d, want 202", branch, resp.StatusCode)
+		}
+		var body struct {
+			RunID string `json:"run_id"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		return pollRun(t, ts, body.RunID, 15*time.Second)
+	}
+
+	run := deliver("feature/x")
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("feature run = %s (%q), want success", run.Status, run.Reason)
+	}
+	if got := findJob(run, "build").Status; got != model.StatusSuccess {
+		t.Errorf("feature build = %s, want success", got)
+	}
+	if got := findJob(run, "deploy").Status; got != model.StatusSkipped {
+		t.Errorf("feature deploy = %s, want skipped", got)
+	}
+
+	run = deliver("main")
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("main run = %s (%q), want success", run.Status, run.Reason)
+	}
+	if got := findJob(run, "deploy").Status; got != model.StatusSuccess {
+		t.Errorf("main deploy = %s, want success", got)
+	}
+}
+
 func TestWebhookCheckoutFailureRecordsFailedRun(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

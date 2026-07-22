@@ -39,6 +39,11 @@ jobs:                                     # required: at least one job
     needs: [build]                        # optional; DAG dependencies
     steps:
       - run: npm test
+  deploy:
+    needs: [test]
+    branches: [main]                      # optional; job runs only on these branches
+    steps:
+      - run: ./deploy.sh
 ```
 
 ### Keys
@@ -53,6 +58,8 @@ jobs:                                     # required: at least one job
 | `env`                      | top / job / step | —        | Environment variables, merged in that order. |
 | `jobs.<id>`                | top level        | yes      | A job; the map key is the job name (letters, digits, `-`, `_` only). |
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
+| `jobs.<id>.branches`       | job              | —        | Run this job only on these branches; elsewhere it is recorded `skipped`. |
+| `jobs.<id>.branches-ignore`| job              | —        | Run this job on every branch **except** these. Mutually exclusive with `branches`. |
 | `jobs.<id>.steps[].run`    | step             | yes      | Command to run on the host via the step shell. |
 | `jobs.<id>.steps[].shell`  | step             | —        | Shell for `run`: `sh`/`bash`/`cmd`/`powershell`/`pwsh`. Default: `/bin/sh` (unix), `cmd` (Windows). |
 | `jobs.<id>.steps[].working-directory` | step  | —        | Directory (relative to the workspace) to run in. |
@@ -60,6 +67,22 @@ jobs:                                     # required: at least one job
 At least one of `on.push` / `on.merge_request` must be present. Branch names in
 both lists are **exact string matches** (no globs). A trigger may declare
 `branches` (allowlist) or `branches-ignore` (denylist), but not both.
+
+### Job-level branch filters
+
+Jobs accept the same `branches` / `branches-ignore` keys (and the same
+exact-match, one-or-the-other rules) as `on:` filters, matched against the
+event's branch **regardless of event kind** — including manual triggers, whose
+`branch` field decides what runs (`janus run --branch main`, or the API's
+`"branch"` field; with no branch, jobs with a `branches` allowlist skip).
+Where `on:` decides whether the *workflow* runs at all, a job filter shapes
+*what runs within it*: a non-matching job is recorded `skipped` on the run —
+visible in the dashboard and API — and a job that `needs` a branch-skipped job
+is skipped too (its dependency never ran). If every job is filtered out, the
+run itself finishes `skipped` with a reason. This is the supported way to run
+one pipeline with a branch-dependent tail (build everywhere, deploy on `main`)
+— see [examples/ci.yml](../examples/ci.yml); there is still no `if:` or
+expression language.
 
 ### Step shell
 
@@ -121,9 +144,11 @@ user can read remains reachable — see the security model in the README.
 
 These produce a clear validation error rather than running:
 
-- `branches` together with `branches-ignore` on the same trigger — pick an
-  allowlist or a denylist.
-- `if:` / conditionals / expressions — no expression language.
+- `branches` together with `branches-ignore` on the same trigger or job — pick
+  an allowlist or a denylist.
+- `if:` / conditionals / expressions — no expression language. For the common
+  "deploy only on main" case, use a declarative
+  [job-level branch filter](#job-level-branch-filters) instead.
 - `strategy:` / `matrix:` — no matrix builds.
 - `uses:` / `with:` — no third-party actions; steps run host commands only.
 - `runs-on:`, `container:`, `services:` — jobs run as host processes.
@@ -144,6 +169,9 @@ These produce a clear validation error rather than running:
 
 - Jobs run as **host processes** (no container/VM). They run concurrently when
   their `needs` allow, and a job's steps run sequentially.
+- Jobs excluded by a [branch filter](#job-level-branch-filters) — and jobs that
+  `needs` one — are marked `skipped` up front and never launched; a skipped job
+  is not a failure.
 - A step fails on the first non-zero exit; that fails the job.
 - On the first job failure the run is **fail-fast**: in-flight processes are
   cancelled and not-yet-started jobs are marked skipped. The run itself is

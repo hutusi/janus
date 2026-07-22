@@ -1,64 +1,56 @@
-# Example pipelines
+# Example pipeline
 
-Two ready-to-copy [Janus](../README.md) pipelines for a typical npm / static-site
+A ready-to-copy [Janus](../README.md) pipeline for a typical npm / static-site
 project. See [docs/pipeline-reference.md](../docs/pipeline-reference.md) for the full
 grammar.
 
 | File | What it does |
 |------|--------------|
-| [`ci.yml`](ci.yml) | On every push to any branch **except** `master`/`main`, builds the pushed branch and verifies the `out/` output. |
-| [`release.yml`](release.yml) | On every update to `master`/`main`, the same build, then publishes `out/` to a separate "pages" repository. |
+| [`ci.yml`](ci.yml) | On every push: builds the pushed branch and verifies the `out/` output; on `master`/`main` additionally publishes `out/` to a separate "pages" repository. |
 
-## How Janus uses these
+## How the branch routing works
 
-Janus loads **one** pipeline file per trigger — by default `.janus/ci.yml`
-(configurable with `--pipeline-path`; a trigger may name another committed file).
-There is deliberately no `if:` or per-job branch condition in the pipeline
-grammar — branch routing is done by *pairing files with complementary `on:`
-filters*, one trigger each. Pick the model that fits:
+`ci.yml` triggers on **every** push (`on: push` with no filter). The `build` job
+always runs; the `deploy` job carries a **job-level branch filter**:
 
-- **Branch routing: build every branch, release master/main** — the two files
-  are complementary (`branches-ignore: [master, main]` vs
-  `branches: [master, main]`). Copy both into your repo's `.janus/` directory
-  (they are already named for it: `.janus/ci.yml` + `.janus/release.yml`),
-  then register **two webhooks** on the project (GitLab allows any number,
-  same URL + secret):
+```yaml
+deploy:
+  needs: [build]
+  branches: [master, main]
+```
 
-  - `https://janus.example.com/webhooks/gitlab` — runs `.janus/ci.yml`
-  - `https://janus.example.com/webhooks/gitlab?pipeline_path=release.yml` —
-    runs `.janus/release.yml`
+On a feature branch, `deploy` is recorded as `skipped` (visible on the run in
+the dashboard and API) while `build` executes; on `master`/`main` both run.
+Job filters use the same `branches` / `branches-ignore` syntax and matching as
+`on:` filters, and a job that `needs` a branch-skipped job is skipped too.
+There is deliberately no `if:` or expression language — routing stays
+declarative.
 
-  Every push is delivered to both hooks; each file's `on:` filter decides which
-  one executes. A feature push executes the build workflow while the release
-  delivery records a `skipped` run (with the non-match reason on the run); a
-  `master`/`main` push does the reverse. Both deliveries always answer
-  `202 {"status":"accepted"}`.
+Copy the file to `.janus/ci.yml` in your repository and it works with the
+default configuration; one webhook is enough.
 
-- **Build every branch on CI, release on demand** — commit only the build
-  pipeline as `.janus/ci.yml` and publish explicitly when you want to:
+To force the release path by hand (the branch decides what runs):
 
-  ```sh
-  janus run --file .janus/release.yml .
-  ```
+```sh
+janus run --branch main .
+```
 
-  or keep both files in `.janus/` and trigger the release through the API's
-  `pipeline_path` override (`{"pipeline_path": "release.yml", ...}`).
+or through the API: `POST /api/trigger` with `{"branch": "main", ...}`.
 
-- **Build + deploy on every master/main merge only** — use `release.yml` as
-  your `.janus/ci.yml`; feature pushes then record `skipped` runs.
+For pipelines that are genuinely separate (say, a nightly maintenance file that
+should not run on push at all), commit them beside `ci.yml` and select them
+per trigger: a second webhook with `?pipeline_path=nightly.yml`, or the API's
+`pipeline_path` field.
 
-## Triggers: a denylist for CI, `push` for releases
+## Releases: `push`, not `merge_request`
 
-`ci.yml` uses `branches-ignore: [master, main]` — an exact-match **denylist**, so
-every other pushed branch builds with no list to maintain. GitLab sends a Push Hook
-per pushed branch; Janus matches the branch against the filter and builds that branch.
-
-`release.yml` fires on a **push to `master` or `main`**. When a merge request is
-merged, GitLab sends a Push Hook to the target branch — Janus runs on that. Janus
-deliberately *ignores* the MR `merge` action (it only acts on
+The release fires on a **push to `master` or `main`**. When a merge request is
+merged, GitLab sends a Push Hook to the target branch — Janus runs on that.
+Janus deliberately *ignores* the MR `merge` action (it only acts on
 `open`/`reopen`/`update`), so `on: merge_request` would **not** fire when an MR
-lands. Janus can't distinguish a merge-commit push from a direct push — if you want
-runs only for merged MRs, protect the branch so it can't be pushed to directly.
+lands. Janus can't distinguish a merge-commit push from a direct push — if you
+want runs only for merged MRs, protect the branch so it can't be pushed to
+directly.
 
 ## "Update the branch to the latest"
 
@@ -73,7 +65,7 @@ git reset --hard FETCH_HEAD
 ```
 
 Each step runs from the workspace root via the step shell — `/bin/sh -c` by default
-on unix (these examples are POSIX; on Windows set `shell: sh`, or write cmd/PowerShell).
+on unix (the example is POSIX; on Windows set `shell: sh`, or write cmd/PowerShell).
 The filesystem persists across steps, but shell state (current directory, variables)
 does **not** — that's why the deploy steps use `git -C .pages-repo …` instead of `cd`.
 
@@ -87,7 +79,7 @@ the Janus service runs as (see [docs/deployment.md](../docs/deployment.md)):
    repo with **write** access.
 2. Place the private key in the Janus user's `~/.ssh/` and add the host to
    `~/.ssh/known_hosts` (a passphraseless key works without an agent).
-3. Set the knobs in `release.yml`'s `env:` — `PAGES_REPO_URL` (an SSH `git@…` URL),
+3. Set the knobs in `ci.yml`'s `env:` — `PAGES_REPO_URL` (an SSH `git@…` URL),
    `PAGES_BRANCH` (must already exist), and the commit identity (`GIT_USER_NAME` /
    `GIT_USER_EMAIL`). These are not secrets.
 

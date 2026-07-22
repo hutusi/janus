@@ -56,8 +56,14 @@ func (f *BranchFilter) Matches(branch string) bool {
 type Job struct {
 	Name  string
 	Needs []string
-	Env   map[string]string
-	Steps []Step
+	// Filter restricts the job to a set of branches (the job-level
+	// `branches`/`branches-ignore` keys, same semantics as an `on:` filter,
+	// matched against the event's branch regardless of event kind). Nil means
+	// the job runs on every branch. A non-matching job — and any job that
+	// needs one — is recorded skipped instead of executed.
+	Filter *BranchFilter
+	Env    map[string]string
+	Steps  []Step
 }
 
 // Step is a single shell command, optionally with its own working directory

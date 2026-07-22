@@ -156,6 +156,104 @@ jobs:
 	}
 }
 
+func TestRunJobBranchFilterSkips(t *testing.T) {
+	const src = `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: "true"
+  deploy:
+    needs: [build]
+    branches: [master, main]
+    steps:
+      - run: "true"
+`
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), mustParse(t, src),
+		model.Event{Kind: model.EventPush, Branch: "feature/x"}, t.TempDir())
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("feature run status = %s, want success (a branch-skipped job is not a failure)", run.Status)
+	}
+	if got := jobRun(run, "build").Status; got != model.StatusSuccess {
+		t.Errorf("build status = %s, want success", got)
+	}
+	deploy := jobRun(run, "deploy")
+	if deploy.Status != model.StatusSkipped {
+		t.Errorf("deploy status = %s, want skipped on a non-release branch", deploy.Status)
+	}
+	for _, sr := range deploy.Steps {
+		if sr.Status != model.StatusSkipped {
+			t.Errorf("deploy step %d status = %s, want skipped", sr.Index, sr.Status)
+		}
+	}
+
+	run, _ = New(st).Run(context.Background(), mustParse(t, src),
+		model.Event{Kind: model.EventPush, Branch: "main"}, t.TempDir())
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("main run status = %s, want success", run.Status)
+	}
+	if got := jobRun(run, "deploy").Status; got != model.StatusSuccess {
+		t.Errorf("deploy status on main = %s, want success", got)
+	}
+}
+
+func TestRunJobBranchFilterSkipPropagatesToNeeds(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  lint:
+    steps:
+      - run: "true"
+  build:
+    branches: [main]
+    steps:
+      - run: "true"
+  verify:
+    needs: [build]
+    steps:
+      - run: "true"
+`)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf,
+		model.Event{Kind: model.EventPush, Branch: "dev"}, t.TempDir())
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if got := jobRun(run, "lint").Status; got != model.StatusSuccess {
+		t.Errorf("lint status = %s, want success", got)
+	}
+	if got := jobRun(run, "build").Status; got != model.StatusSkipped {
+		t.Errorf("build status = %s, want skipped (filter)", got)
+	}
+	if got := jobRun(run, "verify").Status; got != model.StatusSkipped {
+		t.Errorf("verify status = %s, want skipped (needs a branch-skipped job)", got)
+	}
+}
+
+func TestRunAllJobsBranchFilteredSkipsRun(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  deploy:
+    branches: [main]
+    steps:
+      - run: "true"
+`)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf,
+		model.Event{Kind: model.EventPush, Branch: "dev"}, t.TempDir())
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped when every job is filtered out", run.Status)
+	}
+	if !strings.Contains(run.Reason, "no job matches") {
+		t.Errorf("run reason = %q, want it to explain the branch filter", run.Reason)
+	}
+}
+
 func TestRunCombinedLogOrdering(t *testing.T) {
 	wf := mustParse(t, `
 name: ci
