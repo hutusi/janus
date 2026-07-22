@@ -1,14 +1,16 @@
-# Example pipeline
+# Example pipelines
 
-A ready-to-copy [Janus](../README.md) pipeline for a typical npm / static-site
-project. See [docs/pipeline-reference.md](../docs/pipeline-reference.md) for the full
-grammar.
+Ready-to-copy [Janus](../README.md) pipelines for a typical npm / static-site
+project, in two models. See
+[docs/pipeline-reference.md](../docs/pipeline-reference.md) for the full grammar.
 
-| File | What it does |
-|------|--------------|
-| [`ci.yml`](ci.yml) | On every push: builds the pushed branch and verifies the `out/` output; on `master`/`main` additionally publishes `out/` to a separate "pages" repository. |
+| File | Model | What it does |
+|------|-------|--------------|
+| [`ci.yml`](ci.yml) | merged (recommended) | On every push: builds the pushed branch and verifies the `out/` output; on `master`/`main` additionally publishes `out/` to a separate "pages" repository. |
+| [`build.yml`](build.yml) | split | On every push to any branch **except** `master`/`main`, builds the pushed branch. |
+| [`release.yml`](release.yml) | split | On every update to `master`/`main`, the same build, then publishes `out/`. |
 
-## How the branch routing works
+## Model A (recommended): one merged file with a job-level branch filter
 
 `ci.yml` triggers on **every** push (`on: push` with no filter). The `build` job
 always runs; the `deploy` job carries a **job-level branch filter**:
@@ -37,10 +39,30 @@ janus run --branch main .
 
 or through the API: `POST /api/trigger` with `{"branch": "main", ...}`.
 
-For pipelines that are genuinely separate (say, a nightly maintenance file that
-should not run on push at all), commit them beside `ci.yml` and select them
-per trigger: a second webhook with `?pipeline_path=nightly.yml`, or the API's
-`pipeline_path` field.
+## Model B: split files, selected per trigger
+
+`build.yml` and `release.yml` carry **complementary `on:` filters**
+(`branches-ignore: [master, main]` vs `branches: [master, main]`). Commit them
+as `.janus/ci.yml` and `.janus/release.yml`, then register **two webhooks** on
+the project (same URL + secret):
+
+- `https://janus.example.com/webhooks/gitlab` — runs the build file
+- `https://janus.example.com/webhooks/gitlab?pipeline_path=release.yml` — runs
+  the release file
+
+Every push is delivered to both hooks; each file's `on:` filter decides which
+one executes, and the non-matching side records a `skipped` run with the
+reason. Or skip the second webhook and release on demand:
+
+```sh
+janus run --file .janus/release.yml .
+```
+
+(or the API's `pipeline_path` field). The trade-off: the build job is
+duplicated across the two files — prefer Model A unless the pipelines are
+genuinely separate (different owners, schedules, or repos), which is also when
+`?pipeline_path=` earns its keep (e.g. a nightly maintenance file that should
+never run on push).
 
 ## Releases: `push`, not `merge_request`
 
@@ -79,7 +101,7 @@ the Janus service runs as (see [docs/deployment.md](../docs/deployment.md)):
    repo with **write** access.
 2. Place the private key in the Janus user's `~/.ssh/` and add the host to
    `~/.ssh/known_hosts` (a passphraseless key works without an agent).
-3. Set the knobs in `ci.yml`'s `env:` — `PAGES_REPO_URL` (an SSH `git@…` URL),
+3. Set the knobs in the `env:` of `ci.yml` (or `release.yml`) — `PAGES_REPO_URL` (an SSH `git@…` URL),
    `PAGES_BRANCH` (must already exist), and the commit identity (`GIT_USER_NAME` /
    `GIT_USER_EMAIL`). These are not secrets.
 

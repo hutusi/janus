@@ -1,0 +1,34 @@
+# Build pipeline — the build half of the split model: runs on every push to
+# any branch except master/main, which release.yml owns (build + publish).
+#
+# The two files carry complementary filters; a second webhook with
+# `?pipeline_path=release.yml` routes every push through both (see README.md).
+# Prefer the merged single-file ci.yml unless your pipelines are genuinely
+# separate — this pair duplicates the build job across two files.
+#
+# GitLab sends a Push Hook for each pushed branch, so `push` with
+# `branches-ignore` covers every feature branch with no list to maintain.
+name: build
+on:
+  push:
+    branches-ignore: [master, main]
+env:
+  OUT_DIR: out            # build output directory to verify
+jobs:
+  build:
+    steps:
+      # Update the pushed branch to its latest tip. Janus checks out the
+      # triggering commit as a shallow, detached HEAD — `git checkout <branch>`
+      # / `git pull` would fail (the branch isn't in the shallow clone) — so
+      # re-fetch the tip to guarantee the very latest.
+      - run: |
+          set -e
+          git fetch --depth 1 origin "${{ branch }}"
+          git reset --hard FETCH_HEAD
+      # Install dependencies and build.
+      - run: npm install && npm run build
+      # Verify the build output exists and is non-empty.
+      - run: |
+          set -e
+          test -d "$OUT_DIR"
+          [ -n "$(ls -A "$OUT_DIR")" ]
