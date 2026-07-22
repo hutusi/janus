@@ -111,6 +111,7 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 | `GET /api/runs`                   | List run **summaries**, newest first (`?limit=&offset=` for paging); no per-step `jobs` — see the detail endpoint |
 | `GET /api/runs/{id}`              | Run detail (job/step statuses, exit codes) |
 | `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream |
+| `POST /api/runs/{id}/cancel`      | Cancel a pending or running run (requires `--api-token`; it kills host processes). `202` = cancel delivered — best-effort and asynchronous, poll the run for the terminal `cancelled` state; `409` if the run already finished |
 | `GET /healthz`                    | Health + version |
 | `GET /` and `/runs/{id}`          | Read-only HTML dashboard |
 

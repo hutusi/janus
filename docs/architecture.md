@@ -95,6 +95,59 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   pre-execution outcomes directly), and stores snapshot on write, so no other
   goroutine can observe a partial mutation. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
+- Every run executes under a **per-run cancellable context** (a
+  `WithCancelCause` child of the runner's root context, so Shutdown still
+  reaches everything). Its cancel func lives in a registry keyed by run ID from
+  *before* the pending run is saved until the run settles — the invariant is
+  that any non-terminal run fetchable from the store can be cancelled
+  (`Runner.Cancel`, backing `POST /api/runs/{id}/cancel`, and the
+  concurrency-group supersede path). Every pre-execution wait — the checkout,
+  the run-slot queue — selects on this context, and `Execute` receives it, so
+  one mechanism cancels a run at any stage. The human-readable cause
+  ("cancelled via API", "superseded by run X") becomes the run's `Reason`; it
+  is attached only *after* `Execute` returns (the run is single-owner again —
+  writing it mid-flight would race `runState`), and cancellation is
+  best-effort: a run whose last process exits before the cancel is observed
+  still finishes on its own terms.
+- **Concurrency groups** (a workflow's `concurrency:` key) are enforced by a
+  runner-side registry keyed by `(repo URL, expanded group)`: per group **at
+  most one run executes and at most one waits** — a newer arrival supersedes
+  the waiter (cancelled via its per-run context, reason
+  `superseded by run <id>`), and with `cancel-in-progress` it cancels the
+  executing member too. **"Newer" means trigger order**: a monotonic sequence
+  is stamped synchronously in `Trigger`, and a per-group high-water mark (the
+  newest member ever admitted) refuses older arrivals — necessary because
+  members reach the registry only after their checkout, and checkouts finish
+  in any order, so an older trigger arriving late must not supersede, kill,
+  or outlive a newer run with a stale commit. The mark survives the group
+  emptying, but only as long as it can matter: a stale arrival is by
+  definition an admitted older trigger that has not yet **resolved** —
+  entered its one group, turned out ungrouped, or failed pre-enter — so each
+  trigger retires from the accounting at resolution (grouped ones inside
+  `enter` itself), and marks below the oldest unresolved trigger are swept.
+  Since the pre-enter phase is deadline-bounded (the checkout timeout), a
+  mark outlives its creation by at most ~one checkout window regardless of
+  how long runs execute — registry memory is never pinned by a hung step or
+  by how many branches (groups) the daemon has ever seen. Sequence hand-out
+  and enrollment happen under one lock (a sweep between the two steps could
+  drop a mark a just-admitted older trigger still needs), and inside `enter`
+  the stale-gate check precedes retirement — the stale arrival's own
+  enrollment is what has kept the refusing mark alive. A run cancelled
+  before it enters resolves without superseding anyone. One conscious
+  trade-off: under `workspace_strategy: persistent`, a grouped run queued
+  behind its group holds its repo's persistent-workspace lock for the wait,
+  so same-repo triggers fall back to fresh clones meanwhile — slower,
+  never blocking. The
+  group gate is ordered *before* the global run semaphore, so a run waiting
+  for its group holds no run slot and cannot starve other repos; after
+  acquiring a slot the member re-checks its membership under the registry
+  lock (a supersede can land in between). The newcomer's turn begins only
+  when the previous member has fully unwound (processes killed), so "one
+  running" holds even mid-handover. Empty group entries are deleted; the
+  registry is in-memory only (startup reconciliation already settles
+  orphans). The group is only knowable *after* checkout+parse — the pipeline
+  lives in the repo — so admission (`ErrBusy`/503) is unaffected and a
+  superseded run still consumed an admission slot for its lifetime.
 - Checkout git subprocesses run non-interactively (`GIT_TERMINAL_PROMPT=0`,
   ssh `BatchMode=yes` + bounded connect + keepalive unless the operator sets
   `GIT_SSH_COMMAND`/`GIT_SSH`) — a credential or host-key prompt, an

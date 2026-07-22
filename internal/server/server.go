@@ -75,9 +75,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("POST /webhooks/{provider}", s.handleWebhook)
 
-	// /api/trigger executes code on the host, so it ALWAYS requires a token —
-	// if none is configured it is disabled (403) rather than left open.
+	// Mutating endpoints — triggering executes code on the host, cancelling
+	// kills host processes — ALWAYS require a token; if none is configured
+	// they are disabled (403) rather than left open.
 	s.mux.HandleFunc("POST /api/trigger", s.requireToken(s.handleTrigger))
+	s.mux.HandleFunc("POST /api/runs/{id}/cancel", s.requireToken(s.handleCancelRun))
 	// Read endpoints are optionally bearer-protected.
 	s.mux.HandleFunc("GET /api/runs", s.requireAuth(s.handleListRuns))
 	s.mux.HandleFunc("GET /api/runs/{id}", s.requireAuth(s.handleGetRun))
@@ -111,11 +113,11 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // requireToken mandates a configured bearer token; without one the route is
-// disabled (used for the code-executing /api/trigger).
+// disabled (used for the mutating routes: /api/trigger, run cancel).
 func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.apiToken == "" {
-			writeError(w, http.StatusForbidden, "/api/trigger is disabled; start janus with --api-token to enable it")
+			writeError(w, http.StatusForbidden, "this endpoint is disabled; start janus with --api-token to enable it")
 			return
 		}
 		if !s.bearerOK(r) {

@@ -76,7 +76,7 @@ var forbiddenKeyHelp = map[string]string{
 	"secrets":     "`secrets:` is not supported — use host environment variables",
 	"cache":       "caching is not supported",
 	"permissions": "`permissions:` is not supported",
-	"concurrency": "`concurrency:` is not supported",
+	"concurrency": "`concurrency:` is only supported at the workflow (top) level",
 	"outputs":     "`outputs:` are not supported",
 	"id":          "step `id:` is not supported",
 	"name":        "step `name:` is not supported — use `run`",

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -652,6 +653,437 @@ func TestMatches(t *testing.T) {
 			if got := matches(tc.wf, tc.ev); got != tc.want {
 				t.Errorf("matches() = %v, want %v", got, tc.want)
 			}
+		})
+	}
+}
+
+// --- Per-run cancellation -----------------------------------------------------
+
+const sleepPipeline = `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`
+
+// waitStatus polls the store until run id reaches status.
+func waitStatus(t *testing.T, st store.Store, id string, want model.Status, timeout time.Duration) *model.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		run, err := st.GetRun(id)
+		if err == nil && run.Status == want {
+			return run
+		}
+		if time.Now().After(deadline) {
+			last := "unknown"
+			if err == nil {
+				last = string(run.Status)
+			}
+			t.Fatalf("run %s did not reach %s within %s (last: %s)", id, want, timeout, last)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// waitSlotsFree polls until the runner's admission and run slots are all
+// released, catching leaks on the cancel paths.
+func waitSlotsFree(t *testing.T, r *Runner, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for len(r.admit) != 0 || len(r.sem) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("slots leaked: admit=%d sem=%d", len(r.admit), len(r.sem))
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func newCancelTestRunner(t *testing.T, maxRuns int) (*Runner, store.Store) {
+	t.Helper()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: maxRuns, Allowlist: allow})
+	return r, st
+}
+
+func TestCancelRunningRunKillsProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, sleepPipeline)
+	r, st := newCancelTestRunner(t, 2)
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	waitStatus(t, st, res.RunID, model.StatusRunning, 15*time.Second)
+
+	start := time.Now()
+	if !r.Cancel(res.RunID, "cancelled via API") {
+		t.Fatal("Cancel returned false for a running run")
+	}
+	// Idempotent while teardown may still be in flight.
+	r.Cancel(res.RunID, "again")
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("cancel took %s; the sleeping process was not killed", elapsed)
+	}
+	if run.Status != model.StatusCancelled {
+		t.Fatalf("run status = %s, want cancelled", run.Status)
+	}
+	if run.Reason != "cancelled via API" {
+		t.Errorf("reason = %q, want %q", run.Reason, "cancelled via API")
+	}
+	waitSlotsFree(t, r, 5*time.Second)
+	// Once settled the run is deregistered; a late Cancel reports unknown.
+	if r.Cancel(res.RunID, "late") {
+		t.Error("Cancel on a settled run should return false")
+	}
+}
+
+func TestCancelPendingRunQueuedForSlot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, sleepPipeline)
+	r, st := newCancelTestRunner(t, 1)
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	waitStatus(t, st, resA.RunID, model.StatusRunning, 15*time.Second)
+
+	// B checks out and parses, then queues pending on the single run slot.
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		run, err := st.GetRun(resB.RunID)
+		if err == nil && len(run.Jobs) > 0 {
+			break // populated: past parse, at (or headed for) the slot wait
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run B never got populated")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if !r.Cancel(resB.RunID, "cancelled via API") {
+		t.Fatal("Cancel returned false for the queued run")
+	}
+	runB := waitRun(t, st, resB.RunID, 15*time.Second)
+	if runB.Status != model.StatusCancelled {
+		t.Fatalf("run B status = %s, want cancelled", runB.Status)
+	}
+	if runB.Reason != "cancelled via API" {
+		t.Errorf("run B reason = %q, want %q", runB.Reason, "cancelled via API")
+	}
+	// The queued run never started; its jobs and steps settle as skipped.
+	for _, jr := range runB.Jobs {
+		if !jr.Status.Terminal() {
+			t.Errorf("job %s status = %s, want terminal", jr.Name, jr.Status)
+		}
+		for _, sr := range jr.Steps {
+			if !sr.Status.Terminal() {
+				t.Errorf("job %s step %d status = %s, want terminal", jr.Name, sr.Index, sr.Status)
+			}
+		}
+	}
+
+	// A was untouched by B's cancel; stop it too and drain.
+	if !r.Cancel(resA.RunID, "cancelled via API") {
+		t.Fatal("Cancel returned false for run A")
+	}
+	waitRun(t, st, resA.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+}
+
+func TestCancelUnknownRun(t *testing.T) {
+	r, _ := newCancelTestRunner(t, 1)
+	if r.Cancel("no-such-run", "cancelled via API") {
+		t.Fatal("Cancel of an unknown run should return false")
+	}
+}
+
+// --- Concurrency groups -------------------------------------------------------
+
+const groupSleepPipeline = `name: ci
+on: { push: { branches: [main] } }
+concurrency:
+  group: g-${{ branch }}
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`
+
+// waitGroupWaiter polls until runID is the registered waiter of the group, so
+// a later trigger deterministically supersedes it (enter order, not trigger
+// order, decides who supersedes whom).
+func waitGroupWaiter(t *testing.T, r *Runner, key, runID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		r.groups.mu.Lock()
+		e := r.groups.groups[key]
+		ok := e != nil && e.pending != nil && e.pending.runID == runID
+		r.groups.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s never became the waiter of group %q", runID, key)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestGroupSupersedesQueuedRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, groupSleepPipeline)
+	r, st := newCancelTestRunner(t, 4)
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+	groupKey := repo + "\x00" + "g-main"
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	runA := waitStatus(t, st, resA.RunID, model.StatusRunning, 15*time.Second)
+	if runA.ConcurrencyGroup != "g-main" {
+		t.Fatalf("run A concurrency group = %q, want g-main", runA.ConcurrencyGroup)
+	}
+
+	// B queues behind A in the group (holding no run slot: MaxRuns is 4).
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	waitGroupWaiter(t, r, groupKey, resB.RunID, 15*time.Second)
+
+	// C supersedes B: only the newest waiter survives.
+	resC, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger C: %v", err)
+	}
+	runB := waitRun(t, st, resB.RunID, 15*time.Second)
+	if runB.Status != model.StatusCancelled {
+		t.Fatalf("run B status = %s, want cancelled", runB.Status)
+	}
+	if want := "superseded by run " + resC.RunID; runB.Reason != want {
+		t.Errorf("run B reason = %q, want %q", runB.Reason, want)
+	}
+
+	// Without cancel-in-progress A kept running; once it stops, C executes.
+	if got, _ := st.GetRun(resA.RunID); got.Status != model.StatusRunning {
+		t.Fatalf("run A status = %s, want still running", got.Status)
+	}
+	if !r.Cancel(resA.RunID, "cancelled via API") {
+		t.Fatal("Cancel A")
+	}
+	waitRun(t, st, resA.RunID, 15*time.Second)
+	waitStatus(t, st, resC.RunID, model.StatusRunning, 15*time.Second)
+	if !r.Cancel(resC.RunID, "cancelled via API") {
+		t.Fatal("Cancel C")
+	}
+	waitRun(t, st, resC.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+
+	// The registry self-cleans: once no trigger is in flight, every
+	// high-water mark is retired (no per-branch memory growth).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.groups.mu.Lock()
+		n := len(r.groups.seen) + len(r.groups.inflight) + len(r.groups.groups)
+		r.groups.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("group registry leaked %d entries after all runs settled", n)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestGroupCancelInProgressCancelsRunningRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// No group: key — exercises the implicit <name>-<branch> group too.
+	repo, sha := initGitRepo(t, `name: ci
+on: { push: { branches: [main] } }
+concurrency:
+  cancel-in-progress: true
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`)
+	r, st := newCancelTestRunner(t, 4)
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	runA := waitStatus(t, st, resA.RunID, model.StatusRunning, 15*time.Second)
+	if runA.ConcurrencyGroup != "ci-main" {
+		t.Fatalf("run A concurrency group = %q, want the implicit ci-main", runA.ConcurrencyGroup)
+	}
+
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	runA = waitRun(t, st, resA.RunID, 15*time.Second)
+	if runA.Status != model.StatusCancelled {
+		t.Fatalf("run A status = %s, want cancelled", runA.Status)
+	}
+	if want := "superseded by run " + resB.RunID; runA.Reason != want {
+		t.Errorf("run A reason = %q, want %q", runA.Reason, want)
+	}
+
+	waitStatus(t, st, resB.RunID, model.StatusRunning, 15*time.Second)
+	if !r.Cancel(resB.RunID, "cancelled via API") {
+		t.Fatal("Cancel B")
+	}
+	waitRun(t, st, resB.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+}
+
+func TestGroupsAreRepoScoped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Identical literal group in two different repos: both run concurrently.
+	pipeline := `name: ci
+on: { push: { branches: [main] } }
+concurrency:
+  group: shared
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`
+	repo1, sha1 := initGitRepo(t, pipeline)
+	repo2, sha2 := initGitRepo(t, pipeline)
+	r, st := newCancelTestRunner(t, 2)
+
+	res1, err := r.Trigger(model.Event{Kind: model.EventPush, RepoURL: repo1, SHA: sha1, Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger repo1: %v", err)
+	}
+	res2, err := r.Trigger(model.Event{Kind: model.EventPush, RepoURL: repo2, SHA: sha2, Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger repo2: %v", err)
+	}
+	waitStatus(t, st, res1.RunID, model.StatusRunning, 15*time.Second)
+	waitStatus(t, st, res2.RunID, model.StatusRunning, 15*time.Second)
+
+	r.Cancel(res1.RunID, "cancelled via API")
+	r.Cancel(res2.RunID, "cancelled via API")
+	waitRun(t, st, res1.RunID, 15*time.Second)
+	waitRun(t, st, res2.RunID, 15*time.Second)
+	waitSlotsFree(t, r, 5*time.Second)
+}
+
+func TestUngroupedRunsExecuteIndependently(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	r, st := newCancelTestRunner(t, 4)
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	resA, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger A: %v", err)
+	}
+	resB, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger B: %v", err)
+	}
+	for _, id := range []string{resA.RunID, resB.RunID} {
+		run := waitRun(t, st, id, 15*time.Second)
+		if run.Status != model.StatusSuccess {
+			t.Fatalf("run %s status = %s, want success (no concurrency key)", id, run.Status)
+		}
+		if run.ConcurrencyGroup != "" {
+			t.Errorf("run %s concurrency group = %q, want empty", id, run.ConcurrencyGroup)
+		}
+	}
+}
+
+// registrySizes reads the group registry's accounting under its lock.
+func registrySizes(r *Runner) (inflight, seen int) {
+	r.groups.mu.Lock()
+	defer r.groups.mu.Unlock()
+	return len(r.groups.inflight), len(r.groups.seen)
+}
+
+// TestGroupRegistryDrainsWhileRunExecutes pins the trigger-resolution fix: a
+// trigger retires from the order accounting when it enters its group (or
+// resolves ungrouped), NOT when the run finishes — otherwise a single hung
+// step (step_timeout defaults to 0) would pin every newer branch-group mark
+// in memory for as long as it runs.
+func TestGroupRegistryDrainsWhileRunExecutes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	for _, tc := range []struct {
+		name, pipeline string
+	}{
+		{"grouped", groupSleepPipeline},
+		{"ungrouped", sleepPipeline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, sha := initGitRepo(t, tc.pipeline)
+			r, st := newCancelTestRunner(t, 2)
+			ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+			res, err := r.Trigger(ev)
+			if err != nil {
+				t.Fatalf("Trigger: %v", err)
+			}
+			waitStatus(t, st, res.RunID, model.StatusRunning, 15*time.Second)
+			// Entering the group (or resolving ungrouped) strictly precedes
+			// execution, so by Running the accounting must already be empty.
+			if inflight, seen := registrySizes(r); inflight != 0 || seen != 0 {
+				t.Errorf("inflight=%d seen=%d while the run executes, want 0/0", inflight, seen)
+			}
+			if !r.Cancel(res.RunID, "cancelled via API") {
+				t.Fatal("Cancel")
+			}
+			waitRun(t, st, res.RunID, 15*time.Second)
+			waitSlotsFree(t, r, 5*time.Second)
 		})
 	}
 }

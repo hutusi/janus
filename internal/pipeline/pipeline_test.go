@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hutusi/janus/internal/model"
 )
 
 // --- Valid pipelines ---------------------------------------------------------
@@ -79,12 +81,14 @@ func TestParseRejectsOversizedPipelines(t *testing.T) {
 
 	longName := "name: ci\non: { push: {} }\njobs:\n  " + strings.Repeat("j", maxJobNameLen+1) + ":\n    steps:\n      - run: echo hi\n"
 	longCmd := "name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: " + strings.Repeat("x", maxCommandBytes+1) + "\n"
+	longGroup := "name: ci\non: { push: {} }\nconcurrency: { group: " + strings.Repeat("g", maxGroupLen+1) + " }\njobs:\n  build:\n    steps:\n      - run: echo hi\n"
 
 	cases := map[string]struct{ src, want string }{
 		"too many jobs":  {manyJobs.String(), "too many jobs"},
 		"too many steps": {manySteps.String(), "too many steps"},
 		"long job name":  {longName, "job name too long"},
 		"long command":   {longCmd, "`run` is too long"},
+		"long group":     {longGroup, "`concurrency.group` is too long"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -258,6 +262,68 @@ func TestParseValidFixtureFile(t *testing.T) {
 }
 
 // --- Rejected pipelines ------------------------------------------------------
+
+func TestParseConcurrency(t *testing.T) {
+	const src = `
+name: deploy
+on: { push: {} }
+concurrency:
+  group: deploy-${{ branch }}
+  cancel-in-progress: true
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`
+	wf, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wf.Concurrency == nil {
+		t.Fatal("Concurrency = nil, want populated")
+	}
+	if wf.Concurrency.Group != "deploy-${{ branch }}" {
+		t.Errorf("group = %q, want the raw template", wf.Concurrency.Group)
+	}
+	if !wf.Concurrency.CancelInProgress {
+		t.Error("cancel-in-progress = false, want true")
+	}
+
+	const jobs = "jobs: { a: { steps: [{ run: echo hi }] } }\n"
+	cases := map[string]struct {
+		src  string
+		want *model.Concurrency
+	}{
+		"absent key": {"name: ci\non: { push: {} }\n" + jobs, nil},
+		// A bare `concurrency:` decodes to null — treated as absent, and the
+		// docs call out the footgun.
+		"null value":    {"name: ci\non: { push: {} }\nconcurrency:\n" + jobs, nil},
+		"empty mapping": {"name: ci\non: { push: {} }\nconcurrency: {}\n" + jobs, &model.Concurrency{}},
+		"cancel only":   {"name: ci\non: { push: {} }\nconcurrency: { cancel-in-progress: true }\n" + jobs, &model.Concurrency{CancelInProgress: true}},
+		"ref event env tokens": {
+			"name: ci\non: { push: {} }\nenv: { STAGE: prod }\nconcurrency: { group: \"${{ ref }}-${{ event }}-${{ env.STAGE }}\" }\n" + jobs,
+			&model.Concurrency{Group: "${{ ref }}-${{ event }}-${{ env.STAGE }}"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			wf, err := Parse([]byte(tc.src))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			switch {
+			case tc.want == nil:
+				if wf.Concurrency != nil {
+					t.Fatalf("Concurrency = %+v, want nil", wf.Concurrency)
+				}
+			case wf.Concurrency == nil:
+				t.Fatalf("Concurrency = nil, want %+v", tc.want)
+			case *wf.Concurrency != *tc.want:
+				t.Fatalf("Concurrency = %+v, want %+v", wf.Concurrency, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseRejects(t *testing.T) {
 	tests := []struct {
@@ -592,6 +658,97 @@ jobs:
       - run: echo hi
 `,
 			wantInErr: "letters, digits",
+		},
+		{
+			name: "concurrency group with sha",
+			src: `
+name: ci
+on: { push: {} }
+concurrency: { group: "ci-${{ sha }}" }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "would make every run its own group",
+		},
+		{
+			name: "concurrency group with short_sha",
+			src: `
+name: ci
+on: { push: {} }
+concurrency: { group: "ci-${{ short_sha }}" }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "${{ short_sha }} would make every run its own group",
+		},
+		{
+			name: "concurrency group with unknown token",
+			src: `
+name: ci
+on: { push: {} }
+concurrency: { group: "${{ github.run_id }}" }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "unsupported interpolation",
+		},
+		{
+			name: "concurrency group with unterminated placeholder",
+			src: `
+name: ci
+on: { push: {} }
+concurrency: { group: "ci-${{ branch" }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "unterminated ${{",
+		},
+		{
+			name: "concurrency with snake_case typo",
+			src: `
+name: ci
+on: { push: {} }
+concurrency: { group: ci, cancel_in_progress: true }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: `unsupported key "cancel_in_progress"`,
+		},
+		{
+			name: "concurrency string shorthand",
+			src: `
+name: ci
+on: { push: {} }
+concurrency: deploy
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "cannot unmarshal",
+		},
+		{
+			name: "concurrency on a job",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    concurrency: { group: ci }
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "only supported at the workflow (top) level",
 		},
 		{
 			name: "multiple YAML documents",

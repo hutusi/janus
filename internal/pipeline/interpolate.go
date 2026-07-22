@@ -41,6 +41,21 @@ func validateInterpolation(wf *model.Workflow) error {
 		return nil
 	}
 
+	if wf.Concurrency != nil {
+		if err := check("concurrency.group", wf.Concurrency.Group); err != nil {
+			return err
+		}
+		// sha/short_sha are valid tokens elsewhere, but in a group key every
+		// run would form its own group — silently disabling the serialization
+		// the key exists to provide. Reject rather than obey.
+		for _, m := range placeholderRe.FindAllStringSubmatch(wf.Concurrency.Group, -1) {
+			tok := strings.TrimSpace(m[1])
+			if tok == "sha" || tok == "short_sha" {
+				return fmt.Errorf("concurrency.group: ${{ %s }} would make every run its own group, "+
+					"disabling concurrency control; use branch, ref, event, or env.NAME", tok)
+			}
+		}
+	}
 	for _, k := range sortedKeys(wf.Env) {
 		if err := check("env."+k, wf.Env[k]); err != nil {
 			return err

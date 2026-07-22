@@ -24,6 +24,7 @@ const (
 	maxStepsPerJob  = 256
 	maxJobNameLen   = 256
 	maxCommandBytes = 64 << 10
+	maxGroupLen     = 256
 )
 
 // allowedShells is the closed set of step `shell:` values. "" selects the OS
@@ -57,6 +58,9 @@ func validate(wf *model.Workflow) error {
 		if tr.f != nil && tr.f.Branches != nil && tr.f.Ignore != nil {
 			return fmt.Errorf("`on.%s` cannot set both `branches` and `branches-ignore`", tr.key)
 		}
+	}
+	if wf.Concurrency != nil && len(wf.Concurrency.Group) > maxGroupLen {
+		return fmt.Errorf("`concurrency.group` is too long: %d characters (max %d)", len(wf.Concurrency.Group), maxGroupLen)
 	}
 	if len(wf.Jobs) == 0 {
 		return errors.New("at least one job is required under `jobs`")
