@@ -152,6 +152,19 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, job *model.Job, jr *
 	if timedOut {
 		_, _ = fmt.Fprintf(w, "\njanus: step timed out after %s\n", e.stepTimeout)
 	}
+	var ee *exec.ExitError
+	if runErr != nil && !errors.As(runErr, &ee) && ctx.Err() == nil && !timedOut {
+		// The process never ran (missing working directory, absent shell
+		// binary) — without this line the step log would be empty and the
+		// only evidence a bare exit -1. Go blames the shell binary
+		// ("fork/exec /bin/sh: ...") even when the real cause is the working
+		// directory, so name the directory explicitly when it is the problem.
+		if _, serr := os.Stat(dir); serr != nil {
+			_, _ = fmt.Fprintf(w, "janus: working-directory: %v\n", serr)
+		} else {
+			_, _ = fmt.Fprintf(w, "janus: %v\n", runErr)
+		}
+	}
 	code, status := classify(ctx, timedOut, runErr)
 	rs.update(func() {
 		sr.Status = status
@@ -237,8 +250,14 @@ func (e *Engine) prepare(rs *runState, job *model.Job, step model.Step) (cmdStr,
 	if cmdStr, err = ictx.Interpolate(step.Run, maxInterpolatedCmd); err != nil {
 		return "", "", nil, fmt.Errorf("run: %w", err)
 	}
-	wd, err := ictx.Interpolate(step.WorkingDir, maxInterpolatedDir)
-	if err != nil {
+	// The job's working-directory is the default for its steps; a step's own
+	// value wins. Chosen before interpolation, because resolveDir reads "" as
+	// the workspace root.
+	wd := step.WorkingDir
+	if wd == "" {
+		wd = job.WorkingDir
+	}
+	if wd, err = ictx.Interpolate(wd, maxInterpolatedDir); err != nil {
 		return "", "", nil, fmt.Errorf("working-directory: %w", err)
 	}
 	dir, err = resolveDir(rs.workDir, wd)

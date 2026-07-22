@@ -107,7 +107,7 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 
 | Method & path                     | Purpose |
 |-----------------------------------|---------|
-| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref","pipeline_path"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist; `pipeline_path` optionally picks a committed pipeline file by name relative to the pipeline directory, e.g. `"release.yml"` → `.janus/release.yml`). Unknown JSON fields are a `400`; when the run queue is full, `503` with `Retry-After` — retry later. |
+| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref","pipeline_path"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist; `pipeline_path` optionally picks a committed pipeline file by name relative to the pipeline directory, e.g. `"release.yml"` → `.janus/release.yml`). The 202 is written before the checkout; poll `GET /api/runs/{id}` for the outcome — a checkout/pipeline failure appears there as a `failed` run with a reason. Unknown JSON fields are a `400`; when the run queue is full, `503` with `Retry-After` — retry later. |
 | `GET /api/runs`                   | List run **summaries**, newest first (`?limit=&offset=` for paging); no per-step `jobs` — see the detail endpoint |
 | `GET /api/runs/{id}`              | Run detail (job/step statuses, exit codes) |
 | `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream |
@@ -137,8 +137,10 @@ janus serve --data-dir /var/lib/janus --gitlab-secret "$(openssl rand -hex 24)"
 
 Push and merge-request events trigger runs that are matched against each
 workflow's `on:` filters. Any number of repositories can share one server —
-each runs its own committed pipeline. With `--data-dir`, run history and logs
-survive restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
+each runs its own committed pipeline, and a hook URL's `?pipeline_path=`
+query parameter picks a different committed file (register multiple hooks to
+route to multiple pipelines). With `--data-dir`, run history and logs survive
+restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
 
 ## Pipeline format (target)
 

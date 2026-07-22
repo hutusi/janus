@@ -1,25 +1,27 @@
-# Release pipeline — on every update to master/main (e.g. a merged merge
-# request), build, then publish the output to a separate "pages" repo.
+# One pipeline for every branch (the default .janus/ci.yml): build always,
+# release only on master/main.
 #
-# Janus ignores the GitLab MR "merge" action and fires on the resulting push, so the
-# trigger is `push`, not `merge_request`. Janus can't tell a merge-commit push from a
-# direct push — enforce "merged MR only" with branch protection on master/main.
+# GitLab sends a Push Hook for each pushed branch; `on: push` with no filter
+# accepts them all. The `deploy` job carries a job-level branch filter
+# (`branches: [master, main]`) — on any other branch it is recorded as
+# `skipped` while `build` still runs, so one file replaces a build/release
+# pipeline pair with no duplicated build job.
 #
-# Same build job as build.yml, restricted to master/main, plus a deploy job — the
-# release half of the split model (see README.md; the merged ci.yml avoids the
-# duplicated build job). All jobs in a run share one workspace directory, so
-# `deploy` sees the `out/` from `build`.
+# Releases fire on a push to master/main (e.g. a merged merge request). Janus
+# ignores the GitLab MR "merge" action and fires on the resulting push, and it
+# can't tell a merge-commit push from a direct push — enforce "merged MR only"
+# with branch protection. All jobs in a run share one workspace directory, so
+# `deploy` sees the `out/` produced by `build`.
 #
-# Auth: Janus forwards only PATH/HOME/LANG/LC_ALL/TZ/TMPDIR to steps (no secrets, no
-# SSH_AUTH_SOCK). Configure a passphraseless SSH deploy key for the Janus host user
-# (~/.ssh) with push access to PAGES_REPO_URL. The URL/branch below are not secrets.
-# The PAGES_BRANCH must already exist in the pages repo.
-name: release
+# Auth: Janus forwards only PATH/HOME/LANG/LC_ALL/TZ/TMPDIR to steps (no
+# secrets, no SSH_AUTH_SOCK). Configure a passphraseless SSH deploy key for the
+# Janus host user (~/.ssh) with push access to PAGES_REPO_URL. The URL/branch
+# below are not secrets. The PAGES_BRANCH must already exist in the pages repo.
+name: ci
 on:
-  push:
-    branches: [master, main]
+  push: {}
 env:
-  OUT_DIR: out
+  OUT_DIR: out            # build output directory to verify
   PAGES_REPO_URL: "git@gitlab.example.com:your-group/your-pages.git"
   PAGES_BRANCH: "main"
   GIT_USER_NAME: "Janus CI"
@@ -27,8 +29,9 @@ env:
 jobs:
   build:
     steps:
-      # The workspace is already the exact verified commit of this event —
-      # build it as-is so ${{ sha }} / JANUS_SHA always identify what ran.
+      # The workspace is already the exact verified commit of this event
+      # (shallow, detached HEAD) — build it as-is so ${{ sha }} / JANUS_SHA
+      # always identify what ran; a newer push triggers its own run.
       # Install dependencies and build.
       - run: npm install && npm run build
       # Verify the build output exists and is non-empty.
@@ -38,6 +41,7 @@ jobs:
           [ -n "$(ls -A "$OUT_DIR")" ]
   deploy:
     needs: [build]
+    branches: [master, main]
     steps:
       # Update the pages repo: a fresh shallow clone of the target branch.
       - run: |

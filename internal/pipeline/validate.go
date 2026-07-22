@@ -73,6 +73,10 @@ func validate(wf *model.Workflow) error {
 		if len(name) > maxJobNameLen {
 			return fmt.Errorf("job name too long: %d characters (max %d)", len(name), maxJobNameLen)
 		}
+		// Same allowlist-or-denylist rule as the on: filters.
+		if job.Filter != nil && job.Filter.Branches != nil && job.Filter.Ignore != nil {
+			return fmt.Errorf("job %q cannot set both `branches` and `branches-ignore`", name)
+		}
 		if len(job.Steps) == 0 {
 			return fmt.Errorf("job %q: at least one step is required", name)
 		}

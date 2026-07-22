@@ -186,6 +186,67 @@ jobs:
 	}
 }
 
+func TestParseJobBranchFilter(t *testing.T) {
+	const src = `
+name: ci
+on:
+  push: {}
+jobs:
+  build:
+    steps:
+      - run: echo build
+  deploy:
+    needs: [build]
+    branches: [master, main]
+    steps:
+      - run: echo deploy
+  nightly:
+    branches-ignore: [main]
+    steps:
+      - run: echo nightly
+`
+	wf, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wf.Jobs["build"].Filter != nil {
+		t.Error("job without branches keys should have a nil filter")
+	}
+	deploy := wf.Jobs["deploy"].Filter
+	if deploy == nil || !deploy.Matches("main") || deploy.Matches("feature/x") {
+		t.Errorf("deploy filter = %+v, want an allowlist matching only master/main", deploy)
+	}
+	nightly := wf.Jobs["nightly"].Filter
+	if nightly == nil || nightly.Matches("main") || !nightly.Matches("feature/x") {
+		t.Errorf("nightly filter = %+v, want a denylist excluding main", nightly)
+	}
+}
+
+func TestParseJobWorkingDir(t *testing.T) {
+	const src = `
+name: ci
+on:
+  push: {}
+jobs:
+  build:
+    working-directory: ./app
+    steps:
+      - run: npm ci
+      - run: npm test
+        working-directory: ./app/tests
+`
+	wf, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := wf.Jobs["build"].WorkingDir; got != "./app" {
+		t.Errorf("job working-directory = %q, want ./app", got)
+	}
+	if got := wf.Jobs["build"].Steps[1].WorkingDir; got != "./app/tests" {
+		t.Errorf("step working-directory = %q, want ./app/tests", got)
+	}
+}
+
 func TestParseValidFixtureFile(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "pipelines", "valid.yml"))
 	if err != nil {
@@ -257,6 +318,33 @@ jobs:
       - run: echo hi
 `,
 			wantInErr: "`on.merge_request` cannot set both",
+		},
+		{
+			name: "unsupported interpolation in job working-directory",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    working-directory: ${{ nope }}
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "unsupported interpolation",
+		},
+		{
+			name: "branches and branches-ignore on a job",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    branches: [main]
+    branches-ignore: [dev]
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "job \"a\" cannot set both",
 		},
 		{
 			name: "matrix/strategy",

@@ -1,62 +1,92 @@
 # Example pipelines
 
-Two ready-to-copy [Janus](../README.md) pipelines for a typical npm / static-site
-project. See [docs/pipeline-reference.md](../docs/pipeline-reference.md) for the full
-grammar.
+Ready-to-copy [Janus](../README.md) pipelines for a typical npm / static-site
+project, in two models. See
+[docs/pipeline-reference.md](../docs/pipeline-reference.md) for the full grammar.
 
-| File | What it does |
-|------|--------------|
-| [`build.yml`](build.yml) | On every push to any branch **except** `master`, builds the pushed branch and verifies the `out/` output. |
-| [`release.yml`](release.yml) | On every update to `master`, the same build, then publishes `out/` to a separate "pages" repository. |
+| File | Model | What it does |
+|------|-------|--------------|
+| [`ci.yml`](ci.yml) | merged (recommended) | On every push: builds the pushed branch and verifies the `out/` output; on `master`/`main` additionally publishes `out/` to a separate "pages" repository. |
+| [`build.yml`](build.yml) | split | On every push to any branch **except** `master`/`main`, builds the pushed branch. |
+| [`release.yml`](release.yml) | split | On every update to `master`/`main`, the same build, then publishes `out/`. |
 
-## How Janus uses these
+## Model A (recommended): one merged file with a job-level branch filter
 
-Janus loads **one** pipeline file per repository per trigger — by default
-`.janus/ci.yml` (configurable with `--pipeline-path`). So pick the model that fits:
+`ci.yml` triggers on **every** push (`on: push` with no filter). The `build` job
+always runs; the `deploy` job carries a **job-level branch filter**:
 
-- **Build every branch on CI, release on demand** — copy `build.yml` to `.janus/ci.yml`
-  so a webhook builds each non-master push. **Pushes to `master` then start no run at
-  all** (the webhook answers `200 {"status":"ignored"}`). Publish explicitly when you
-  want to:
-
-  ```sh
-  janus run --file .janus/release.yml .
-  ```
-
-  or keep both files in `.janus/` and trigger the release through the API's
-  `pipeline_path` override (`{"pipeline_path": "release.yml", ...}`).
-
-- **Build + deploy on every master merge** — use `release.yml` as your `.janus/ci.yml`.
-
-## Triggers: a denylist for CI, `push` for releases
-
-`build.yml` uses `branches-ignore: [master]` — an exact-match **denylist**, so every
-other pushed branch builds with no list to maintain. GitLab sends a Push Hook per
-pushed branch; Janus matches the branch against the filter and builds that branch.
-
-`release.yml` still fires on a **push to `master`**. When a merge request is merged,
-GitLab sends a Push Hook to the target branch — Janus runs on that. Janus deliberately
-*ignores* the MR `merge` action (it only acts on `open`/`reopen`/`update`), so
-`on: merge_request` would **not** fire when an MR lands. Janus can't distinguish a
-merge-commit push from a direct push to `master` — if you want runs only for merged
-MRs, protect `master` so it can't be pushed to directly.
-
-## "Update the branch to the latest"
-
-Janus checks out the triggering commit as a **shallow (`--depth 1`), detached HEAD** —
-which already *is* the latest tip of the pushed branch for a push event.
-`git checkout <branch>` or `git pull` would fail (that branch isn't in the shallow
-clone), so the build step uses:
-
-```sh
-git fetch --depth 1 origin "${{ branch }}"
-git reset --hard FETCH_HEAD
+```yaml
+deploy:
+  needs: [build]
+  branches: [master, main]
 ```
 
-(`release.yml` pins `master` instead of interpolating the branch.)
+On a feature branch, `deploy` is recorded as `skipped` (visible on the run in
+the dashboard and API) while `build` executes; on `master`/`main` both run.
+Job filters use the same `branches` / `branches-ignore` syntax and matching as
+`on:` filters, and a job that `needs` a branch-skipped job is skipped too.
+There is deliberately no `if:` or expression language — routing stays
+declarative.
+
+Copy the file to `.janus/ci.yml` in your repository and it works with the
+default configuration; one webhook is enough.
+
+To force the release path by hand (the branch decides what runs):
+
+```sh
+janus run --branch main .
+```
+
+or through the API: `POST /api/trigger` with `{"branch": "main", ...}`.
+
+## Model B: split files, selected per trigger
+
+`build.yml` and `release.yml` carry **complementary `on:` filters**
+(`branches-ignore: [master, main]` vs `branches: [master, main]`). Commit them
+as `.janus/ci.yml` and `.janus/release.yml`, then register **two webhooks** on
+the project (same URL + secret):
+
+- `https://janus.example.com/webhooks/gitlab` — runs the build file
+- `https://janus.example.com/webhooks/gitlab?pipeline_path=release.yml` — runs
+  the release file
+
+Every push is delivered to both hooks; each file's `on:` filter decides which
+one executes, and the non-matching side records a `skipped` run with the
+reason. Or skip the second webhook and release on demand:
+
+```sh
+janus run --file .janus/release.yml .
+```
+
+(or the API's `pipeline_path` field). The trade-off: the build job is
+duplicated across the two files — prefer Model A unless the pipelines are
+genuinely separate (different owners, schedules, or repos), which is also when
+`?pipeline_path=` earns its keep (e.g. a nightly maintenance file that should
+never run on push).
+
+## Releases: `push`, not `merge_request`
+
+The release fires on a **push to `master` or `main`**. When a merge request is
+merged, GitLab sends a Push Hook to the target branch — Janus runs on that.
+Janus deliberately *ignores* the MR `merge` action (it only acts on
+`open`/`reopen`/`update`), so `on: merge_request` would **not** fire when an MR
+lands. Janus can't distinguish a merge-commit push from a direct push — if you
+want runs only for merged MRs, protect the branch so it can't be pushed to
+directly.
+
+## Pinned checkouts: build what the event names
+
+Janus checks out the triggering commit as a **shallow (`--depth 1`), detached
+HEAD**, verified against the event's SHA — `${{ sha }}` / `JANUS_SHA` always
+identify exactly what ran, and a moved ref fails the run rather than silently
+building something else. Build that checkout **as-is**: do *not* re-fetch the
+branch tip in a step (`git fetch` + `reset --hard`), or the run may build a
+newer commit than its recorded SHA — a newer push triggers its own run anyway.
+(`git checkout <branch>` / `git pull` would fail regardless: the branch isn't
+in the shallow clone.)
 
 Each step runs from the workspace root via the step shell — `/bin/sh -c` by default
-on unix (these examples are POSIX; on Windows set `shell: sh`, or write cmd/PowerShell).
+on unix (the example is POSIX; on Windows set `shell: sh`, or write cmd/PowerShell).
 The filesystem persists across steps, but shell state (current directory, variables)
 does **not** — that's why the deploy steps use `git -C .pages-repo …` instead of `cd`.
 
@@ -70,7 +100,7 @@ the Janus service runs as (see [docs/deployment.md](../docs/deployment.md)):
    repo with **write** access.
 2. Place the private key in the Janus user's `~/.ssh/` and add the host to
    `~/.ssh/known_hosts` (a passphraseless key works without an agent).
-3. Set the knobs in `release.yml`'s `env:` — `PAGES_REPO_URL` (an SSH `git@…` URL),
+3. Set the knobs in the `env:` of `ci.yml` (or `release.yml`) — `PAGES_REPO_URL` (an SSH `git@…` URL),
    `PAGES_BRANCH` (must already exist), and the commit identity (`GIT_USER_NAME` /
    `GIT_USER_EMAIL`). These are not secrets.
 

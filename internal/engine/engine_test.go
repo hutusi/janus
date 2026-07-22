@@ -11,6 +11,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -153,6 +155,182 @@ jobs:
 	}
 	if got := jobRun(run, "test").Status; got != model.StatusSkipped {
 		t.Errorf("test status = %s, want skipped (dependent of failed job)", got)
+	}
+}
+
+func TestRunJobBranchFilterSkips(t *testing.T) {
+	const src = `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: "true"
+  deploy:
+    needs: [build]
+    branches: [master, main]
+    steps:
+      - run: "true"
+`
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), mustParse(t, src),
+		model.Event{Kind: model.EventPush, Branch: "feature/x"}, t.TempDir())
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("feature run status = %s, want success (a branch-skipped job is not a failure)", run.Status)
+	}
+	if got := jobRun(run, "build").Status; got != model.StatusSuccess {
+		t.Errorf("build status = %s, want success", got)
+	}
+	deploy := jobRun(run, "deploy")
+	if deploy.Status != model.StatusSkipped {
+		t.Errorf("deploy status = %s, want skipped on a non-release branch", deploy.Status)
+	}
+	for _, sr := range deploy.Steps {
+		if sr.Status != model.StatusSkipped {
+			t.Errorf("deploy step %d status = %s, want skipped", sr.Index, sr.Status)
+		}
+	}
+
+	run, _ = New(st).Run(context.Background(), mustParse(t, src),
+		model.Event{Kind: model.EventPush, Branch: "main"}, t.TempDir())
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("main run status = %s, want success", run.Status)
+	}
+	if got := jobRun(run, "deploy").Status; got != model.StatusSuccess {
+		t.Errorf("deploy status on main = %s, want success", got)
+	}
+}
+
+func TestRunJobBranchFilterSkipPropagatesToNeeds(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  lint:
+    steps:
+      - run: "true"
+  build:
+    branches: [main]
+    steps:
+      - run: "true"
+  verify:
+    needs: [build]
+    steps:
+      - run: "true"
+`)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf,
+		model.Event{Kind: model.EventPush, Branch: "dev"}, t.TempDir())
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if got := jobRun(run, "lint").Status; got != model.StatusSuccess {
+		t.Errorf("lint status = %s, want success", got)
+	}
+	if got := jobRun(run, "build").Status; got != model.StatusSkipped {
+		t.Errorf("build status = %s, want skipped (filter)", got)
+	}
+	if got := jobRun(run, "verify").Status; got != model.StatusSkipped {
+		t.Errorf("verify status = %s, want skipped (needs a branch-skipped job)", got)
+	}
+}
+
+func TestRunAllJobsBranchFilteredSkipsRun(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  deploy:
+    branches: [main]
+    steps:
+      - run: "true"
+`)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf,
+		model.Event{Kind: model.EventPush, Branch: "dev"}, t.TempDir())
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped when every job is filtered out", run.Status)
+	}
+	if !strings.Contains(run.Reason, "no job matches") {
+		t.Errorf("run reason = %q, want it to explain the branch filter", run.Reason)
+	}
+}
+
+func TestRunJobWorkingDirDefault(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    working-directory: a
+    steps:
+      - run: pwd
+      - run: pwd
+        working-directory: b
+`)
+	ws := t.TempDir()
+	for _, d := range []string{"a", "b"} {
+		if err := os.Mkdir(filepath.Join(ws, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, ws)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if got := strings.TrimSpace(readStepLog(t, st, run.ID, "build", 0)); !strings.HasSuffix(got, "/a") {
+		t.Errorf("step 0 pwd = %q, want the job default subdir a", got)
+	}
+	if got := strings.TrimSpace(readStepLog(t, st, run.ID, "build", 1)); !strings.HasSuffix(got, "/b") {
+		t.Errorf("step 1 pwd = %q, want the step override subdir b", got)
+	}
+}
+
+func TestRunMissingWorkingDirNamesError(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    working-directory: missing-dir
+    steps:
+      - run: pwd
+`)
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, t.TempDir())
+	if run.Status != model.StatusFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	step := jobRun(run, "build").Steps[0]
+	if step.Status != model.StatusFailed || step.ExitCode != -1 {
+		t.Fatalf("step = %s exit %d, want failed exit -1", step.Status, step.ExitCode)
+	}
+	// The process never started, so the log's only content must be the
+	// janus-written reason — previously it was empty, leaving a bare exit -1.
+	log := readStepLog(t, st, run.ID, "build", 0)
+	if !strings.Contains(log, "janus:") || !strings.Contains(log, "missing-dir") {
+		t.Errorf("step log = %q, want a janus: line naming the missing directory", log)
+	}
+}
+
+func TestResolveDir(t *testing.T) {
+	ws := t.TempDir()
+	if got, err := resolveDir(ws, ""); err != nil || got != ws {
+		t.Errorf("resolveDir(ws, \"\") = %q, %v; want the workspace root", got, err)
+	}
+	if got, err := resolveDir(ws, "sub/dir"); err != nil || got != filepath.Join(ws, "sub", "dir") {
+		t.Errorf("resolveDir(ws, sub/dir) = %q, %v; want the joined path", got, err)
+	}
+	for _, escape := range []string{"..", "../outside", "a/../../outside"} {
+		if _, err := resolveDir(ws, escape); err == nil {
+			t.Errorf("resolveDir(ws, %q) should reject escaping the workspace", escape)
+		}
+	}
+	// An absolute path is anchored under the workspace by filepath.Join, not
+	// taken literally — "/etc" runs in <workspace>/etc, never the host's /etc.
+	if got, err := resolveDir(ws, "/etc"); err != nil || got != filepath.Join(ws, "etc") {
+		t.Errorf("resolveDir(ws, /etc) = %q, %v; want it anchored under the workspace", got, err)
 	}
 }
 

@@ -1,10 +1,13 @@
-// Package runner is the coordinator between a trigger event and a pipeline run:
-// it checks out the repository at the event's commit, reads and parses the
-// pipeline file from that checkout (the configured path, or the event's
-// per-trigger override), matches the event against the workflow's `on:` filters
-// (manual triggers always match), records a run, and executes it
-// asynchronously. It is the single entry point shared by the manual trigger and
-// the webhook handlers.
+// Package runner is the coordinator between a trigger event and a pipeline
+// run: it validates the event, records a pending run, and then — in the
+// background, so callers can answer their client before any git work — checks
+// out the repository at the event's commit, reads and parses the pipeline file
+// from that checkout (the configured path, or the event's per-trigger
+// override), matches the event against the workflow's `on:` filters (manual
+// triggers always match), and executes the run. Pre-execution outcomes
+// (checkout/parse failure, non-matching event) are recorded on the run. It is
+// the single entry point shared by the manual trigger and the webhook
+// handlers.
 package runner
 
 import (
@@ -83,13 +86,11 @@ type Options struct {
 	Logger       *slog.Logger        // for background events (prune failures); defaults to slog.Default()
 }
 
-// Result reports the outcome of a trigger. Started is false (with a Reason)
-// when the event did not match the workflow's `on:` filters — that is not an
-// error, just a no-op.
+// Result reports an accepted trigger: the recorded run's ID. The run is
+// pending at this point; its outcome (including checkout/parse failures and
+// non-matching events) is recorded on the run itself.
 type Result struct {
-	RunID   string
-	Started bool
-	Reason  string
+	RunID string
 }
 
 // New creates a Runner from opts.
@@ -300,9 +301,9 @@ func (r *Runner) Shutdown(grace time.Duration) {
 }
 
 // checkoutTimeout bounds a single checkout so a stalled or malicious git
-// server cannot pin an HTTP handler and an admission slot indefinitely. It is
-// a var (not a const) only so tests can shrink it; 10m clears a large shallow
-// clone with margin.
+// server cannot pin an admission slot (and its run stuck pending)
+// indefinitely. It is a var (not a const) only so tests can shrink it; 10m
+// clears a large shallow clone with margin.
 var checkoutTimeout = 10 * time.Minute
 
 // Event-field length caps. These values come from the webhook body (up to
@@ -338,52 +339,88 @@ func validateEvent(ev model.Event) error {
 	return nil
 }
 
-// Trigger checks out the repo at ev's commit, parses the pipeline (the
-// configured path, or ev.PipelinePath when set), and — if the event matches —
-// records and asynchronously executes a run. Fresh workspaces are removed when
-// the run finishes; under the persistent strategy the repo's reusable
-// workspace is updated in place and kept (a concurrent run of the same repo
-// falls back to a fresh workspace). A repo not on the allowlist returns
-// ErrRepoNotAllowed (before any disk work); an invalid pipeline path and
-// checkout/parse failures return an error; a non-matching event returns
-// Result{Started: false} with nil error.
+// Trigger validates ev, records a pending run for it, and returns — the
+// checkout, pipeline parse, `on:` match, and execution all happen in the
+// background, with the outcome recorded on the run (StatusFailed with a Reason
+// for checkout/parse failures, StatusSkipped for a non-matching event).
+// Callers can answer their client immediately with the run ID; webhook
+// platforms with short delivery timeouts never race the checkout.
 //
-// The checkout runs under a context cancelled by ctx (the request), r.ctx
-// (Shutdown), or a deadline — whichever fires first. Honoring request
-// cancellation matters: if a webhook client times out mid-checkout, cancelling
-// here means no run is started for its retry to duplicate. Execution, by
-// contrast, uses r.ctx so it survives the request returning.
-func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
+// Synchronous, so still HTTP-mappable: ErrRepoNotAllowed (403, before any
+// other work), over-long event fields and an invalid pipeline path (400), the
+// admission cap (ErrBusy, 503), and recording the pending run
+// (ErrStoreUnavailable, 503 — the event must be retried, not acknowledged and
+// dropped).
+func (r *Runner) Trigger(ev model.Event) (Result, error) {
 	if !r.allow.Allows(ev.RepoURL) {
 		return Result{}, fmt.Errorf("%w: %s", ErrRepoNotAllowed, ev.RepoURL)
 	}
 	if err := validateEvent(ev); err != nil {
 		return Result{}, err
 	}
-	// Bounded admission, before any disk work: everything below — the git
-	// checkout, the parse, the run pending its sem slot — consumes processes
-	// and workspace directories, so it must be capped, not just execution.
-	// admitOne also enrolls in the shutdown WaitGroup, so a checkout still in
-	// flight when Shutdown begins is waited on (and then cancelled via r.ctx).
+	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
+	if err != nil {
+		return Result{}, err
+	}
+	// Bounded admission, before any disk work: everything in the background —
+	// the git checkout, the parse, the run pending its sem slot — consumes
+	// processes and workspace directories, so it must be capped, not just
+	// execution. admitOne also enrolls in the shutdown WaitGroup, so a checkout
+	// still in flight when Shutdown begins is waited on (and then cancelled via
+	// r.ctx).
 	release, err := r.admitOne()
 	if err != nil {
 		return Result{}, err
 	}
 
-	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
-	if err != nil {
+	run := r.engine.NewPendingRun(ev)
+	if err := r.store.SaveRun(run); err != nil {
+		// The store rejected recording a new run (a full/read-only/permission
+		// problem for the local file store — persistent, not transient), so
+		// the daemon can't do its job: latch degraded for /healthz, and return
+		// a typed error so both handlers answer 503 + Retry-After.
+		r.MarkDegraded()
 		release()
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
+
+	go r.runTrigger(run, ev, pipelinePath, release)
+	return Result{RunID: run.ID}, nil
+}
+
+// runTrigger is the background half of Trigger: checkout → parse → match →
+// execute for an already-recorded pending run. It holds the admission slot
+// (release) for its whole span so the 4×cap and shutdown draining keep
+// covering in-flight checkouts, and it must leave the run in a terminal state
+// on every path — the store never prunes non-terminal runs, so an unsettled
+// run would leak forever.
+func (r *Runner) runTrigger(run *model.Run, ev model.Event, pipelinePath string, release func()) {
+	defer release()
+	// Terminal-state net: any exit that has not settled the run — including a
+	// panic unwinding through this frame — records a failure first. No recover:
+	// a panic still crashes the daemon as before, but not with a forever-
+	// pending run behind it.
+	settled := false
+	defer func() {
+		if !settled {
+			r.finishRun(run, model.StatusFailed, "internal error: trigger aborted before recording an outcome")
+		}
+	}()
+	finish := func(status model.Status, reason string) {
+		settled = true
+		r.finishRun(run, status, reason)
+		r.pruneHistory()
+	}
+
 	if err := os.MkdirAll(r.wsRoot, 0o700); err != nil {
-		release()
-		return Result{}, err
+		finish(model.StatusFailed, fmt.Sprintf("workspace root: %v", err))
+		return
 	}
 
 	// Workspace selection. Under the persistent strategy each repo has one
 	// reusable directory, serialized by a per-repo try-lock; if another run of
 	// the same repo holds it, this run falls back to a fresh per-run dir —
-	// occasionally slower, never blocking the caller.
+	// occasionally slower, never blocking.
 	var wsDir string
 	reuse := false
 	unlock := func() {}
@@ -397,21 +434,20 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 	if !reuse {
 		var err error
 		if wsDir, err = os.MkdirTemp(r.wsRoot, "run-*"); err != nil {
-			release()
-			return Result{}, err
+			finish(model.StatusFailed, fmt.Sprintf("workspace: %v", err))
+			return
 		}
 	}
 
-	// Cancel the checkout on request cancellation, Shutdown, or the deadline.
-	// AfterFunc bridges r.ctx so Shutdown still kills an in-flight git process;
-	// the WithTimeout parent is the request ctx so a client disconnect aborts it.
-	cctx, cancel := context.WithTimeout(ctx, checkoutTimeout)
-	stop := context.AfterFunc(r.ctx, cancel)
+	// The checkout is bounded by its deadline or Shutdown (r.ctx) — never by
+	// the originating HTTP request: the caller already answered its client,
+	// and a webhook platform hanging up must not cancel work it was just told
+	// is underway.
+	cctx, cancel := context.WithTimeout(r.ctx, checkoutTimeout)
 	ws, err := workspace.Checkout(cctx, workspace.Options{
 		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref,
 		Keep: r.keepWS || reuse, Reuse: reuse,
 	})
-	stop()
 	cancel()
 	if err != nil {
 		// MkdirTemp created wsDir before Checkout validated the target, so a
@@ -421,64 +457,86 @@ func (r *Runner) Trigger(ctx context.Context, ev model.Event) (Result, error) {
 			_ = os.RemoveAll(wsDir)
 		}
 		unlock()
-		release()
-		return Result{}, fmt.Errorf("checkout: %w", err)
+		if r.ctx.Err() != nil {
+			// Shutdown killed the checkout — the trigger was interrupted, it
+			// did not fail.
+			finish(model.StatusCancelled, fmt.Sprintf("checkout: %v", err))
+		} else {
+			finish(model.StatusFailed, fmt.Sprintf("checkout: %v", err))
+		}
+		return
 	}
 	// Pin the run's metadata to the exact commit that will run: verifyHEAD
 	// resolved the full 40-char SHA, so ${{ sha }} / JANUS_SHA are correct even
-	// for an abbreviated or ref-only trigger.
+	// for an abbreviated or ref-only trigger. Execute reads run.Event, so the
+	// run record gets the resolved SHA too.
 	if ws.Head != "" {
 		ev.SHA = ws.Head
+		run.Event.SHA = ws.Head
 	}
-	// Every pre-execution exit must release the workspace, the repo lock, and
-	// the admission slot — a leaked repo lock would silently wedge the repo
-	// onto the fallback path, and a leaked slot would shrink capacity forever.
-	abort := func() { _ = ws.Cleanup(); unlock(); release() }
+	// Every pre-execution exit must release the workspace and the repo lock —
+	// a leaked repo lock would silently wedge the repo onto the fallback path.
+	abort := func() { _ = ws.Cleanup(); unlock() }
 
 	data, err := pipeline.ReadFile(filepath.Join(ws.Dir, pipelinePath))
 	if err != nil {
 		abort()
-		return Result{}, fmt.Errorf("read %s: %w", pipelinePath, err)
+		finish(model.StatusFailed, fmt.Sprintf("read %s: %v", pipelinePath, err))
+		return
 	}
 	wf, err := pipeline.Parse(data)
 	if err != nil {
 		abort()
-		return Result{}, fmt.Errorf("pipeline %s: %w", pipelinePath, err)
+		finish(model.StatusFailed, fmt.Sprintf("pipeline %s: %v", pipelinePath, err))
+		return
 	}
 
 	if !matches(wf, ev) {
 		abort()
-		return Result{Started: false, Reason: fmt.Sprintf("event %s on %q does not match the workflow's on:", ev.Kind, ev.Branch)}, nil
+		finish(model.StatusSkipped, fmt.Sprintf("event %s on %q does not match the workflow's on:", ev.Kind, ev.Branch))
+		return
 	}
 
-	run := r.engine.NewRun(wf, ev, ws.Dir)
-	if err := r.store.SaveRun(run); err != nil {
-		// The store rejected recording a new run (a full/read-only/permission
-		// problem for the local file store — persistent, not transient), so
-		// the daemon can't do its job: latch degraded for /healthz, and return
-		// a typed error so both handlers answer 503 + Retry-After (the event
-		// must be retried, not acknowledged and dropped) rather than a
-		// misleading 200/400.
+	r.engine.PopulateRun(run, wf, ws.Dir)
+	if err := r.store.UpdateRun(run); err != nil {
+		// Not fatal: the run executes anyway, and the engine persists on every
+		// status change (and latches Degraded if the terminal write fails too).
+		r.logger.Warn("populated run could not be persisted; executing anyway", "run_id", run.ID, "err", err)
+	}
+	// From here Execute owns the run's terminal state (and reconciliation
+	// covers a crash), so the terminal-state net must stand down.
+	settled = true
+
+	defer unlock()                      // after cleanup: dir settled before the next run can claim it
+	defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
+	// Wait for a run slot; the run stays Pending until one frees.
+	r.sem <- struct{}{}
+	defer func() { <-r.sem }()
+	// r.ctx is cancelled on Shutdown, so in-flight runs are stopped. A
+	// terminal-persist failure is already logged and latched (Degraded())
+	// by the engine, so the returned error is intentionally discarded here.
+	_ = r.engine.Execute(r.ctx, run, wf, ws.Dir)
+	r.pruneHistory()
+}
+
+// maxReasonLen bounds Run.Reason at ingestion — git stderr flows into it.
+const maxReasonLen = 4 << 10
+
+// finishRun records a terminal pre-execution outcome on run. By now the
+// trigger's HTTP response is long gone, so a store failure cannot surface as
+// an error to anyone — log it and latch degraded for /healthz; startup
+// reconciliation is the backstop that eventually settles the stored record.
+func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) {
+	if len(reason) > maxReasonLen {
+		reason = reason[:maxReasonLen]
+	}
+	run.Status = status
+	run.Reason = reason
+	run.FinishedAt = time.Now()
+	if err := r.store.UpdateRun(run); err != nil {
+		r.logger.Error("run outcome could not be persisted", "run_id", run.ID, "status", status, "err", err)
 		r.MarkDegraded()
-		abort()
-		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
-
-	go func() {
-		defer release()                     // frees the admission slot and the shutdown wg count
-		defer unlock()                      // after cleanup: dir settled before the next run can claim it
-		defer func() { _ = ws.Cleanup() }() // no-op for persistent workspaces (Keep)
-		// Wait for a run slot; the run stays Pending until one frees.
-		r.sem <- struct{}{}
-		defer func() { <-r.sem }()
-		// r.ctx is cancelled on Shutdown, so in-flight runs are stopped. A
-		// terminal-persist failure is already logged and latched (Degraded())
-		// by the engine, so the returned error is intentionally discarded here.
-		_ = r.engine.Execute(r.ctx, run, wf, ws.Dir)
-		r.pruneHistory()
-	}()
-
-	return Result{RunID: run.ID, Started: true}, nil
 }
 
 // pipelineFile resolves the effective in-repo pipeline path for ev. Without an

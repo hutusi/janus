@@ -48,8 +48,19 @@ are rejected.
 ## Run lifecycle
 
 ```
-trigger (webhook / manual / CLI)
-  → runner.Trigger:
+trigger (webhook / manual API; the CLI has its own synchronous path)
+  → runner.Trigger (synchronous — everything here is HTTP-mappable):
+      allowlist check (403) · event-field caps (400) · pipeline_path (400)
+      admission cap (503 busy)
+      engine.NewPendingRun + store.SaveRun  → return run id (202 accepted;
+                                              503 if the store rejects it)
+  → async (bounded by --max-parallel-runs; the whole trigger — checkout,
+    parse, pending queue — is capped at 4× that, beyond which the API
+    sheds load with 503). The response never waits on git: a webhook
+    platform's delivery timeout cannot race the checkout, and a client
+    hangup cannot cancel it. Pre-execution outcomes land on the run as a
+    terminal status + reason (failed: checkout/parse error; skipped:
+    non-matching event) — every recorded run reaches a terminal state:
       workspace.Checkout  (shallow fetch of the SHA, detached checkout;
                            a ref-fallback checkout is verified against the
                            requested SHA — a moved ref fails the run rather
@@ -58,10 +69,7 @@ trigger (webhook / manual / CLI)
       read + pipeline.Parse  (pipeline_path from the checkout; a manual
                               trigger's pipeline_path field overrides it)
       match event against on:  (manual always matches)
-      engine.NewRun + store.SaveRun  → return run id (202)
-  → async (bounded by --max-parallel-runs; the whole trigger — checkout,
-    parse, pending queue — is capped at 4× that, beyond which the API
-    sheds load with 503):
+      engine.PopulateRun (workflow name + job tree) + store.UpdateRun
       engine.Execute:
         buildGraph (indegree + dependents, Kahn cycle guard)
         readiness-driven scheduler:
@@ -79,10 +87,20 @@ trigger (webhook / manual / CLI)
 
 ## Concurrency & safety
 
-- All mutations to a `Run` go through `runState.update`, which holds a mutex and
-  persists under it — so parallel job goroutines never race, and the store always
-  serializes a consistent snapshot. Tests run under `-race`.
+- During **execution**, all mutations to a `Run` go through `runState.update`,
+  which holds a mutex and persists under it — so parallel job goroutines never
+  race, and the store always serializes a consistent snapshot. *Before*
+  execution the run needs no such serialization: it is owned exclusively by its
+  single trigger goroutine (`runner.runTrigger` populates it and records
+  pre-execution outcomes directly), and stores snapshot on write, so no other
+  goroutine can observe a partial mutation. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
+- Checkout git subprocesses run non-interactively (`GIT_TERMINAL_PROMPT=0`,
+  ssh `BatchMode=yes` + bounded connect + keepalive unless the operator sets
+  `GIT_SSH_COMMAND`/`GIT_SSH`) — a credential or host-key prompt, an
+  unreachable host, or a stalled transfer would otherwise pin an admission
+  slot (and its pending run) until the 10-minute checkout deadline instead of
+  failing the run in seconds with a named reason.
 - Workspaces are per-run and removed on completion; a startup **sweep** clears
   orphans left by a crash, and runs left `pending`/`running` by a crash are
   marked `cancelled` at startup (their goroutines died with the old process —

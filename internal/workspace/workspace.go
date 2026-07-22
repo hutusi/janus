@@ -4,7 +4,10 @@
 // instead updates an existing checkout in place (fetch + hard reset), keeping
 // untracked files such as dependency and build caches. Private-repo
 // authentication is the host git configuration's responsibility (SSH agent,
-// credential helper, .netrc); Janus does not manage credentials in v1.
+// credential helper, .netrc); Janus does not manage credentials in v1. Git runs
+// non-interactively (terminal prompts disabled, ssh in batch mode), so missing
+// credentials or an unprovisioned known_hosts fail the checkout fast instead of
+// blocking on a prompt no one can answer.
 package workspace
 
 import (
@@ -15,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -71,6 +75,7 @@ type Workspace struct {
 	Dir  string
 	Head string // full 40-char SHA actually checked out (set after verifyHEAD)
 	keep bool
+	env  []string // hardened env for git subprocesses, built once per checkout
 }
 
 // Checkout shallow-fetches the requested commit into opt.Dir and checks it out
@@ -103,7 +108,10 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 	if err := os.MkdirAll(opt.Dir, 0o700); err != nil {
 		return nil, err
 	}
-	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep}
+	// The conservative default env is fine for the network-free init/remote
+	// steps; the real env is probed in the initialized workspace below, where
+	// local config and `includeIf "gitdir:"` rules resolve correctly.
+	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep, env: gitEnv(os.Environ(), false, false)}
 
 	for _, args := range [][]string{
 		{"init", "-q"},
@@ -114,6 +122,9 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 			return nil, err
 		}
 	}
+	ws.env = gitEnv(os.Environ(),
+		gitConfigSet(ctx, ws.Dir, "core.sshCommand"),
+		gitConfigSet(ctx, ws.Dir, "core.askpass"))
 
 	target, err := ws.fetchTarget(ctx, opt)
 	if err != nil {
@@ -179,7 +190,9 @@ func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 	if _, err := os.Stat(filepath.Join(opt.Dir, ".git")); err != nil {
 		return nil, err
 	}
-	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep}
+	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep, env: gitEnv(os.Environ(),
+		gitConfigSet(ctx, opt.Dir, "core.sshCommand"),
+		gitConfigSet(ctx, opt.Dir, "core.askpass"))}
 	if err := ws.git(ctx, "remote", "set-url", "origin", opt.RepoURL); err != nil {
 		return nil, err
 	}
@@ -204,9 +217,86 @@ func (w *Workspace) Cleanup() error {
 	return os.RemoveAll(w.Dir)
 }
 
+// gitEnv returns base (the daemon's environment) hardened so a checkout can
+// never block until the checkout deadline. Defaults apply only where the
+// operator configured nothing — environment or gitconfig (the *Configured
+// flags carry the gitconfig probes); anything they did configure is respected
+// verbatim and must itself be non-interactive:
+//
+//   - GIT_TERMINAL_PROMPT=0, always: no terminal credential prompts.
+//   - Unless GIT_SSH_COMMAND/GIT_SSH is set or core.sshCommand is configured,
+//     ssh runs with BatchMode=yes (host-key and passphrase prompts fail
+//     immediately), a bounded connect (an unreachable advertised host fails in
+//     ~10s instead of the ~2min TCP timeout), and keepalive probes that abort
+//     a stalled connection in ~60s.
+//   - Unless GIT_ASKPASS is set or core.askpass is configured, GIT_ASKPASS is
+//     set *empty*: git treats set-but-empty as "askpass disabled" (and stops
+//     falling back to core.askpass/SSH_ASKPASS), so credential requests hit
+//     the terminal path that GIT_TERMINAL_PROMPT=0 blocks and fail
+//     immediately — GIT_TERMINAL_PROMPT alone does not stop askpass helpers,
+//     so a blocking helper could otherwise occupy the checkout slot until the
+//     deadline. (Not a no-op program like echo: git passes the prompt as an
+//     argument, which echo would return as the credential.)
+//
+// Host keys are still verified; the operator provisions known_hosts.
+func gitEnv(base []string, sshConfigured, askpassConfigured bool) []string {
+	env := append(append([]string{}, base...), "GIT_TERMINAL_PROMPT=0")
+	if !sshConfigured && !envHas(base, "GIT_SSH_COMMAND") && !envHas(base, "GIT_SSH") {
+		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4")
+	}
+	if !askpassConfigured && !envHas(base, "GIT_ASKPASS") {
+		env = append(env, "GIT_ASKPASS=")
+	}
+	return env
+}
+
+// envHas reports whether base contains a variable named name. Windows
+// environment names are case-insensitive — and Go's exec dedups them that way,
+// so an appended default would clobber a differently-cased operator value —
+// hence the comparison folds case there; elsewhere git reads names exactly, so
+// the match is exact.
+func envHas(base []string, name string) bool {
+	return envHasFold(base, name, runtime.GOOS == "windows")
+}
+
+func envHasFold(base []string, name string, fold bool) bool {
+	for _, kv := range base {
+		i := strings.IndexByte(kv, '=')
+		if i < 0 {
+			continue
+		}
+		key := kv[:i]
+		if key == name || (fold && strings.EqualFold(key, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitConfigSet reports whether git resolves a value for key in dir's context —
+// system, global, `includeIf "gitdir:"` rules, and the workspace's own local
+// config all evaluate exactly as they will for the checkout's git commands —
+// so the hardening defaults can defer to an operator's gitconfig the same way
+// they defer to environment variables. Probing in dir (not the daemon's CWD)
+// also means an unrelated repository containing the daemon's working directory
+// can never suppress hardening.
+func gitConfigSet(ctx context.Context, dir, key string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "config", "--get", key).Output()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
+}
+
+// gitCmd builds the git invocation for this workspace with the hardened env.
+func (w *Workspace) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", w.Dir}, args...)...)
+	cmd.Env = w.env
+	if cmd.Env == nil {
+		cmd.Env = gitEnv(os.Environ(), false, false)
+	}
+	return cmd
+}
+
 func (w *Workspace) git(ctx context.Context, args ...string) error {
-	full := append([]string{"-C", w.Dir}, args...)
-	out, err := exec.CommandContext(ctx, "git", full...).CombinedOutput()
+	out, err := w.gitCmd(ctx, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
@@ -215,8 +305,7 @@ func (w *Workspace) git(ctx context.Context, args ...string) error {
 
 // gitOut runs git in the workspace and returns its trimmed stdout.
 func (w *Workspace) gitOut(ctx context.Context, args ...string) (string, error) {
-	full := append([]string{"-C", w.Dir}, args...)
-	out, err := exec.CommandContext(ctx, "git", full...).Output()
+	out, err := w.gitCmd(ctx, args...).Output()
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {

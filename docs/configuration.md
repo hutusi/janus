@@ -32,7 +32,7 @@ existing file without `--force`); see the
 | `addr` | `--addr` | `:8080` | HTTP listen address. |
 | `data_dir` | `--data-dir` | _(empty)_ | Directory for persistent run history. **Empty = in-memory** (lost on restart). |
 | `workspace_root` | `--workspace-root` | `$TMPDIR/janus-workspaces` | Where per-run checkouts are created (and swept on startup). |
-| `pipeline_path` | `--pipeline-path` | `.janus/ci.yml` | Path to the pipeline file **inside each triggered repository** — not one server-wide pipeline; different repos naturally run their own committed pipelines. A manual trigger may override it per run via the request's `pipeline_path` field, naming a file **relative to the configured file's directory** (`"release.yml"` → `.janus/release.yml`; subdirectories allowed, escapes rejected) — so only files deliberately placed with the pipelines are runnable, and callers need not know where pipelines live. Webhooks always use the configured path. |
+| `pipeline_path` | `--pipeline-path` | `.janus/ci.yml` | Path to the pipeline file **inside each triggered repository** — not one server-wide pipeline; different repos naturally run their own committed pipelines. A manual trigger may override it per run via the request's `pipeline_path` field, naming a file **relative to the configured file's directory** (`"release.yml"` → `.janus/release.yml`; subdirectories allowed, escapes rejected) — so only files deliberately placed with the pipelines are runnable, and callers need not know where pipelines live. Webhooks may override it per hook with a `?pipeline_path=` query parameter on the webhook URL (same relative-name rules). |
 | `max_parallel_jobs` | `--max-parallel-jobs` | `4` | Max jobs running concurrently **within** one run. `0` means the default; negatives are a startup error. |
 | `max_parallel_runs` | `--max-parallel-runs` | `4` | Max runs executing concurrently. Excess runs queue as `pending`, bounded at 4× this cap (checkout and parse count too); beyond that, triggers get `503` with `Retry-After`. `0` means the default; negatives are a startup error. |
 | `history_limit` | `--history-limit` | `1000` | Max terminal runs to retain. When exceeded, the oldest terminal runs — and their logs — are deleted after each run finishes and at startup; running/pending runs are never pruned. **The default is nonzero, so the first startup after upgrading prunes terminal runs beyond 1000 (and their logs).** Set `0` for unlimited retention; negatives are a startup error. This bounds the retained **run count** and the flat-file store's per-list scan (which reads every run directory) — it is **not** a disk-usage cap: a single runaway step log can still grow without limit, so bound total disk with OS quotas. |
@@ -129,8 +129,31 @@ design.
 Janus still manages no credentials. The **service user** needs a passphrase-less
 key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
 trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
-`$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Verify as that
-user, with the SSH URL — that is what Janus will now clone:
+`$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Janus enforces
+this: checkout git runs with `GIT_TERMINAL_PROMPT=0` and, when the operator
+has configured **nothing** for the transport (no `GIT_SSH_COMMAND`/`GIT_SSH`
+in the service environment, no `core.sshCommand` in the service user's
+gitconfig), with `GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10
+-o ServerAliveInterval=15 -o ServerAliveCountMax=4` — so an unprovisioned
+`known_hosts` or a key that needs a passphrase fails the checkout in seconds
+instead of hanging on a prompt until the checkout deadline. Likewise, unless
+`GIT_ASKPASS` or `core.askpass` is configured, `GIT_ASKPASS` is set *empty*,
+which disables askpass resolution entirely so credential requests hit the
+blocked terminal path and fail immediately (`GIT_TERMINAL_PROMPT` alone does
+not stop askpass helpers, and a blocking helper would pin the checkout slot).
+The gitconfig checks run inside the workspace being checked out, so local
+config and `includeIf "gitdir:"` rules count as configured too. The
+connect bound and keepalive probes cover the network-shaped hangs too: a
+`git_ssh_url` advertising a host or port unreachable from the Janus server (a
+Docker-internal hostname is the classic case) fails in ~10 s with
+`Connection timed out`, and a connection that stalls mid-transfer is aborted
+in ~60 s — in every case the run fails with a named reason instead of sitting
+pending until the deadline.
+Host keys are deliberately still verified; nothing is auto-accepted. Anything
+you configure yourself — `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
+`core.sshCommand`, `core.askpass` — is respected verbatim and must itself be
+non-interactive (include `-o BatchMode=yes` in a custom ssh command). Verify
+as the service user, with the SSH URL — that is what Janus will now clone:
 
 ```sh
 sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git

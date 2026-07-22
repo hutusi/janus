@@ -24,9 +24,11 @@ type triggerRequest struct {
 const maxTriggerBody = 1 << 20
 
 // handleTrigger starts a run manually. It builds a normalized manual Event and
-// hands it to the runner, which checks out, parses, and executes the pipeline.
-// Decoding is strict, matching the YAML parsers: unknown fields and trailing
-// data are errors, not silently ignored.
+// hands it to the runner, which records the run and answers 202 immediately;
+// checkout, parse, and execution happen in the background with the outcome on
+// the run record (poll GET /api/runs/{id}). Decoding is strict, matching the
+// YAML parsers: unknown fields and trailing data are errors, not silently
+// ignored.
 func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	var req triggerRequest
 	r.Body = http.MaxBytesReader(w, r.Body, maxTriggerBody)
@@ -76,9 +78,9 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		ev.Branch = strings.TrimPrefix(req.Ref, "refs/heads/")
 	}
 
-	res, err := s.runner.Trigger(r.Context(), ev)
+	res, err := s.runner.Trigger(ev)
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
-		s.logger.Warn("trigger rejected: repo not allowed", "repo", ev.RepoURL)
+		s.logger.Warn("trigger rejected: repo not allowed", "repo", redactURL(ev.RepoURL))
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -90,6 +92,8 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// Synchronous validation only (bad pipeline_path, over-long fields) —
+		// checkout/parse failures now land on the run record instead.
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

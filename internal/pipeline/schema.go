@@ -29,9 +29,12 @@ type rawBranchFilter struct {
 }
 
 type rawJob struct {
-	Needs []string          `yaml:"needs"`
-	Env   map[string]string `yaml:"env"`
-	Steps []rawStep         `yaml:"steps"`
+	Needs      []string          `yaml:"needs"`
+	Branches   []string          `yaml:"branches"`
+	Ignore     []string          `yaml:"branches-ignore"`
+	WorkingDir string            `yaml:"working-directory"`
+	Env        map[string]string `yaml:"env"`
+	Steps      []rawStep         `yaml:"steps"`
 }
 
 type rawStep struct {
@@ -60,12 +63,19 @@ func (r *rawWorkflow) toModel() *model.Workflow {
 		for i, rs := range rj.Steps {
 			steps[i] = model.Step{Run: rs.Run, WorkingDir: rs.WorkingDir, Shell: rs.Shell, Env: rs.Env}
 		}
-		wf.Jobs[name] = &model.Job{
-			Name:  name,
-			Needs: rj.Needs,
-			Env:   rj.Env,
-			Steps: steps,
+		job := &model.Job{
+			Name:       name,
+			Needs:      rj.Needs,
+			WorkingDir: rj.WorkingDir,
+			Env:        rj.Env,
+			Steps:      steps,
 		}
+		// Preserve key presence (nil vs non-nil), like the on: filters, so
+		// validation can reject declaring both keys even when empty.
+		if rj.Branches != nil || rj.Ignore != nil {
+			job.Filter = &model.BranchFilter{Branches: rj.Branches, Ignore: rj.Ignore}
+		}
+		wf.Jobs[name] = job
 	}
 	return wf
 }

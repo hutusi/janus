@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"sort"
@@ -152,17 +153,28 @@ type jobResult struct {
 	status model.Status
 }
 
-// NewRun builds a pending run record for wf, with one JobRun per job and one
-// StepRun per step. It does not execute or persist anything; pass it to Execute.
-func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *model.Run {
-	run := &model.Run{
-		ID:           newRunID(),
-		WorkflowName: wf.Name,
-		Event:        ev,
-		Status:       model.StatusPending,
-		CreatedAt:    time.Now(),
-		WorkspaceDir: workDir,
+// NewPendingRun builds a pending "shell" run for ev: a recordable run identity
+// with no workflow name or jobs yet, because the pipeline is only known after
+// the checkout. PopulateRun fills it in once the workflow is parsed; until then
+// the run must eventually reach a terminal state via the caller (the store
+// never prunes non-terminal runs).
+func (e *Engine) NewPendingRun(ev model.Event) *model.Run {
+	return &model.Run{
+		ID:        newRunID(),
+		Event:     ev,
+		Status:    model.StatusPending,
+		CreatedAt: time.Now(),
 	}
+}
+
+// PopulateRun fills a shell run (NewPendingRun) with wf's identity and job
+// tree: one JobRun per job and one StepRun per step. Jobs whose branch filter
+// does not match the run's branch — and, transitively, jobs that need one —
+// are recorded skipped up front; the rest start pending.
+func (e *Engine) PopulateRun(run *model.Run, wf *model.Workflow, workDir string) {
+	run.WorkflowName = wf.Name
+	run.WorkspaceDir = workDir
+	skip := branchSkipped(wf, run.Event.Branch)
 	names := make([]string, 0, len(wf.Jobs))
 	for name := range wf.Jobs {
 		names = append(names, name)
@@ -170,12 +182,51 @@ func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *mod
 	sort.Strings(names)
 	for _, name := range names {
 		job := wf.Jobs[name]
-		jr := &model.JobRun{Name: name, Needs: job.Needs, Status: model.StatusPending}
+		status := model.StatusPending
+		if skip[name] {
+			status = model.StatusSkipped
+		}
+		jr := &model.JobRun{Name: name, Needs: job.Needs, Status: status}
 		for i, s := range job.Steps {
-			jr.Steps = append(jr.Steps, &model.StepRun{Index: i, Command: s.Run, Status: model.StatusPending})
+			jr.Steps = append(jr.Steps, &model.StepRun{Index: i, Command: s.Run, Status: status})
 		}
 		run.Jobs = append(run.Jobs, jr)
 	}
+}
+
+// branchSkipped returns the set of jobs excluded from a run on branch: jobs
+// whose Filter does not match, plus — transitively — jobs that need an
+// excluded job (a job must not run when the work it depends on didn't).
+func branchSkipped(wf *model.Workflow, branch string) map[string]bool {
+	skip := make(map[string]bool)
+	for name, job := range wf.Jobs {
+		if job.Filter != nil && !job.Filter.Matches(branch) {
+			skip[name] = true
+		}
+	}
+	for changed := len(skip) > 0; changed; {
+		changed = false
+		for name, job := range wf.Jobs {
+			if skip[name] {
+				continue
+			}
+			for _, dep := range job.Needs {
+				if skip[dep] {
+					skip[name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return skip
+}
+
+// NewRun builds a pending run record for wf, with one JobRun per job and one
+// StepRun per step. It does not execute or persist anything; pass it to Execute.
+func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *model.Run {
+	run := e.NewPendingRun(ev)
+	e.PopulateRun(run, wf, workDir)
 	return run
 }
 
@@ -240,9 +291,16 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 			results <- jobResult{name: name, status: e.runJob(runCtx, rs, job, jr)}
 		}()
 	}
+	// Jobs already terminal were branch-skipped by PopulateRun; they are never
+	// launched, and neither are their dependents (the skip is transitive), so
+	// the remaining sub-DAG is closed over runnable jobs.
+	launchable := func(name string) bool {
+		jr := byName[name]
+		return jr != nil && !jr.Status.Terminal()
+	}
 
 	for _, name := range g.order {
-		if indeg[name] == 0 {
+		if indeg[name] == 0 && launchable(name) {
 			launch(name)
 		}
 	}
@@ -260,16 +318,20 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 		}
 		for _, dep := range g.dependents[res.name] {
 			indeg[dep]--
-			if indeg[dep] == 0 {
+			if indeg[dep] == 0 && launchable(dep) {
 				launch(dep)
 			}
 		}
 	}
 
 	return e.finalize(rs, func() {
+		allSkipped := len(run.Jobs) > 0
 		for _, jr := range run.Jobs {
 			if !jr.Status.Terminal() {
 				jr.Status = model.StatusSkipped // never started due to fail-fast
+			}
+			if jr.Status != model.StatusSkipped {
+				allSkipped = false
 			}
 			for _, sr := range jr.Steps {
 				if !sr.Status.Terminal() {
@@ -286,6 +348,13 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 			run.Status = model.StatusCancelled
 		case failed:
 			run.Status = model.StatusFailed
+		case allSkipped:
+			// Every job was excluded by its branch filter: nothing executed,
+			// which is a skip, not a success.
+			run.Status = model.StatusSkipped
+			if run.Reason == "" {
+				run.Reason = fmt.Sprintf("no job matches branch %q", rs.event.Branch)
+			}
 		default:
 			run.Status = model.StatusSuccess
 		}

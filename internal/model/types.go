@@ -56,8 +56,18 @@ func (f *BranchFilter) Matches(branch string) bool {
 type Job struct {
 	Name  string
 	Needs []string
-	Env   map[string]string
-	Steps []Step
+	// Filter restricts the job to a set of branches (the job-level
+	// `branches`/`branches-ignore` keys, same semantics as an `on:` filter,
+	// matched against the event's branch regardless of event kind). Nil means
+	// the job runs on every branch. A non-matching job — and any job that
+	// needs one — is recorded skipped instead of executed.
+	Filter *BranchFilter
+	// WorkingDir is the default working directory for the job's steps,
+	// relative to the workspace; a step's own working-directory overrides it.
+	// ${{ }} interpolation applies. Empty means the workspace root.
+	WorkingDir string
+	Env        map[string]string
+	Steps      []Step
 }
 
 // Step is a single shell command, optionally with its own working directory
@@ -95,8 +105,9 @@ type Event struct {
 
 	// PipelinePath overrides the pipeline file for this trigger, relative to
 	// the configured file's directory, e.g. "release.yml" for
-	// .janus/release.yml (manual API only; empty means the configured
-	// default).
+	// .janus/release.yml (the manual API's pipeline_path field, or a
+	// webhook URL's ?pipeline_path= query parameter; empty means the
+	// configured default).
 	PipelinePath string `json:"pipeline_path,omitempty"`
 }
 
@@ -123,10 +134,14 @@ func (s Status) Terminal() bool {
 
 // Run is a single execution of a workflow.
 type Run struct {
-	ID           string    `json:"id"`
-	WorkflowName string    `json:"workflow_name"`
-	Event        Event     `json:"event"`
-	Status       Status    `json:"status"`
+	ID           string `json:"id"`
+	WorkflowName string `json:"workflow_name"`
+	Event        Event  `json:"event"`
+	Status       Status `json:"status"`
+	// Reason records why a run reached a terminal state before executing any
+	// job: a checkout or pipeline-parse failure, or an event that did not match
+	// the workflow's on: filters. Empty for runs that executed.
+	Reason       string    `json:"reason,omitempty"`
 	Jobs         []*JobRun `json:"jobs"`
 	CreatedAt    time.Time `json:"created_at"`
 	StartedAt    time.Time `json:"started_at,omitzero"`
