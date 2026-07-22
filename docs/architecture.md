@@ -121,12 +121,23 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   in any order, so an older trigger arriving late must not supersede, kill,
   or outlive a newer run with a stale commit. The mark survives the group
   emptying, but only as long as it can matter: a stale arrival is by
-  definition an admitted older trigger still in flight, so once every
-  in-flight trigger is newer than a mark, the mark is retired — registry
-  memory is bounded by the admission window, not by how many branches
-  (groups) the daemon has ever seen. Sequence hand-out and in-flight
-  enrollment happen under one lock, so a sweep can never drop a mark that a
-  just-admitted older trigger still needs. The
+  definition an admitted older trigger that has not yet **resolved** —
+  entered its one group, turned out ungrouped, or failed pre-enter — so each
+  trigger retires from the accounting at resolution (grouped ones inside
+  `enter` itself), and marks below the oldest unresolved trigger are swept.
+  Since the pre-enter phase is deadline-bounded (the checkout timeout), a
+  mark outlives its creation by at most ~one checkout window regardless of
+  how long runs execute — registry memory is never pinned by a hung step or
+  by how many branches (groups) the daemon has ever seen. Sequence hand-out
+  and enrollment happen under one lock (a sweep between the two steps could
+  drop a mark a just-admitted older trigger still needs), and inside `enter`
+  the stale-gate check precedes retirement — the stale arrival's own
+  enrollment is what has kept the refusing mark alive. A run cancelled
+  before it enters resolves without superseding anyone. One conscious
+  trade-off: under `workspace_strategy: persistent`, a grouped run queued
+  behind its group holds its repo's persistent-workspace lock for the wait,
+  so same-repo triggers fall back to fresh clones meanwhile — slower,
+  never blocking. The
   group gate is ordered *before* the global run semaphore, so a run waiting
   for its group holds no run slot and cannot starve other repos; after
   acquiring a slot the member re-checks its membership under the registry

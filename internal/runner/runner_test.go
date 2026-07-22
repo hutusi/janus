@@ -1039,3 +1039,51 @@ func TestUngroupedRunsExecuteIndependently(t *testing.T) {
 		}
 	}
 }
+
+// registrySizes reads the group registry's accounting under its lock.
+func registrySizes(r *Runner) (inflight, seen int) {
+	r.groups.mu.Lock()
+	defer r.groups.mu.Unlock()
+	return len(r.groups.inflight), len(r.groups.seen)
+}
+
+// TestGroupRegistryDrainsWhileRunExecutes pins the trigger-resolution fix: a
+// trigger retires from the order accounting when it enters its group (or
+// resolves ungrouped), NOT when the run finishes — otherwise a single hung
+// step (step_timeout defaults to 0) would pin every newer branch-group mark
+// in memory for as long as it runs.
+func TestGroupRegistryDrainsWhileRunExecutes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	for _, tc := range []struct {
+		name, pipeline string
+	}{
+		{"grouped", groupSleepPipeline},
+		{"ungrouped", sleepPipeline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, sha := initGitRepo(t, tc.pipeline)
+			r, st := newCancelTestRunner(t, 2)
+			ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+			res, err := r.Trigger(ev)
+			if err != nil {
+				t.Fatalf("Trigger: %v", err)
+			}
+			waitStatus(t, st, res.RunID, model.StatusRunning, 15*time.Second)
+			// Entering the group (or resolving ungrouped) strictly precedes
+			// execution, so by Running the accounting must already be empty.
+			if inflight, seen := registrySizes(r); inflight != 0 || seen != 0 {
+				t.Errorf("inflight=%d seen=%d while the run executes, want 0/0", inflight, seen)
+			}
+			if !r.Cancel(res.RunID, "cancelled via API") {
+				t.Fatal("Cancel")
+			}
+			waitRun(t, st, res.RunID, 15*time.Second)
+			waitSlotsFree(t, r, 5*time.Second)
+		})
+	}
+}

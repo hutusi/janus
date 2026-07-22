@@ -30,17 +30,23 @@ type groupReg struct {
 	groups map[string]*groupEntry
 	// seen records the newest member ever admitted per key, refusing stale
 	// arrivals even after the group has emptied. A mark only matters while an
-	// admitted OLDER trigger could still reach enter, so endTrigger retires
-	// marks below the oldest in-flight seq — memory is bounded by the
-	// admission window, not by how many branches (groups) the daemon has ever
-	// seen.
+	// UNRESOLVED older trigger could still reach enter, so retirement sweeps
+	// drop marks below the oldest unresolved seq — memory is bounded by the
+	// admission window and, in time, by the pre-enter phase (a checkout
+	// window at most), never by run duration or by how many branches (groups)
+	// the daemon has ever seen.
 	seen map[string]groupNewest
 
-	// Trigger-order accounting. nextSeq is handed out and enrolled in
-	// inflight under the same mu acquisition (beginTrigger): if numbering and
-	// enrollment were two steps, a sweep between them could observe an empty
-	// inflight set and drop a mark the not-yet-enrolled older trigger still
-	// needs. inflight is bounded by the admission cap.
+	// Trigger-order accounting. inflight holds UNRESOLVED triggers: admitted
+	// (beginTrigger) but not yet arrived at their fate — entering a group,
+	// turning out ungrouped, or failing pre-enter. Only unresolved triggers
+	// can still call enter, so this set is exactly the set of possible future
+	// arrivals. nextSeq is handed out and enrolled in inflight under the same
+	// mu acquisition (beginTrigger): if numbering and enrollment were two
+	// steps, a sweep between them could observe an empty inflight set and
+	// drop a mark the not-yet-enrolled older trigger still needs. Bounded by
+	// the admission cap, and each entry lives only through the deadline-
+	// bounded pre-enter phase.
 	nextSeq  uint64
 	inflight map[uint64]struct{}
 }
@@ -72,10 +78,13 @@ func newGroupReg() *groupReg {
 }
 
 // beginTrigger stamps a new trigger with the next sequence number and enrolls
-// it as in-flight. Called from the synchronous part of Trigger, so the
+// it as unresolved. Called from the synchronous part of Trigger, so the
 // numbering reflects when triggers arrived — not when their checkouts finish.
-// Every trigger must be enrolled (its group is unknown until parse) and must
-// end with exactly one endTrigger.
+// Every trigger must be enrolled (its group is unknown until parse) and is
+// resolved exactly once: enter resolves grouped triggers inline; ungrouped and
+// pre-enter-failure paths resolve via endTrigger. Retirement is idempotent, so
+// a run-scope deferred endTrigger doubles as the safety net for panics and
+// early exits.
 func (g *groupReg) beginTrigger() uint64 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -84,14 +93,22 @@ func (g *groupReg) beginTrigger() uint64 {
 	return g.nextSeq
 }
 
-// endTrigger retires seq and drops every high-water mark no in-flight trigger
-// can be stale against (mark seq below the oldest in-flight trigger; all marks
-// when none is in flight). A mark may be dropped while its group entry still
-// has live members — harmless: the sweep condition means every possible future
-// enter carries a larger seq than anything live in that entry.
+// endTrigger resolves a trigger that never entered a group (ungrouped,
+// pre-enter failure, or the run-scope safety net). Idempotent.
 func (g *groupReg) endTrigger(seq uint64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.retireLocked(seq)
+}
+
+// retireLocked (mu held) retires seq and drops every high-water mark no
+// unresolved trigger can be stale against (mark seq below the oldest
+// unresolved seq; all marks when none remains). A mark may be dropped while
+// its group entry still has live members — harmless: the sweep condition
+// means every possible future enter carries a larger seq than anything live
+// in that entry, so the entry-level supersede logic alone orders them
+// correctly.
+func (g *groupReg) retireLocked(seq uint64) {
 	delete(g.inflight, seq)
 	var oldest uint64
 	for s := range g.inflight {
@@ -106,20 +123,42 @@ func (g *groupReg) endTrigger(seq uint64) {
 	}
 }
 
-// enter registers runID as the group's sole waiting member. An arrival older
-// (by seq) than the newest ever admitted is stale — its checkout simply
-// finished late — and is cancelled on the spot with cause "superseded by run
-// <newest>", never registered (leave on it no-ops). Past that gate the
-// arrival is strictly the newest, so any current waiter is superseded —
-// cancelled with cause "superseded by run <runID>" — and with
-// cancelInProgress the running member is cancelled the same way. When nothing
-// is running, the returned member's ready channel is already closed.
-func (g *groupReg) enter(key string, seq uint64, runID string, cancel context.CancelCauseFunc, cancelInProgress bool) *groupMember {
+// enter registers runID as the group's sole waiting member, and RESOLVES the
+// trigger: whichever branch is taken, this trigger will never call enter
+// again, so its seq retires here rather than when the (unboundedly long) run
+// finishes — otherwise one hung run would pin every newer mark in memory.
+//
+// A run already cancelled on arrival (ctx done — e.g. an API cancel landed
+// between checkout and here) is retired without touching anyone: a doomed
+// arrival must not supersede, or with cancelInProgress kill, innocent
+// members on its way out.
+//
+// An arrival older (by seq) than the newest ever admitted is stale — its
+// checkout simply finished late — and is cancelled on the spot with cause
+// "superseded by run <newest>", never registered (leave on it no-ops). ORDER
+// IS CORRECTNESS-CRITICAL: this gate must run BEFORE retireLocked. The stale
+// arrival's own unresolved seq is exactly what has kept the refusing mark
+// alive (min(inflight) ≤ its seq < the mark's seq); retiring first would let
+// the sweep drop the mark inside this very call and admit the stale run —
+// the trigger-order bug the mark exists to prevent.
+//
+// Past those gates the arrival is strictly the newest, so any current waiter
+// is superseded — cancelled with cause "superseded by run <runID>" — and
+// with cancelInProgress the running member is cancelled the same way. When
+// nothing is running, the returned member's ready channel is already closed.
+func (g *groupReg) enter(ctx context.Context, key string, seq uint64, runID string, cancel context.CancelCauseFunc, cancelInProgress bool) *groupMember {
 	m := &groupMember{seq: seq, runID: runID, cancel: cancel, ready: make(chan struct{})}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if ctx.Err() != nil {
+		// No seen update either: this run never acted, so an older trigger
+		// still unresolved must not later be refused in its name.
+		g.retireLocked(seq)
+		return m
+	}
 	if newest := g.seen[key]; seq < newest.seq {
 		m.cancel(fmt.Errorf("superseded by run %s", newest.runID))
+		g.retireLocked(seq)
 		return m
 	}
 	g.seen[key] = groupNewest{seq: seq, runID: runID}
@@ -137,6 +176,7 @@ func (g *groupReg) enter(key string, seq uint64, runID string, cancel context.Ca
 	} else if cancelInProgress {
 		e.running.cancel(fmt.Errorf("superseded by run %s", runID))
 	}
+	g.retireLocked(seq)
 	return m
 }
 

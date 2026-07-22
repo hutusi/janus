@@ -463,20 +463,31 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 	// non-terminal run fetchable from the store already has a cancel entry.
 	runCtx, cancelRun := context.WithCancelCause(r.ctx)
 	r.registerCancel(run.ID, cancelRun)
+	// Until the background goroutine owns them, tear the acquired resources
+	// down on ANY exit — the SaveRun error below, or a panic (net/http
+	// recovers handler panics, so a leak here would otherwise pin the
+	// admission slot and the trigger-order accounting forever). Each teardown
+	// is idempotent.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			r.unregisterCancel(run.ID)
+			cancelRun(nil)
+			r.groups.endTrigger(seq)
+			release()
+		}
+	}()
 	if err := r.store.SaveRun(run); err != nil {
 		// The store rejected recording a new run (a full/read-only/permission
 		// problem for the local file store — persistent, not transient), so
 		// the daemon can't do its job: latch degraded for /healthz, and return
 		// a typed error so both handlers answer 503 + Retry-After.
 		r.MarkDegraded()
-		r.unregisterCancel(run.ID)
-		cancelRun(nil)
-		r.groups.endTrigger(seq)
-		release()
 		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 
 	go r.runTrigger(runCtx, cancelRun, seq, run, ev, pipelinePath, release)
+	handedOff = true
 	return Result{RunID: run.ID}, nil
 }
 
@@ -488,9 +499,11 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 // run would leak forever.
 func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCauseFunc, seq uint64, run *model.Run, ev model.Event, pipelinePath string, release func()) {
 	defer release()
-	// Last of the LIFO chain that matters to the group registry: the member
-	// has already left its entry (the group defers below) by the time its seq
-	// retires and mark-sweeping runs.
+	// Idempotent safety net for the pre-enter exits (workspace/checkout/parse
+	// failures, non-matching events, panics): grouped triggers actually
+	// resolve inside enter, and ungrouped ones right after parse — a trigger
+	// must not stay "unresolved" for its whole (unboundedly long) run, or it
+	// would pin every newer group mark in memory.
 	defer r.groups.endTrigger(seq)
 	defer cancelRun(nil) // release the context's resources on every path
 	// Deregister only after the terminal state is recorded (defers run LIFO),
@@ -616,6 +629,11 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		// NUL joins the repo scope to the group: it cannot appear in either
 		// part, so distinct (repo, group) pairs never collide.
 		groupKey = ev.RepoURL + "\x00" + group
+	} else {
+		// Resolved ungrouped: this trigger will never enter a group, so its
+		// trigger-order seq retires now — not when the (possibly very long)
+		// run finishes.
+		r.groups.endTrigger(seq)
 	}
 
 	r.engine.PopulateRun(run, wf, ws.Dir)
@@ -631,7 +649,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// group holds no slot, so a busy group cannot starve unrelated repos.
 	var member *groupMember
 	if groupKey != "" {
-		member = r.groups.enter(groupKey, seq, run.ID, cancelRun, wf.Concurrency.CancelInProgress)
+		member = r.groups.enter(runCtx, groupKey, seq, run.ID, cancelRun, wf.Concurrency.CancelInProgress)
 		defer r.groups.leave(groupKey, member)
 		select {
 		case <-member.ready:
