@@ -49,14 +49,14 @@ func TestDurationFunc(t *testing.T) {
 	}
 }
 
-func TestRFC3339Func(t *testing.T) {
-	fn := templateFuncs["rfc3339"].(func(t time.Time) string)
-	in := time.Date(2026, 7, 22, 17, 15, 0, 0, time.FixedZone("CST", 8*3600))
+func TestMillisFunc(t *testing.T) {
+	fn := templateFuncs["millis"].(func(t time.Time) int64)
+	// A .9s fraction in a non-UTC zone: the sub-second part must survive
+	// (whole-second anchors wobble the ticker by ±1s) and the zone must not
+	// matter — epoch milliseconds are absolute.
+	in := time.Date(2026, 7, 22, 17, 15, 0, 900e6, time.FixedZone("CST", 8*3600))
 	got := fn(in)
-	if got != "2026-07-22T09:15:00Z" {
-		t.Errorf("rfc3339 = %q, want UTC with Z suffix", got)
-	}
-	if back, err := time.Parse(time.RFC3339, got); err != nil || !back.Equal(in) {
-		t.Errorf("rfc3339 %q does not round-trip: %v", got, err)
+	if got != in.UnixMilli() || got%1000 != 900 {
+		t.Errorf("millis = %d, want %d with the 900ms fraction intact", got, in.UnixMilli())
 	}
 }

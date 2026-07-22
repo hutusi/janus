@@ -41,18 +41,19 @@
 </body>
 </html>{{end}}
 
-{{define "dur"}}{{if and (not .StartedAt.IsZero) .FinishedAt.IsZero}}<span class="elapsed" data-started="{{rfc3339 .StartedAt}}">{{duration .StartedAt .FinishedAt}}</span>{{else}}{{duration .StartedAt .FinishedAt}}{{end}}{{end}}
+{{define "dur"}}{{if and (not .StartedAt.IsZero) .FinishedAt.IsZero}}<span class="elapsed" data-started="{{millis .StartedAt}}">{{duration .StartedAt .FinishedAt}}</span>{{else}}{{duration .StartedAt .FinishedAt}}{{end}}{{end}}
 
 {{define "elapsedscript"}}
 <script>
   // Live elapsed for in-progress runs/jobs/steps. Mirrors formatDuration in
   // ui.go — keep the formats identical. Elapsed is anchored to two server
-  // timestamps (embedded render time minus data-started) and advanced by the
-  // monotonic performance.now() delta, so a skewed client clock can't distort it.
+  // timestamps (embedded render time minus data-started, epoch milliseconds)
+  // and advanced by the monotonic performance.now() delta, so a skewed client
+  // clock can't distort it.
   (function () {
     var els = document.querySelectorAll(".elapsed[data-started]");
     if (!els.length) return;
-    var serverNow = Date.parse("{{rfc3339 now}}"), t0 = performance.now();
+    var serverNow = {{millis now}}, t0 = performance.now();
     function fmt(ms) {
       var s = Math.max(0, Math.floor(ms / 1000));
       var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -61,7 +62,7 @@
     function tick() {
       var elapsed = performance.now() - t0;
       els.forEach(function (el) {
-        el.textContent = fmt(serverNow - Date.parse(el.getAttribute("data-started")) + elapsed);
+        el.textContent = fmt(serverNow - el.getAttribute("data-started") + elapsed);
       });
     }
     tick();

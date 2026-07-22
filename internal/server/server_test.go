@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -513,11 +514,14 @@ func TestDashboardDurations(t *testing.T) {
 				{Index: 0, Status: model.StatusSuccess, StartedAt: base, FinishedAt: base.Add(12 * time.Second)},
 				{Index: 1, Status: model.StatusSkipped}, // never started
 			}}}}
+	// Fractional-second start: the data-started anchor must keep the 900ms
+	// (a whole-second anchor wobbles the ticker by ±1s on every re-anchor).
+	liveStart := base.Add(time.Minute + 900*time.Millisecond)
 	running := &model.Run{ID: "live", Status: model.StatusRunning, WorkflowName: "ci",
 		Event:     model.Event{Kind: model.EventPush, Branch: "main"},
-		CreatedAt: base.Add(time.Minute), StartedAt: base.Add(time.Minute),
-		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusRunning, StartedAt: base.Add(time.Minute),
-			Steps: []*model.StepRun{{Index: 0, Status: model.StatusRunning, StartedAt: base.Add(time.Minute)}}}}}
+		CreatedAt: liveStart, StartedAt: liveStart,
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusRunning, StartedAt: liveStart,
+			Steps: []*model.StepRun{{Index: 0, Status: model.StatusRunning, StartedAt: liveStart}}}}}
 	for _, r := range []*model.Run{finished, running} {
 		if err := st.SaveRun(r); err != nil {
 			t.Fatal(err)
@@ -528,7 +532,7 @@ func TestDashboardDurations(t *testing.T) {
 	if !strings.Contains(list, "1m 23s") {
 		t.Error("run list misses the finished run's duration 1m 23s")
 	}
-	wantAttr := `data-started="` + running.StartedAt.UTC().Format(time.RFC3339) + `"`
+	wantAttr := `data-started="` + strconv.FormatInt(running.StartedAt.UnixMilli(), 10) + `"`
 	if !strings.Contains(list, wantAttr) {
 		t.Errorf("run list misses %s for the running run", wantAttr)
 	}

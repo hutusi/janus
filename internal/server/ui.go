@@ -68,11 +68,12 @@ var templateFuncs = template.FuncMap{
 		}
 		return formatDuration(end.Sub(start))
 	},
-	// rfc3339 emits a timestamp for machine consumption (data attributes, the
-	// inline script). Forced UTC so the value stays within [0-9TZ:-], which
-	// html/template's attribute and JS-string escapers pass through untouched.
-	"rfc3339": func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
-	"now":     time.Now,
+	// millis emits a timestamp for machine consumption (data attributes, the
+	// inline script) as epoch milliseconds: full sub-second precision — a
+	// whole-second format would wobble the ticker by ±1s on every re-anchor —
+	// digits only (escape-neutral), and nothing for the client to parse.
+	"millis": func(t time.Time) int64 { return t.UnixMilli() },
+	"now":    time.Now,
 }
 
 // formatDuration renders d GitHub-Actions style: "12s", "1m 23s", "2h 5m 3s".
