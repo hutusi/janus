@@ -17,7 +17,8 @@
     <p class="muted">
       workflow <strong>{{trunc 200 .Run.WorkflowName}}</strong> ·
       {{.Run.Event.Kind}} on {{trunc 200 .Run.Event.Branch}} ·
-      created {{reltime .Run.CreatedAt}}
+      created {{reltime .Run.CreatedAt}} ·
+      duration {{template "dur" .Run}}
       {{if .Refresh}}· <em>auto-refreshing…</em>{{end}}
     </p>
     {{if .Run.Reason}}<p class="muted">reason: {{trunc 1000 .Run.Reason}}</p>{{end}}
@@ -26,11 +27,13 @@
       {{range .Run.Jobs}}
       <div class="job">
         <span class="status status-{{.Status}}">{{.Status}}</span> <strong>{{trunc 200 .Name}}</strong>
+        <span class="muted">{{template "dur" .}}</span>
         {{if .Needs}}<span class="muted">needs {{needs .Needs}}</span>{{end}}
         <div class="steps">
           {{range .Steps}}
           <div><span class="status status-{{.Status}}">{{.Status}}</span>
-            <code>{{trunc 1000 .Command}}</code> {{if ne .ExitCode 0}}<span class="muted">exit {{.ExitCode}}</span>{{end}}</div>
+            <code>{{trunc 1000 .Command}}</code> {{if ne .ExitCode 0}}<span class="muted">exit {{.ExitCode}}</span>{{end}}
+            <span class="muted">{{template "dur" .}}</span></div>
           {{end}}
         </div>
       </div>
@@ -40,5 +43,6 @@
     <h2>Logs</h2>
     <pre>{{.Logs}}</pre>
   </main>
+  {{template "elapsedscript"}}
 </body>
 </html>{{end}}
