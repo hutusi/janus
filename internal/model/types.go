@@ -62,8 +62,12 @@ type Job struct {
 	// the job runs on every branch. A non-matching job — and any job that
 	// needs one — is recorded skipped instead of executed.
 	Filter *BranchFilter
-	Env    map[string]string
-	Steps  []Step
+	// WorkingDir is the default working directory for the job's steps,
+	// relative to the workspace; a step's own working-directory overrides it.
+	// ${{ }} interpolation applies. Empty means the workspace root.
+	WorkingDir string
+	Env        map[string]string
+	Steps      []Step
 }
 
 // Step is a single shell command, optionally with its own working directory

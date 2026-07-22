@@ -27,6 +27,7 @@ env:                                      # optional; workflow-wide variables
 
 jobs:                                     # required: at least one job
   build:
+    working-directory: ./app              # optional; default dir for this job's steps
     env:                                  # optional; job-level variables
       STAGE: build
     steps:
@@ -60,13 +61,21 @@ jobs:                                     # required: at least one job
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
 | `jobs.<id>.branches`       | job              | —        | Run this job only on these branches; elsewhere it is recorded `skipped`. |
 | `jobs.<id>.branches-ignore`| job              | —        | Run this job on every branch **except** these. Mutually exclusive with `branches`. |
+| `jobs.<id>.working-directory` | job           | —        | Default directory (relative to the workspace) for the job's steps. |
 | `jobs.<id>.steps[].run`    | step             | yes      | Command to run on the host via the step shell. |
 | `jobs.<id>.steps[].shell`  | step             | —        | Shell for `run`: `sh`/`bash`/`cmd`/`powershell`/`pwsh`. Default: `/bin/sh` (unix), `cmd` (Windows). |
-| `jobs.<id>.steps[].working-directory` | step  | —        | Directory (relative to the workspace) to run in. |
+| `jobs.<id>.steps[].working-directory` | step  | —        | Directory (relative to the workspace) to run in; overrides the job default (`.` returns to the workspace root). |
 
 At least one of `on.push` / `on.merge_request` must be present. Branch names in
 both lists are **exact string matches** (no globs). A trigger may declare
 `branches` (allowlist) or `branches-ignore` (denylist), but not both.
+
+Each step runs in a fresh shell — a `cd` inside one step never affects the
+next. The working directory is declarative instead: the job's
+`working-directory` is the default for its steps, a step's own value overrides
+it, and both are resolved relative to the workspace at run time (a path
+escaping the workspace fails the step; an absolute path is anchored under the
+workspace, not taken literally).
 
 ### Job-level branch filters
 

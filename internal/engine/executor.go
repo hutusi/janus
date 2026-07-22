@@ -237,8 +237,14 @@ func (e *Engine) prepare(rs *runState, job *model.Job, step model.Step) (cmdStr,
 	if cmdStr, err = ictx.Interpolate(step.Run, maxInterpolatedCmd); err != nil {
 		return "", "", nil, fmt.Errorf("run: %w", err)
 	}
-	wd, err := ictx.Interpolate(step.WorkingDir, maxInterpolatedDir)
-	if err != nil {
+	// The job's working-directory is the default for its steps; a step's own
+	// value wins. Chosen before interpolation, because resolveDir reads "" as
+	// the workspace root.
+	wd := step.WorkingDir
+	if wd == "" {
+		wd = job.WorkingDir
+	}
+	if wd, err = ictx.Interpolate(wd, maxInterpolatedDir); err != nil {
 		return "", "", nil, fmt.Errorf("working-directory: %w", err)
 	}
 	dir, err = resolveDir(rs.workDir, wd)

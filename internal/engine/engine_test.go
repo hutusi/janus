@@ -11,6 +11,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -251,6 +253,57 @@ jobs:
 	}
 	if !strings.Contains(run.Reason, "no job matches") {
 		t.Errorf("run reason = %q, want it to explain the branch filter", run.Reason)
+	}
+}
+
+func TestRunJobWorkingDirDefault(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    working-directory: a
+    steps:
+      - run: pwd
+      - run: pwd
+        working-directory: b
+`)
+	ws := t.TempDir()
+	for _, d := range []string{"a", "b"} {
+		if err := os.Mkdir(filepath.Join(ws, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := store.NewMemory()
+	run, _ := New(st).Run(context.Background(), wf, model.Event{Kind: model.EventManual}, ws)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if got := strings.TrimSpace(readStepLog(t, st, run.ID, "build", 0)); !strings.HasSuffix(got, "/a") {
+		t.Errorf("step 0 pwd = %q, want the job default subdir a", got)
+	}
+	if got := strings.TrimSpace(readStepLog(t, st, run.ID, "build", 1)); !strings.HasSuffix(got, "/b") {
+		t.Errorf("step 1 pwd = %q, want the step override subdir b", got)
+	}
+}
+
+func TestResolveDir(t *testing.T) {
+	ws := t.TempDir()
+	if got, err := resolveDir(ws, ""); err != nil || got != ws {
+		t.Errorf("resolveDir(ws, \"\") = %q, %v; want the workspace root", got, err)
+	}
+	if got, err := resolveDir(ws, "sub/dir"); err != nil || got != filepath.Join(ws, "sub", "dir") {
+		t.Errorf("resolveDir(ws, sub/dir) = %q, %v; want the joined path", got, err)
+	}
+	for _, escape := range []string{"..", "../outside", "a/../../outside"} {
+		if _, err := resolveDir(ws, escape); err == nil {
+			t.Errorf("resolveDir(ws, %q) should reject escaping the workspace", escape)
+		}
+	}
+	// An absolute path is anchored under the workspace by filepath.Join, not
+	// taken literally — "/etc" runs in <workspace>/etc, never the host's /etc.
+	if got, err := resolveDir(ws, "/etc"); err != nil || got != filepath.Join(ws, "etc") {
+		t.Errorf("resolveDir(ws, /etc) = %q, %v; want it anchored under the workspace", got, err)
 	}
 }
 

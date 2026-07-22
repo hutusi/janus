@@ -48,6 +48,9 @@ func validateInterpolation(wf *model.Workflow) error {
 	}
 	for _, name := range sortedJobNames(wf) {
 		job := wf.Jobs[name]
+		if err := check(fmt.Sprintf("job %q working-directory", name), job.WorkingDir); err != nil {
+			return err
+		}
 		for _, k := range sortedKeys(job.Env) {
 			if err := check(fmt.Sprintf("job %q env.%s", name, k), job.Env[k]); err != nil {
 				return err
