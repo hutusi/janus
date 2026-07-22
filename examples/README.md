@@ -74,17 +74,16 @@ lands. Janus can't distinguish a merge-commit push from a direct push — if you
 want runs only for merged MRs, protect the branch so it can't be pushed to
 directly.
 
-## "Update the branch to the latest"
+## Pinned checkouts: build what the event names
 
-Janus checks out the triggering commit as a **shallow (`--depth 1`), detached HEAD** —
-which already *is* the latest tip of the pushed branch for a push event.
-`git checkout <branch>` or `git pull` would fail (that branch isn't in the shallow
-clone), so the build step uses:
-
-```sh
-git fetch --depth 1 origin "${{ branch }}"
-git reset --hard FETCH_HEAD
-```
+Janus checks out the triggering commit as a **shallow (`--depth 1`), detached
+HEAD**, verified against the event's SHA — `${{ sha }}` / `JANUS_SHA` always
+identify exactly what ran, and a moved ref fails the run rather than silently
+building something else. Build that checkout **as-is**: do *not* re-fetch the
+branch tip in a step (`git fetch` + `reset --hard`), or the run may build a
+newer commit than its recorded SHA — a newer push triggers its own run anyway.
+(`git checkout <branch>` / `git pull` would fail regardless: the branch isn't
+in the shallow clone.)
 
 Each step runs from the workspace root via the step shell — `/bin/sh -c` by default
 on unix (the example is POSIX; on Windows set `shell: sh`, or write cmd/PowerShell).

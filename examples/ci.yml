@@ -29,14 +29,9 @@ env:
 jobs:
   build:
     steps:
-      # Update the pushed branch to its latest tip. Janus checks out the
-      # triggering commit as a shallow, detached HEAD — `git checkout <branch>`
-      # / `git pull` would fail (the branch isn't in the shallow clone) — so
-      # re-fetch the tip to guarantee the very latest.
-      - run: |
-          set -e
-          git fetch --depth 1 origin "${{ branch }}"
-          git reset --hard FETCH_HEAD
+      # The workspace is already the exact verified commit of this event
+      # (shallow, detached HEAD) — build it as-is so ${{ sha }} / JANUS_SHA
+      # always identify what ran; a newer push triggers its own run.
       # Install dependencies and build.
       - run: npm install && npm run build
       # Verify the build output exists and is non-empty.

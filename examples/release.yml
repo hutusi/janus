@@ -27,12 +27,8 @@ env:
 jobs:
   build:
     steps:
-      # Update the pushed branch (master or main) to the latest (see ci.yml
-      # for why fetch+reset, not checkout/pull).
-      - run: |
-          set -e
-          git fetch --depth 1 origin "${{ branch }}"
-          git reset --hard FETCH_HEAD
+      # The workspace is already the exact verified commit of this event —
+      # build it as-is so ${{ sha }} / JANUS_SHA always identify what ran.
       # Install dependencies and build.
       - run: npm install && npm run build
       # Verify the build output exists and is non-empty.
