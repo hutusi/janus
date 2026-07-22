@@ -141,8 +141,10 @@ See [configuration.md](configuration.md#repository-allowlist) for matching rules
   in the SSH form the platform sends, and the service user still needs its own
   key and `known_hosts`. A host missing from `known_hosts` or a
   passphrase-protected key fails fast (`Host key verification failed.` /
-  `Permission denied`) rather than blocking; an operator-set `GIT_SSH_COMMAND`
-  or `GIT_SSH` is respected verbatim and must itself be non-interactive. If the
+  `Permission denied`) rather than blocking; anything the operator configured —
+  `GIT_SSH_COMMAND`/`GIT_SSH`/`GIT_ASKPASS` in the environment, or
+  `core.sshCommand`/`core.askpass` in the service user's gitconfig — is
+  respected verbatim and must itself be non-interactive. If the
   platform advertises an SSH URL that is unreachable from the Janus host (a
   Docker-internal hostname or wrong port in `git_ssh_url`), the run fails with
   `Connection timed out` / `Could not resolve hostname` as its reason — fix

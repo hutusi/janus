@@ -377,32 +377,88 @@ func TestGitEnv(t *testing.T) {
 		return v, ok
 	}
 
-	env := gitEnv([]string{"PATH=/usr/bin"})
+	env := gitEnv([]string{"PATH=/usr/bin"}, false, false)
 	if v, _ := last(env, "GIT_TERMINAL_PROMPT"); v != "GIT_TERMINAL_PROMPT=0" {
 		t.Errorf("default: GIT_TERMINAL_PROMPT entry = %q, want GIT_TERMINAL_PROMPT=0", v)
 	}
 	if v, _ := last(env, "GIT_SSH_COMMAND"); v != "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4" {
 		t.Errorf("default: GIT_SSH_COMMAND entry = %q, want batch-mode ssh with bounded connect and keepalive", v)
 	}
+	if v, _ := last(env, "GIT_ASKPASS"); v != "GIT_ASKPASS=echo" {
+		t.Errorf("default: GIT_ASKPASS entry = %q, want echo (empty answers, no blocking helper)", v)
+	}
 
-	env = gitEnv([]string{"GIT_SSH_COMMAND=ssh -i /custom/key"})
+	env = gitEnv([]string{"GIT_SSH_COMMAND=ssh -i /custom/key"}, false, false)
 	if v, _ := last(env, "GIT_SSH_COMMAND"); v != "GIT_SSH_COMMAND=ssh -i /custom/key" {
 		t.Errorf("operator GIT_SSH_COMMAND not preserved: last entry %q", v)
 	}
 
-	env = gitEnv([]string{"GIT_SSH=/usr/local/bin/myssh"})
+	env = gitEnv([]string{"GIT_SSH=/usr/local/bin/myssh"}, false, false)
 	if v, ok := last(env, "GIT_SSH_COMMAND"); ok {
 		t.Errorf("operator GIT_SSH set, but GIT_SSH_COMMAND appended: %q", v)
 	}
 
-	env = gitEnv([]string{"GIT_TERMINAL_PROMPT=1"})
+	env = gitEnv([]string{"GIT_ASKPASS=/usr/bin/mine"}, false, false)
+	if v, _ := last(env, "GIT_ASKPASS"); v != "GIT_ASKPASS=/usr/bin/mine" {
+		t.Errorf("operator GIT_ASKPASS not preserved: last entry %q", v)
+	}
+
+	// gitconfig-configured transport/askpass (core.sshCommand / core.askpass)
+	// suppress the defaults exactly like the env vars do.
+	env = gitEnv([]string{"PATH=/usr/bin"}, true, false)
+	if v, ok := last(env, "GIT_SSH_COMMAND"); ok {
+		t.Errorf("core.sshCommand configured, but GIT_SSH_COMMAND appended: %q", v)
+	}
+	env = gitEnv([]string{"PATH=/usr/bin"}, false, true)
+	if v, ok := last(env, "GIT_ASKPASS"); ok {
+		t.Errorf("core.askpass configured, but GIT_ASKPASS appended: %q", v)
+	}
+
+	env = gitEnv([]string{"GIT_TERMINAL_PROMPT=1"}, false, false)
 	if v, _ := last(env, "GIT_TERMINAL_PROMPT"); v != "GIT_TERMINAL_PROMPT=0" {
 		t.Errorf("prompt hardening must win over inherited value: last entry %q", v)
 	}
 
-	env = gitEnv([]string{"GIT_SSHX=1", "GIT_SSH_COMMANDX=1"})
+	env = gitEnv([]string{"GIT_SSHX=1", "GIT_SSH_COMMANDX=1"}, false, false)
 	if _, ok := last(env, "GIT_SSH_COMMAND"); !ok {
-		t.Error("similarly-prefixed vars must not suppress the batch-mode default")
+		t.Error("similarly-named vars must not suppress the batch-mode default")
+	}
+}
+
+func TestEnvHasFold(t *testing.T) {
+	base := []string{"Git_Ssh_Command=ssh -i /x", "GIT_SSH_COMMANDX=1", "NOEQUALS"}
+	if envHasFold(base, "GIT_SSH_COMMAND", false) {
+		t.Error("exact matching must not match a differently-cased key")
+	}
+	if !envHasFold(base, "GIT_SSH_COMMAND", true) {
+		t.Error("folded matching must match a differently-cased key (Windows env semantics)")
+	}
+	if envHasFold(base, "GIT_SSH", true) {
+		t.Error("name must match the whole key, not a prefix")
+	}
+}
+
+func TestGitConfigSet(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Isolate from the developer's real configuration.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+
+	ctx := context.Background()
+	if gitConfigSet(ctx, "core.sshCommand") {
+		t.Error("empty config: core.sshCommand should not be reported configured")
+	}
+	if err := os.WriteFile(cfg, []byte("[core]\n\tsshCommand = ssh -i /custom/key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !gitConfigSet(ctx, "core.sshCommand") {
+		t.Error("core.sshCommand set in gitconfig should be reported configured")
+	}
+	if gitConfigSet(ctx, "core.askpass") {
+		t.Error("core.askpass absent should not be reported configured")
 	}
 }
 

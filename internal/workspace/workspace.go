@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -74,6 +75,7 @@ type Workspace struct {
 	Dir  string
 	Head string // full 40-char SHA actually checked out (set after verifyHEAD)
 	keep bool
+	env  []string // hardened env for git subprocesses, built once per checkout
 }
 
 // Checkout shallow-fetches the requested commit into opt.Dir and checks it out
@@ -93,8 +95,14 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 	if err := validateTarget(opt.SHA, opt.Ref); err != nil {
 		return nil, err
 	}
+	// Probed once per checkout, not per git invocation: the hardening defaults
+	// below defer to an operator's gitconfig the same way they defer to
+	// environment variables.
+	env := gitEnv(os.Environ(),
+		gitConfigSet(ctx, "core.sshCommand"),
+		gitConfigSet(ctx, "core.askpass"))
 	if opt.Reuse {
-		if ws, err := reuseCheckout(ctx, opt); err == nil {
+		if ws, err := reuseCheckout(ctx, opt, env); err == nil {
 			return ws, nil
 		}
 		// Self-heal: any reuse failure (missing/corrupt .git, stale lock
@@ -106,7 +114,7 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 	if err := os.MkdirAll(opt.Dir, 0o700); err != nil {
 		return nil, err
 	}
-	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep}
+	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep, env: env}
 
 	for _, args := range [][]string{
 		{"init", "-q"},
@@ -178,11 +186,11 @@ func (w *Workspace) verifyHEAD(ctx context.Context, sha string) error {
 // output) deliberately survive — reset, unlike checkout, also overwrites
 // untracked files that a new commit starts tracking. Any failure is returned
 // so the caller can rebuild the directory from scratch.
-func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
+func reuseCheckout(ctx context.Context, opt Options, env []string) (*Workspace, error) {
 	if _, err := os.Stat(filepath.Join(opt.Dir, ".git")); err != nil {
 		return nil, err
 	}
-	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep}
+	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep, env: env}
 	if err := ws.git(ctx, "remote", "set-url", "origin", opt.RepoURL); err != nil {
 		return nil, err
 	}
@@ -208,27 +216,72 @@ func (w *Workspace) Cleanup() error {
 }
 
 // gitEnv returns base (the daemon's environment) hardened so a checkout can
-// never block until the checkout deadline: GIT_TERMINAL_PROMPT=0 disables
-// credential prompts, and — unless the operator already chose an SSH transport
-// via GIT_SSH_COMMAND or GIT_SSH — ssh runs with BatchMode=yes (host-key and
-// passphrase prompts fail immediately), a bounded connect (an unreachable
-// advertised host fails in ~10s instead of the ~2min TCP timeout), and
-// keepalive probes that abort a stalled connection in ~60s. Host keys are
-// still verified; the operator provisions known_hosts.
-func gitEnv(base []string) []string {
+// never block until the checkout deadline. Defaults apply only where the
+// operator configured nothing — environment or gitconfig (the *Configured
+// flags carry the gitconfig probes); anything they did configure is respected
+// verbatim and must itself be non-interactive:
+//
+//   - GIT_TERMINAL_PROMPT=0, always: no terminal credential prompts.
+//   - Unless GIT_SSH_COMMAND/GIT_SSH is set or core.sshCommand is configured,
+//     ssh runs with BatchMode=yes (host-key and passphrase prompts fail
+//     immediately), a bounded connect (an unreachable advertised host fails in
+//     ~10s instead of the ~2min TCP timeout), and keepalive probes that abort
+//     a stalled connection in ~60s.
+//   - Unless GIT_ASKPASS is set or core.askpass is configured,
+//     GIT_ASKPASS=echo answers any credential question with an empty string —
+//     GIT_TERMINAL_PROMPT does not stop askpass helpers, so a blocking helper
+//     could otherwise occupy the checkout slot until the deadline.
+//
+// Host keys are still verified; the operator provisions known_hosts.
+func gitEnv(base []string, sshConfigured, askpassConfigured bool) []string {
 	env := append(append([]string{}, base...), "GIT_TERMINAL_PROMPT=0")
+	if !sshConfigured && !envHas(base, "GIT_SSH_COMMAND") && !envHas(base, "GIT_SSH") {
+		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4")
+	}
+	if !askpassConfigured && !envHas(base, "GIT_ASKPASS") {
+		env = append(env, "GIT_ASKPASS=echo")
+	}
+	return env
+}
+
+// envHas reports whether base contains a variable named name. Windows
+// environment names are case-insensitive — and Go's exec dedups them that way,
+// so an appended default would clobber a differently-cased operator value —
+// hence the comparison folds case there; elsewhere git reads names exactly, so
+// the match is exact.
+func envHas(base []string, name string) bool {
+	return envHasFold(base, name, runtime.GOOS == "windows")
+}
+
+func envHasFold(base []string, name string, fold bool) bool {
 	for _, kv := range base {
-		if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") || strings.HasPrefix(kv, "GIT_SSH=") {
-			return env
+		i := strings.IndexByte(kv, '=')
+		if i < 0 {
+			continue
+		}
+		key := kv[:i]
+		if key == name || (fold && strings.EqualFold(key, name)) {
+			return true
 		}
 	}
-	return append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4")
+	return false
+}
+
+// gitConfigSet reports whether git resolves a value for key from any config
+// scope (system, global, includes), so the hardening defaults can defer to an
+// operator's gitconfig the same way they defer to environment variables.
+func gitConfigSet(ctx context.Context, key string) bool {
+	out, err := exec.CommandContext(ctx, "git", "config", "--get", key).Output()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
 }
 
 // gitCmd builds the git invocation for this workspace with the hardened env.
 func (w *Workspace) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", w.Dir}, args...)...)
-	cmd.Env = gitEnv(os.Environ())
+	cmd.Env = w.env
+	if cmd.Env == nil {
+		cmd.Env = gitEnv(os.Environ(), false, false)
+	}
 	return cmd
 }
 

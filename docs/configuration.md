@@ -130,24 +130,27 @@ Janus still manages no credentials. The **service user** needs a passphrase-less
 key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
 trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
 `$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Janus enforces
-this: checkout git runs with `GIT_TERMINAL_PROMPT=0` and, unless the service
-environment already sets `GIT_SSH_COMMAND` or `GIT_SSH`, with
-`GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10
+this: checkout git runs with `GIT_TERMINAL_PROMPT=0` and, when the operator
+has configured **nothing** for the transport (no `GIT_SSH_COMMAND`/`GIT_SSH`
+in the service environment, no `core.sshCommand` in the service user's
+gitconfig), with `GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10
 -o ServerAliveInterval=15 -o ServerAliveCountMax=4` — so an unprovisioned
 `known_hosts` or a key that needs a passphrase fails the checkout in seconds
-instead of hanging on a prompt until the checkout deadline. The connect bound
-and keepalive probes cover the network-shaped hangs too: a `git_ssh_url`
-advertising a host or port unreachable from the Janus server (a
+instead of hanging on a prompt until the checkout deadline. Likewise, unless
+`GIT_ASKPASS` or `core.askpass` is configured, `GIT_ASKPASS=echo` answers any
+credential question with an empty string (`GIT_TERMINAL_PROMPT` alone does not
+stop askpass helpers, and a blocking helper would pin the checkout slot). The
+connect bound and keepalive probes cover the network-shaped hangs too: a
+`git_ssh_url` advertising a host or port unreachable from the Janus server (a
 Docker-internal hostname is the classic case) fails in ~10 s with
 `Connection timed out`, and a connection that stalls mid-transfer is aborted
 in ~60 s — in every case the run fails with a named reason instead of sitting
 pending until the deadline.
-Host keys are deliberately still verified; nothing is auto-accepted. One caveat:
-the batch-mode default takes precedence over a `core.sshCommand` in the service
-user's gitconfig — if you need a custom ssh invocation, set `GIT_SSH_COMMAND` in
-the service environment (e.g. `janus.env`) and include `-o BatchMode=yes`
-yourself. Verify as that user, with the SSH URL — that is what Janus will now
-clone:
+Host keys are deliberately still verified; nothing is auto-accepted. Anything
+you configure yourself — `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
+`core.sshCommand`, `core.askpass` — is respected verbatim and must itself be
+non-interactive (include `-o BatchMode=yes` in a custom ssh command). Verify
+as the service user, with the SSH URL — that is what Janus will now clone:
 
 ```sh
 sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git
