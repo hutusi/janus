@@ -56,12 +56,50 @@ var templateFuncs = template.FuncMap{
 		}
 		return s
 	},
+	// duration renders the elapsed time between start and end: "—" when never
+	// started, a snapshot against the render time while still running (the
+	// inline ticker takes over client-side), and the final value once finished.
+	"duration": func(start, end time.Time) string {
+		if start.IsZero() {
+			return "—"
+		}
+		if end.IsZero() {
+			end = time.Now()
+		}
+		return formatDuration(end.Sub(start))
+	},
+	// rfc3339 emits a timestamp for machine consumption (data attributes, the
+	// inline script). Forced UTC so the value stays within [0-9TZ:-], which
+	// html/template's attribute and JS-string escapers pass through untouched.
+	"rfc3339": func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+	"now":     time.Now,
+}
+
+// formatDuration renders d GitHub-Actions style: "12s", "1m 23s", "2h 5m 3s".
+// Whole seconds (floor); negative clamps to "0s". The inline ticker in
+// templates/list.html ({{define "elapsedscript"}}) mirrors this format —
+// keep the two in sync or the text flickers on the auto-refresh reloads.
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	s := int64(d / time.Second)
+	h, m, sec := s/3600, (s%3600)/60, s%60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh %dm %ds", h, m, sec)
+	case m > 0:
+		return fmt.Sprintf("%dm %ds", m, sec)
+	default:
+		return fmt.Sprintf("%ds", sec)
+	}
 }
 
 // indexData is the model for the run-list page.
 type indexData struct {
 	Version string
 	Runs    []*model.RunSummary
+	Refresh bool // auto-refresh while any listed run is not terminal
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
@@ -70,7 +108,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "list.html", indexData{Version: s.version, Runs: runs})
+	// Only the listed page is scanned: an active run pushed past the first 50
+	// wouldn't trigger the refresh, but listing is newest-first so active runs
+	// are essentially always on it.
+	refresh := false
+	for _, r := range runs {
+		if !r.Status.Terminal() {
+			refresh = true
+			break
+		}
+	}
+	s.render(w, "list.html", indexData{Version: s.version, Runs: runs, Refresh: refresh})
 }
 
 // runPageData is the model for the run-detail page.

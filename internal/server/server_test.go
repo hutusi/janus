@@ -497,6 +497,95 @@ func TestDashboardTruncatesLongBranch(t *testing.T) {
 	}
 }
 
+func TestDashboardDurations(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	finished := &model.Run{ID: "done", Status: model.StatusSuccess, WorkflowName: "ci",
+		Event:     model.Event{Kind: model.EventPush, Branch: "main"},
+		CreatedAt: base, StartedAt: base, FinishedAt: base.Add(83 * time.Second),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusSuccess,
+			StartedAt: base, FinishedAt: base.Add(2*time.Hour + 5*time.Minute + 3*time.Second),
+			Steps: []*model.StepRun{
+				{Index: 0, Status: model.StatusSuccess, StartedAt: base, FinishedAt: base.Add(12 * time.Second)},
+				{Index: 1, Status: model.StatusSkipped}, // never started
+			}}}}
+	running := &model.Run{ID: "live", Status: model.StatusRunning, WorkflowName: "ci",
+		Event:     model.Event{Kind: model.EventPush, Branch: "main"},
+		CreatedAt: base.Add(time.Minute), StartedAt: base.Add(time.Minute),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusRunning, StartedAt: base.Add(time.Minute),
+			Steps: []*model.StepRun{{Index: 0, Status: model.StatusRunning, StartedAt: base.Add(time.Minute)}}}}}
+	for _, r := range []*model.Run{finished, running} {
+		if err := st.SaveRun(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := getText(t, ts.URL+"/")
+	if !strings.Contains(list, "1m 23s") {
+		t.Error("run list misses the finished run's duration 1m 23s")
+	}
+	wantAttr := `data-started="` + running.StartedAt.UTC().Format(time.RFC3339) + `"`
+	if !strings.Contains(list, wantAttr) {
+		t.Errorf("run list misses %s for the running run", wantAttr)
+	}
+	if !strings.Contains(list, `<meta http-equiv="refresh" content="5">`) {
+		t.Error("run list with an active run misses the 5s auto-refresh")
+	}
+
+	donePage := getText(t, ts.URL+"/runs/done")
+	for _, want := range []string{"1m 23s", "2h 5m 3s", "12s", "—"} {
+		if !strings.Contains(donePage, want) {
+			t.Errorf("finished run page misses %q", want)
+		}
+	}
+	// The ticker script mentions data-started in its selector, so check for
+	// the attribute form specifically.
+	if strings.Contains(donePage, `data-started="`) {
+		t.Error("finished run page renders a ticking span, want static text only")
+	}
+
+	livePage := getText(t, ts.URL+"/runs/live")
+	if got := strings.Count(livePage, wantAttr); got != 3 {
+		t.Errorf("running run page has %d ticking spans (run/job/step), want 3", got)
+	}
+	for _, page := range []string{list, donePage, livePage} {
+		if !strings.Contains(page, "setInterval") {
+			t.Error("dashboard page misses the elapsed ticker script")
+		}
+	}
+}
+
+func TestIndexRefreshOnlyWhenActive(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	if body := getText(t, ts.URL+"/"); strings.Contains(body, `http-equiv="refresh"`) {
+		t.Error("empty run list auto-refreshes, want static")
+	}
+	terminal := &model.Run{ID: "t1", Status: model.StatusFailed, WorkflowName: "ci",
+		Event: model.Event{Kind: model.EventPush}, CreatedAt: time.Now()}
+	if err := st.SaveRun(terminal); err != nil {
+		t.Fatal(err)
+	}
+	if body := getText(t, ts.URL+"/"); strings.Contains(body, `http-equiv="refresh"`) {
+		t.Error("all-terminal run list auto-refreshes, want static")
+	}
+	active := &model.Run{ID: "a1", Status: model.StatusPending, WorkflowName: "ci",
+		Event: model.Event{Kind: model.EventPush}, CreatedAt: time.Now()}
+	if err := st.SaveRun(active); err != nil {
+		t.Fatal(err)
+	}
+	if body := getText(t, ts.URL+"/"); !strings.Contains(body, `<meta http-equiv="refresh" content="5">`) {
+		t.Error("run list with a pending run misses the 5s auto-refresh")
+	}
+}
+
 func TestHealthDegraded(t *testing.T) {
 	wf, err := pipeline.Parse([]byte("name: ci\non: { push: {} }\njobs:\n  build:\n    steps:\n      - run: echo hi\n"))
 	if err != nil {
