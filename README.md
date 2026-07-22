@@ -113,7 +113,7 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 | `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream |
 | `POST /api/runs/{id}/cancel`      | Cancel a pending or running run (requires `--api-token`; it kills host processes). `202` = cancel delivered — best-effort and asynchronous, poll the run for the terminal `cancelled` state; `409` if the run already finished |
 | `GET /healthz`                    | Health + version |
-| `GET /` and `/runs/{id}`          | Read-only HTML dashboard: statuses plus run/job/step durations (in-progress ones tick live); auto-refreshes while runs are active |
+| `GET /` and `/runs/{id}`          | Read-only HTML dashboard: statuses plus run/job/step durations (in-progress ones tick live); auto-refreshes while runs are active (`/favicon.svg` serves the logo) |
 
 ```sh
 # /api/trigger requires --api-token (it runs code on the host)

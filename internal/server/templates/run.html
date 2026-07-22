@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{if .Refresh}}<meta http-equiv="refresh" content="2">{{end}}
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>Janus — run {{shortID .Run.ID}}</title>
   {{template "style"}}
 </head>
 <body>
   <header>
-    <h1><a href="/">Janus</a> / run <code>{{shortID .Run.ID}}</code></h1>
+    <h1><a href="/">{{template "logo" "currentColor"}} Janus</a> / run <code>{{shortID .Run.ID}}</code></h1>
     <span class="status status-{{.Run.Status}}">{{.Run.Status}}</span>
   </header>
 

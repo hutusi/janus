@@ -563,6 +563,45 @@ func TestDashboardDurations(t *testing.T) {
 	}
 }
 
+func TestFaviconAndLogo(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/favicon.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/favicon.svg status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("/favicon.svg Content-Type = %q, want image/svg+xml", ct)
+	}
+	svg := string(body)
+	if !strings.Contains(svg, "<svg") || !strings.Contains(svg, faviconFill) {
+		t.Errorf("/favicon.svg misses svg markup or the %s brand fill:\n%s", faviconFill, svg)
+	}
+
+	run := &model.Run{ID: "logo", Status: model.StatusSuccess, WorkflowName: "ci",
+		Event: model.Event{Kind: model.EventPush}, CreatedAt: time.Now()}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/runs/logo"} {
+		page := getText(t, ts.URL+path)
+		if !strings.Contains(page, `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`) {
+			t.Errorf("%s misses the favicon link", path)
+		}
+		if !strings.Contains(page, `<svg class="logo"`) || !strings.Contains(page, `fill="currentColor"`) {
+			t.Errorf("%s misses the inline currentColor header logo", path)
+		}
+	}
+}
+
 func TestIndexRefreshOnlyWhenActive(t *testing.T) {
 	st := store.NewMemory()
 	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))

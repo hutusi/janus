@@ -88,6 +88,7 @@ func (s *Server) routes() {
 	// Read-only HTML dashboard (unauthenticated; put a proxy in front if needed).
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("GET /runs/{id}", s.handleRunPage)
+	s.mux.HandleFunc("GET /favicon.svg", s.handleFavicon)
 }
 
 // bearerOK reports whether the request carries the configured API token.

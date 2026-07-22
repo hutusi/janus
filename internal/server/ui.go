@@ -122,6 +122,25 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 	s.render(w, "list.html", indexData{Version: s.version, Runs: runs, Refresh: refresh})
 }
 
+// faviconFill is the brand color for the standalone favicon — the dashboard's
+// running-status blue. Inline header logos use currentColor instead, so only
+// the favicon (which has no surrounding text color) needs a fixed fill.
+const faviconFill = "#1565c0"
+
+// handleFavicon serves the shared "logo" template block as a standalone SVG,
+// so the mark has a single source of truth for both the favicon and the
+// inline header logos.
+func (s *Server) handleFavicon(w http.ResponseWriter, _ *http.Request) {
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, "logo", faviconFill); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = buf.WriteTo(w)
+}
+
 // runPageData is the model for the run-detail page.
 type runPageData struct {
 	Run     *model.Run
