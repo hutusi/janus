@@ -18,13 +18,20 @@ import (
 // gitlabPush posts a GitLab "Push Hook" for repo@sha on the given branch.
 func gitlabPush(t *testing.T, ts *httptest.Server, repo, sha, branch, token string) *http.Response {
 	t.Helper()
+	return gitlabPushTo(t, ts, "/webhooks/gitlab", repo, sha, branch, token)
+}
+
+// gitlabPushTo is gitlabPush against an explicit URL path (with any query
+// string, e.g. "/webhooks/gitlab?pipeline_path=release.yml").
+func gitlabPushTo(t *testing.T, ts *httptest.Server, path, repo, sha, branch, token string) *http.Response {
+	t.Helper()
 	payload := fmt.Sprintf(`{
 		"object_kind": "push",
 		"ref": "refs/heads/%s",
 		"after": "%s",
 		"project": { "git_http_url": %q }
 	}`, branch, sha, repo)
-	req, _ := http.NewRequest("POST", ts.URL+"/webhooks/gitlab", strings.NewReader(payload))
+	req, _ := http.NewRequest("POST", ts.URL+path, strings.NewReader(payload))
 	req.Header.Set("X-Gitlab-Event", "Push Hook")
 	req.Header.Set("X-Gitlab-Token", token)
 	resp, err := http.DefaultClient.Do(req)
@@ -207,6 +214,74 @@ jobs:
 	}
 	if run := pollRun(t, ts, ignored.RunID, 15*time.Second); run.Status != model.StatusSkipped {
 		t.Errorf("master push run status = %s, want skipped", run.Status)
+	}
+}
+
+func TestWebhookPipelinePathOverride(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, _ := initGitRepo(t, `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: echo default
+`)
+	sha := commitFileIn(t, repo, ".janus/release.yml", `name: release
+on: { push: { branches: [main] } }
+jobs:
+  publish:
+    steps:
+      - run: echo releasing
+`)
+	ts := newTestServer(t)
+
+	// ?pipeline_path= on the webhook URL routes this delivery to the named
+	// file instead of the configured default.
+	resp := gitlabPushTo(t, ts, "/webhooks/gitlab?pipeline_path=release.yml", repo, sha, "main", testGitLabSecret)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (accepted)", resp.StatusCode)
+	}
+	var body struct {
+		Status string `json:"status"`
+		RunID  string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Status != "accepted" || body.RunID == "" {
+		t.Fatalf("body = %+v, want accepted with a run_id", body)
+	}
+	run := pollRun(t, ts, body.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%q), want success", run.Status, run.Reason)
+	}
+	if run.WorkflowName != "release" {
+		t.Errorf("workflow = %q, want the overridden release pipeline", run.WorkflowName)
+	}
+	if run.Event.PipelinePath != "release.yml" {
+		t.Errorf("event pipeline_path = %q, want release.yml recorded on the run", run.Event.PipelinePath)
+	}
+}
+
+func TestWebhookPipelinePathEscapeRejected(t *testing.T) {
+	ts := newTestServer(t)
+
+	resp := gitlabPushTo(t, ts, "/webhooks/gitlab?pipeline_path=../escape.yml",
+		"/some/repo", "0123456789abcdef0123456789abcdef01234567", "main", testGitLabSecret)
+	defer func() { _ = resp.Body.Close() }()
+	// Synchronous validation: rejected before any run is recorded, but 2xx so
+	// a URL typo cannot make the platform auto-disable the hook.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (error body)", resp.StatusCode)
+	}
+	var body struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Status != "error" || !strings.Contains(body.Error, "pipeline path") {
+		t.Fatalf("body = %+v, want an error naming the pipeline path", body)
 	}
 }
 

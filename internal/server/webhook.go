@@ -60,6 +60,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An optional ?pipeline_path= on the webhook URL selects a committed
+	// pipeline file other than the configured default, with the same
+	// relative-name rules as the manual API's field — register multiple hooks
+	// on one project to route different deliveries to different pipelines.
+	if p := r.URL.Query().Get("pipeline_path"); p != "" {
+		ev.PipelinePath = p
+	}
+
 	// Logged before Trigger so every delivery leaves evidence of what will be
 	// cloned, even if the background checkout later stalls.
 	s.logger.Info("webhook trigger accepted", "provider", name, "event", ev.Kind, "repo", ev.RepoURL, "branch", ev.Branch)

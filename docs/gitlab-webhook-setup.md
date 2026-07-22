@@ -32,6 +32,21 @@ In your project: **Settings → Webhooks**.
 
 Click **Add webhook**, then **Test → Push events** to verify connectivity.
 
+An optional `?pipeline_path=` query parameter on the URL selects a committed
+pipeline file other than the configured default, named relative to the pipeline
+directory (`?pipeline_path=release.yml` → `.janus/release.yml`; subdirectories
+allowed, escapes rejected — the same rules as the manual API's field). GitLab
+allows several webhooks per project, so different hooks can route to different
+pipelines:
+
+- `https://janus.example.com/webhooks/gitlab` — runs `.janus/ci.yml`
+- `https://janus.example.com/webhooks/gitlab?pipeline_path=release.yml` — runs
+  `.janus/release.yml`
+
+An invalid value answers `200 {"status":"error"}` naming the pipeline path
+(2xx so a URL typo cannot make GitLab auto-disable the hook); the selected file
+is recorded on the run's event.
+
 ## 3. What Janus does with each event
 
 | GitLab event          | Action |
@@ -80,7 +95,8 @@ service journal shows exactly which URL its background checkout is fetching.
 One Janus server serves any number of projects — there is **no per-repo
 registration**. Every delivery carries its repository's clone URL, and Janus
 clones *that* repo for *that* run, reading the pipeline committed **in it**
-(`pipeline_path`, default `.janus/ci.yml`) — so each project defines its own
+(`pipeline_path`, default `.janus/ci.yml`; a hook's `?pipeline_path=` query
+parameter picks a different committed file) — so each project defines its own
 pipeline simply by committing one. To add a project:
 
 1. Point its webhook at the **same** URL and secret as every other project.

@@ -95,8 +95,9 @@ type Event struct {
 
 	// PipelinePath overrides the pipeline file for this trigger, relative to
 	// the configured file's directory, e.g. "release.yml" for
-	// .janus/release.yml (manual API only; empty means the configured
-	// default).
+	// .janus/release.yml (the manual API's pipeline_path field, or a
+	// webhook URL's ?pipeline_path= query parameter; empty means the
+	// configured default).
 	PipelinePath string `json:"pipeline_path,omitempty"`
 }
 
