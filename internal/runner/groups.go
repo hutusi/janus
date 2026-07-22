@@ -28,11 +28,21 @@ import (
 type groupReg struct {
 	mu     sync.Mutex
 	groups map[string]*groupEntry
-	// seen records the newest member ever admitted per key. It deliberately
-	// never shrinks (precedent: Runner.locks) — a few dozen bytes per distinct
-	// (repo, group) pair is the price of refusing stale arrivals after the
-	// group has emptied.
+	// seen records the newest member ever admitted per key, refusing stale
+	// arrivals even after the group has emptied. A mark only matters while an
+	// admitted OLDER trigger could still reach enter, so endTrigger retires
+	// marks below the oldest in-flight seq — memory is bounded by the
+	// admission window, not by how many branches (groups) the daemon has ever
+	// seen.
 	seen map[string]groupNewest
+
+	// Trigger-order accounting. nextSeq is handed out and enrolled in
+	// inflight under the same mu acquisition (beginTrigger): if numbering and
+	// enrollment were two steps, a sweep between them could observe an empty
+	// inflight set and drop a mark the not-yet-enrolled older trigger still
+	// needs. inflight is bounded by the admission cap.
+	nextSeq  uint64
+	inflight map[uint64]struct{}
 }
 
 // groupNewest identifies the newest member ever admitted to a group.
@@ -55,8 +65,44 @@ type groupMember struct {
 
 func newGroupReg() *groupReg {
 	return &groupReg{
-		groups: make(map[string]*groupEntry),
-		seen:   make(map[string]groupNewest),
+		groups:   make(map[string]*groupEntry),
+		seen:     make(map[string]groupNewest),
+		inflight: make(map[uint64]struct{}),
+	}
+}
+
+// beginTrigger stamps a new trigger with the next sequence number and enrolls
+// it as in-flight. Called from the synchronous part of Trigger, so the
+// numbering reflects when triggers arrived — not when their checkouts finish.
+// Every trigger must be enrolled (its group is unknown until parse) and must
+// end with exactly one endTrigger.
+func (g *groupReg) beginTrigger() uint64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.nextSeq++
+	g.inflight[g.nextSeq] = struct{}{}
+	return g.nextSeq
+}
+
+// endTrigger retires seq and drops every high-water mark no in-flight trigger
+// can be stale against (mark seq below the oldest in-flight trigger; all marks
+// when none is in flight). A mark may be dropped while its group entry still
+// has live members — harmless: the sweep condition means every possible future
+// enter carries a larger seq than anything live in that entry.
+func (g *groupReg) endTrigger(seq uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.inflight, seq)
+	var oldest uint64
+	for s := range g.inflight {
+		if oldest == 0 || s < oldest {
+			oldest = s
+		}
+	}
+	for key, newest := range g.seen {
+		if oldest == 0 || newest.seq < oldest {
+			delete(g.seen, key)
+		}
 	}
 }
 

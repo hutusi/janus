@@ -907,6 +907,22 @@ func TestGroupSupersedesQueuedRun(t *testing.T) {
 	}
 	waitRun(t, st, resC.RunID, 15*time.Second)
 	waitSlotsFree(t, r, 5*time.Second)
+
+	// The registry self-cleans: once no trigger is in flight, every
+	// high-water mark is retired (no per-branch memory growth).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.groups.mu.Lock()
+		n := len(r.groups.seen) + len(r.groups.inflight) + len(r.groups.groups)
+		r.groups.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("group registry leaked %d entries after all runs settled", n)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func TestGroupCancelInProgressCancelsRunningRun(t *testing.T) {

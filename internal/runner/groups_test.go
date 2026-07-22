@@ -209,3 +209,89 @@ func TestGroupStaleArrivalAfterGroupEmptied(t *testing.T) {
 		t.Fatal("next should be ready in the empty group")
 	}
 }
+
+// --- High-water mark retirement -----------------------------------------------
+//
+// Marks exist to refuse stale arrivals, and a stale arrival is by definition
+// an admitted older trigger that has not yet entered. Once no such trigger is
+// in flight, a mark is garbage — endTrigger must reclaim it, or the registry
+// grows with every branch the daemon ever sees.
+
+func TestGroupMarkRetainedWhileOlderTriggerInflight(t *testing.T) {
+	g := newGroupReg()
+	t1 := g.beginTrigger() // older trigger, checkout still in flight
+	t2 := g.beginTrigger()
+
+	newer, _ := enterMember(t, g, "k", t2, "newer", false)
+	if !g.claim("k", newer, context.Background()) {
+		t.Fatal("claim newer")
+	}
+	g.leave("k", newer)
+	g.endTrigger(t2)
+
+	// t1 could still arrive stale, so the sweep must keep the mark.
+	if len(g.seen) != 1 {
+		t.Fatalf("seen has %d entries, want the mark retained while t1 is in flight", len(g.seen))
+	}
+	_, staleCtx := enterMember(t, g, "k", t1, "stale", false)
+	if cause := context.Cause(staleCtx); cause == nil || cause.Error() != "superseded by run newer" {
+		t.Fatalf("stale arrival's cancel cause = %v, want 'superseded by run newer'", cause)
+	}
+	g.endTrigger(t1)
+	if len(g.seen) != 0 {
+		t.Fatalf("seen has %d entries after all triggers ended, want 0", len(g.seen))
+	}
+}
+
+func TestGroupMarksClearedWhenNoTriggersInflight(t *testing.T) {
+	g := newGroupReg()
+	t1 := g.beginTrigger()
+	m, _ := enterMember(t, g, "k", t1, "a", false)
+	if !g.claim("k", m, context.Background()) {
+		t.Fatal("claim")
+	}
+	g.leave("k", m)
+	if len(g.seen) != 1 {
+		t.Fatal("mark should exist while its own trigger is in flight")
+	}
+	g.endTrigger(t1)
+	if len(g.seen) != 0 || len(g.groups) != 0 || len(g.inflight) != 0 {
+		t.Fatalf("registry not empty after the only trigger ended: seen=%d groups=%d inflight=%d",
+			len(g.seen), len(g.groups), len(g.inflight))
+	}
+	// A later trigger on the same key is admitted normally.
+	t2 := g.beginTrigger()
+	next, nextCtx := enterMember(t, g, "k", t2, "b", false)
+	if context.Cause(nextCtx) != nil || !isReady(next) {
+		t.Fatal("a fresh trigger on a swept key should be admitted")
+	}
+}
+
+func TestGroupSweepSparesNewerMarks(t *testing.T) {
+	g := newGroupReg()
+	t1 := g.beginTrigger()
+	t2 := g.beginTrigger()
+	t3 := g.beginTrigger()
+
+	a, _ := enterMember(t, g, "k1", t1, "a", false)
+	g.claim("k1", a, context.Background())
+	g.leave("k1", a)
+	c, _ := enterMember(t, g, "k3", t3, "c", false)
+	g.claim("k3", c, context.Background())
+	g.leave("k3", c)
+
+	// t1 ends; the oldest in-flight trigger is now t2, so k1's mark (below
+	// t2) is swept while k3's (above t2) survives — selective, not clear-all.
+	g.endTrigger(t1)
+	if _, ok := g.seen["k1"]; ok {
+		t.Error("k1's mark should be swept: no in-flight trigger can be stale against it")
+	}
+	if _, ok := g.seen["k3"]; !ok {
+		t.Error("k3's mark must survive: t2 is in flight and older than it")
+	}
+	g.endTrigger(t2)
+	g.endTrigger(t3)
+	if len(g.seen) != 0 {
+		t.Fatalf("seen has %d entries after all triggers ended, want 0", len(g.seen))
+	}
+}

@@ -119,8 +119,14 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   newest member ever admitted) refuses older arrivals — necessary because
   members reach the registry only after their checkout, and checkouts finish
   in any order, so an older trigger arriving late must not supersede, kill,
-  or outlive a newer run with a stale commit (the mark survives the group
-  emptying; the `seen` map never shrinks, like the per-repo lock map). The
+  or outlive a newer run with a stale commit. The mark survives the group
+  emptying, but only as long as it can matter: a stale arrival is by
+  definition an admitted older trigger still in flight, so once every
+  in-flight trigger is newer than a mark, the mark is retired — registry
+  memory is bounded by the admission window, not by how many branches
+  (groups) the daemon has ever seen. Sequence hand-out and in-flight
+  enrollment happen under one lock, so a sweep can never drop a mark that a
+  just-admitted older trigger still needs. The
   group gate is ordered *before* the global run semaphore, so a run waiting
   for its group holds no run slot and cannot starve other repos; after
   acquiring a slot the member re-checks its membership under the registry

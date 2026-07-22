@@ -80,8 +80,7 @@ type Runner struct {
 	cancelsMu sync.Mutex
 	cancels   map[string]context.CancelCauseFunc
 
-	groups *groupReg     // concurrency-group membership (workflows with a concurrency: key)
-	seq    atomic.Uint64 // trigger-order counter; stamped synchronously in Trigger so group ordering cannot be skewed by checkout duration
+	groups *groupReg // concurrency-group membership and trigger-order accounting (see groupReg)
 }
 
 // Options configures a Runner.
@@ -457,7 +456,7 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 	// The trigger-order stamp is taken here, in the synchronous path, so
 	// concurrency-group ordering reflects when triggers arrived — not when
 	// their checkouts happen to finish (see groupReg).
-	seq := r.seq.Add(1)
+	seq := r.groups.beginTrigger()
 	// The per-run context makes every wait and the execution itself
 	// individually cancellable (Cancel, a concurrency-group supersede) while
 	// still inheriting Shutdown's r.ctx. Register before SaveRun so any
@@ -472,6 +471,7 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 		r.MarkDegraded()
 		r.unregisterCancel(run.ID)
 		cancelRun(nil)
+		r.groups.endTrigger(seq)
 		release()
 		return Result{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
@@ -488,6 +488,10 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 // run would leak forever.
 func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCauseFunc, seq uint64, run *model.Run, ev model.Event, pipelinePath string, release func()) {
 	defer release()
+	// Last of the LIFO chain that matters to the group registry: the member
+	// has already left its entry (the group defers below) by the time its seq
+	// retires and mark-sweeping runs.
+	defer r.groups.endTrigger(seq)
 	defer cancelRun(nil) // release the context's resources on every path
 	// Deregister only after the terminal state is recorded (defers run LIFO),
 	// so Cancel never observes a registered-but-unsettled gap; a Cancel racing
