@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -565,6 +566,12 @@ func TestAPIAuth(t *testing.T) {
 	if code := rawStatus("GET", ts.URL+"/api/runs", "secret-token"); code != http.StatusOK {
 		t.Errorf("valid token: status = %d, want 200", code)
 	}
+	if code := rawStatus("POST", ts.URL+"/api/runs/x/cancel", ""); code != http.StatusUnauthorized {
+		t.Errorf("cancel without token: status = %d, want 401", code)
+	}
+	if code := rawStatus("POST", ts.URL+"/api/runs/x/cancel", "wrong"); code != http.StatusUnauthorized {
+		t.Errorf("cancel with wrong token: status = %d, want 401", code)
+	}
 }
 
 func TestTriggerRequiresToken(t *testing.T) {
@@ -584,6 +591,16 @@ func TestTriggerRequiresToken(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 when no --api-token is configured", resp.StatusCode)
+	}
+
+	// The cancel route is token-mandatory in the same way.
+	cresp, err := http.Post(ts.URL+"/api/runs/x/cancel", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cresp.Body.Close() }()
+	if cresp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cancel status = %d, want 403 when no --api-token is configured", cresp.StatusCode)
 	}
 }
 
@@ -879,4 +896,106 @@ func statusOf(t *testing.T, url string) int {
 	resp := apiGet(t, url)
 	_ = resp.Body.Close()
 	return resp.StatusCode
+}
+
+// --- Run cancel endpoint ------------------------------------------------------
+
+// postCancel issues an authenticated POST /api/runs/{id}/cancel.
+func postCancel(t *testing.T, ts *httptest.Server, id string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("POST", ts.URL+"/api/runs/"+id+"/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestCancelRunEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("blocking sh pipeline")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: sleep 30
+`)
+	ts := newTestServer(t)
+
+	body, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/heads/main", "branch": "main"})
+	resp := postTrigger(t, ts, string(body))
+	var tr struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&tr)
+	_ = resp.Body.Close()
+	if tr.RunID == "" {
+		t.Fatal("empty run_id")
+	}
+
+	// Wait until the run is actually executing, then cancel it.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		resp := apiGet(t, ts.URL+"/api/runs/"+tr.RunID)
+		var run model.Run
+		_ = json.NewDecoder(resp.Body).Decode(&run)
+		_ = resp.Body.Close()
+		if run.Status == model.StatusRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run never reached running (last %s)", run.Status)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	cresp := postCancel(t, ts, tr.RunID)
+	b, _ := io.ReadAll(cresp.Body)
+	_ = cresp.Body.Close()
+	if cresp.StatusCode != http.StatusAccepted {
+		t.Fatalf("cancel status = %d, want 202; body=%s", cresp.StatusCode, b)
+	}
+
+	run := pollRun(t, ts, tr.RunID, 15*time.Second)
+	if run.Status != model.StatusCancelled {
+		t.Fatalf("run status = %s, want cancelled", run.Status)
+	}
+	if run.Reason != "cancelled via API" {
+		t.Errorf("reason = %q, want %q", run.Reason, "cancelled via API")
+	}
+
+	// Cancelling a settled run conflicts.
+	c2 := postCancel(t, ts, tr.RunID)
+	_ = c2.Body.Close()
+	if c2.StatusCode != http.StatusConflict {
+		t.Errorf("second cancel status = %d, want 409", c2.StatusCode)
+	}
+}
+
+func TestCancelRunNotFound(t *testing.T) {
+	ts := newTestServer(t)
+	resp := postCancel(t, ts, "no-such-run")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestCancelFinishedRunConflict(t *testing.T) {
+	st := store.NewMemory()
+	if err := st.SaveRun(&model.Run{ID: "done-1", Status: model.StatusSuccess, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	ts := newTestServerStore(t, st)
+	resp := postCancel(t, ts, "done-1")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
 }

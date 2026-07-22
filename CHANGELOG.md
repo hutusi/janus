@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Manual run cancellation** — `POST /api/runs/{id}/cancel` cancels a pending or running run: a queued run settles `cancelled` without executing (its never-started jobs recorded `skipped`), a running run has its step process groups killed. The run's `reason` records `cancelled via API`. The endpoint is token-mandatory like `/api/trigger` (it kills host processes; without `--api-token` it is disabled with `403`), answers `409` for already-finished runs, and its `202` is asynchronous and best-effort — a run whose last process exits concurrently still finishes on its own terms.
+
 ## [0.2.0] - 2026-07-22
 
 ### Added

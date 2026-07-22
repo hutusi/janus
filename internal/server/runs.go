@@ -48,6 +48,30 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, run)
 }
 
+// handleCancelRun requests cancellation of a pending or running run. The 202
+// is asynchronous and best-effort: the cancel was delivered and the run will
+// normally settle cancelled (reason "cancelled via API"), but a run whose last
+// process exits concurrently still finishes on its own terms.
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	run, err := s.store.GetRun(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if run.Status.Terminal() {
+		writeError(w, http.StatusConflict, fmt.Sprintf("run %s already finished (%s)", id, run.Status))
+		return
+	}
+	if s.runner == nil || !s.runner.Cancel(id, "cancelled via API") {
+		// The run settled between GetRun and Cancel (or this server has no
+		// runner and nothing to cancel with).
+		writeError(w, http.StatusConflict, fmt.Sprintf("run %s already finished", id))
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling", "run_id": id})
+}
+
 // handleLogs serves logs as plain text. With ?job=&step= it returns (or, with
 // ?follow=1, streams) one step's output; otherwise it returns a snapshot of the
 // whole run's logs with a header per step.
