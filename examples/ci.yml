@@ -1,4 +1,5 @@
-# Build pipeline — runs on every push to any branch except master/main.
+# Build pipeline (the default .janus/ci.yml) — runs on every push to any
+# branch except master/main.
 #
 # GitLab sends a Push Hook for each pushed branch, so `push` with
 # `branches-ignore` covers every feature branch with no list to maintain.

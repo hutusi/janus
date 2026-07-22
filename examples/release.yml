@@ -5,7 +5,7 @@
 # trigger is `push`, not `merge_request`. Janus can't tell a merge-commit push from a
 # direct push — enforce "merged MR only" with branch protection on master/main.
 #
-# Same build job as build.yml, restricted to master/main, plus a deploy job. All jobs
+# Same build job as ci.yml, restricted to master/main, plus a deploy job. All jobs
 # in a run share one workspace directory, so `deploy` sees the `out/` from `build`.
 #
 # Auth: Janus forwards only PATH/HOME/LANG/LC_ALL/TZ/TMPDIR to steps (no secrets, no
@@ -25,7 +25,7 @@ env:
 jobs:
   build:
     steps:
-      # Update the pushed branch (master or main) to the latest (see build.yml
+      # Update the pushed branch (master or main) to the latest (see ci.yml
       # for why fetch+reset, not checkout/pull).
       - run: |
           set -e

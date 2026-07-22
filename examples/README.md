@@ -6,7 +6,7 @@ grammar.
 
 | File | What it does |
 |------|--------------|
-| [`build.yml`](build.yml) | On every push to any branch **except** `master`/`main`, builds the pushed branch and verifies the `out/` output. |
+| [`ci.yml`](ci.yml) | On every push to any branch **except** `master`/`main`, builds the pushed branch and verifies the `out/` output. |
 | [`release.yml`](release.yml) | On every update to `master`/`main`, the same build, then publishes `out/` to a separate "pages" repository. |
 
 ## How Janus uses these
@@ -19,9 +19,10 @@ filters*, one trigger each. Pick the model that fits:
 
 - **Branch routing: build every branch, release master/main** — the two files
   are complementary (`branches-ignore: [master, main]` vs
-  `branches: [master, main]`). Commit build.yml's content as `.janus/ci.yml`
-  and release.yml as `.janus/release.yml`, then register **two webhooks** on
-  the project (GitLab allows any number, same URL + secret):
+  `branches: [master, main]`). Copy both into your repo's `.janus/` directory
+  (they are already named for it: `.janus/ci.yml` + `.janus/release.yml`),
+  then register **two webhooks** on the project (GitLab allows any number,
+  same URL + secret):
 
   - `https://janus.example.com/webhooks/gitlab` — runs `.janus/ci.yml`
   - `https://janus.example.com/webhooks/gitlab?pipeline_path=release.yml` —
@@ -48,7 +49,7 @@ filters*, one trigger each. Pick the model that fits:
 
 ## Triggers: a denylist for CI, `push` for releases
 
-`build.yml` uses `branches-ignore: [master, main]` — an exact-match **denylist**, so
+`ci.yml` uses `branches-ignore: [master, main]` — an exact-match **denylist**, so
 every other pushed branch builds with no list to maintain. GitLab sends a Push Hook
 per pushed branch; Janus matches the branch against the filter and builds that branch.
 
