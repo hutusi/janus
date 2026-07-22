@@ -12,10 +12,20 @@ import "github.com/hutusi/janus/internal/model"
 // like "if" or "uses") never collide with the strict key checking above.
 
 type rawWorkflow struct {
-	Name string            `yaml:"name"`
-	On   rawTriggers       `yaml:"on"`
-	Env  map[string]string `yaml:"env"`
-	Jobs map[string]rawJob `yaml:"jobs"`
+	Name        string            `yaml:"name"`
+	On          rawTriggers       `yaml:"on"`
+	Concurrency *rawConcurrency   `yaml:"concurrency"`
+	Env         map[string]string `yaml:"env"`
+	Jobs        map[string]rawJob `yaml:"jobs"`
+}
+
+// rawConcurrency accepts only the mapping form; GitHub's bare-string shorthand
+// (`concurrency: my-group`) is a decode error, keeping the spec closed. A null
+// value (`concurrency:` with nothing under it) decodes to a nil pointer and is
+// treated as absent.
+type rawConcurrency struct {
+	Group            string `yaml:"group"`
+	CancelInProgress bool   `yaml:"cancel-in-progress"`
 }
 
 type rawTriggers struct {
@@ -57,6 +67,12 @@ func (r *rawWorkflow) toModel() *model.Workflow {
 	}
 	if r.On.MergeRequest != nil {
 		wf.On.MergeRequest = &model.BranchFilter{Branches: r.On.MergeRequest.Branches, Ignore: r.On.MergeRequest.Ignore}
+	}
+	if r.Concurrency != nil {
+		wf.Concurrency = &model.Concurrency{
+			Group:            r.Concurrency.Group,
+			CancelInProgress: r.Concurrency.CancelInProgress,
+		}
 	}
 	for name, rj := range r.Jobs {
 		steps := make([]model.Step, len(rj.Steps))

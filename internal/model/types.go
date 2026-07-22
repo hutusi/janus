@@ -11,8 +11,23 @@ import "time"
 type Workflow struct {
 	Name string
 	On   Triggers
-	Env  map[string]string
-	Jobs map[string]*Job
+	// Concurrency serializes runs of this workflow that share a group. Nil
+	// means no grouping: runs execute independently, as if the key were absent.
+	Concurrency *Concurrency
+	Env         map[string]string
+	Jobs        map[string]*Job
+}
+
+// Concurrency is the workflow-level `concurrency:` key. Group is a template
+// over the closed interpolation set minus sha/short_sha (which would make
+// every run its own group); empty means the implicit "<name>-<branch|ref>"
+// group. At runtime a group is always scoped to the triggering repo, so
+// workflows in different repos never affect each other. Per group at most one
+// run executes and at most one waits; a newer trigger supersedes the waiting
+// run, and with CancelInProgress it also cancels the executing one.
+type Concurrency struct {
+	Group            string
+	CancelInProgress bool
 }
 
 // Triggers describes which events start the workflow. A nil pointer means the
@@ -141,12 +156,16 @@ type Run struct {
 	// Reason records why a run reached a terminal state before executing any
 	// job: a checkout or pipeline-parse failure, or an event that did not match
 	// the workflow's on: filters. Empty for runs that executed.
-	Reason       string    `json:"reason,omitempty"`
-	Jobs         []*JobRun `json:"jobs"`
-	CreatedAt    time.Time `json:"created_at"`
-	StartedAt    time.Time `json:"started_at,omitzero"`
-	FinishedAt   time.Time `json:"finished_at,omitzero"`
-	WorkspaceDir string    `json:"workspace_dir,omitempty"`
+	Reason string    `json:"reason,omitempty"`
+	Jobs   []*JobRun `json:"jobs"`
+	// ConcurrencyGroup is the expanded (repo-scoped at runtime, but stored
+	// without the repo prefix) concurrency group the run belongs to. Empty for
+	// workflows without a concurrency: key.
+	ConcurrencyGroup string    `json:"concurrency_group,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	StartedAt        time.Time `json:"started_at,omitzero"`
+	FinishedAt       time.Time `json:"finished_at,omitzero"`
+	WorkspaceDir     string    `json:"workspace_dir,omitempty"`
 }
 
 // RunSummary is the compact projection of a Run used for listings: it omits

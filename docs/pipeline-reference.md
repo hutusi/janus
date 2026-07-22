@@ -22,6 +22,10 @@ on:                                       # required: at least one trigger
   merge_request:                          # GitLab term; normalized internally
     branches-ignore: [wip]                # optional; every branch except these
 
+concurrency:                              # optional; serialize runs that share a group
+  group: deploy-${{ branch }}             # optional; default: <name>-<branch or ref>
+  cancel-in-progress: true                # optional; default false = queue
+
 env:                                      # optional; workflow-wide variables
   CI: "true"
 
@@ -56,6 +60,8 @@ jobs:                                     # required: at least one job
 | `on.push.branches-ignore`  | top level        | —        | Run on push to every branch **except** these. Mutually exclusive with `branches`. |
 | `on.merge_request.branches`| top level        | —        | Run on merge requests targeting these branches. |
 | `on.merge_request.branches-ignore` | top level | —       | Run on merge requests except those **targeting** these branches. Mutually exclusive with `branches`. |
+| `concurrency.group`        | top level        | —        | [Concurrency group](#concurrency-groups) template; tokens limited to `branch`, `ref`, `event`, `env.NAME`. Empty/omitted = `<name>-<branch or ref>`. |
+| `concurrency.cancel-in-progress` | top level  | —        | `true`: a newer run in the group also cancels the one currently executing. Default `false` (queue). |
 | `env`                      | top / job / step | —        | Environment variables, merged in that order. |
 | `jobs.<id>`                | top level        | yes      | A job; the map key is the job name (letters, digits, `-`, `_` only). |
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
@@ -95,6 +101,33 @@ run itself finishes `skipped` with a reason. This is the supported way to run
 one pipeline with a branch-dependent tail (build everywhere, deploy on `main`)
 — see [examples/ci.yml](../examples/ci.yml); there is still no `if:` or
 expression language.
+
+### Concurrency groups
+
+`concurrency:` serializes runs of the workflow that expand to the same
+**group**. Per group, at most **one run executes and one waits**:
+
+- A newer trigger **supersedes** the waiting run — it finishes `cancelled` with
+  the reason `superseded by run <id>` and never executes. Pushing five commits
+  in quick succession runs the first and the last, not all five.
+- With `cancel-in-progress: true` the newer trigger also cancels the run
+  currently *executing* (its processes are killed); with the default `false`
+  the executing run finishes and the newest waiter starts.
+
+`group:` is a template over a **subset** of the interpolation tokens: `branch`,
+`ref`, `event`, and `env.NAME` (resolved against the workflow-level `env:`
+only, so the group is known before any job runs). `sha` / `short_sha` are a
+validation error here — every run would form its own group, silently disabling
+the serialization the key exists to provide. With `group:` omitted or empty the
+group is `<workflow name>-<branch>` (falling back to the ref when the event has
+no branch), i.e. per-branch serialization of this workflow.
+
+Groups are always **scoped to the triggering repository** — the same `group:`
+string in two different repos never interferes. A bare `concurrency:` key with
+nothing under it decodes as absent and does nothing; GitHub's string shorthand
+(`concurrency: my-group`) is a validation error — use the mapping form. The
+key applies to daemon-triggered runs (webhooks and the trigger API); a local
+`janus run` executes immediately and ignores it.
 
 ### Step shell
 
@@ -165,7 +198,8 @@ These produce a clear validation error rather than running:
 - `uses:` / `with:` — no third-party actions; steps run host commands only.
 - `runs-on:`, `container:`, `services:` — jobs run as host processes.
 - `secrets:` — use host environment variables.
-- `cache:`, `permissions:`, `concurrency:`, `outputs:`, step `id:`/`name:`.
+- `cache:`, `permissions:`, `outputs:`, step `id:`/`name:`; `concurrency:`
+  anywhere but the top level, or as GitHub's string shorthand.
 - Job names outside `[A-Za-z0-9_-]` — the store derives log-file names from
   the job name, and a wider charset would let two jobs share one file.
 - Absurd sizes — a pipeline file over 1 MiB (rejected at read, before parsing),
@@ -187,8 +221,10 @@ These produce a clear validation error rather than running:
 - A step fails on the first non-zero exit; that fails the job.
 - On the first job failure the run is **fail-fast**: in-flight processes are
   cancelled and not-yet-started jobs are marked skipped. The run itself is
-  `failed` — the run-level `cancelled` status is reserved for external
-  interruption (daemon shutdown, Ctrl-C on `janus run`).
+  `failed` — the run-level `cancelled` status means external interruption:
+  daemon shutdown, Ctrl-C on `janus run`, a
+  [concurrency-group](#concurrency-groups) supersede, or
+  `POST /api/runs/{id}/cancel`.
 
 See [architecture.md](architecture.md) for the full lifecycle. Runnable sample
 pipelines live in [examples/](../examples/).
