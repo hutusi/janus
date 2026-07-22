@@ -146,6 +146,7 @@ type runPageData struct {
 	Run     *model.Run
 	Logs    string
 	Refresh bool // auto-refresh while the run is not terminal
+	Version string
 }
 
 func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +161,7 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 		Run:     run,
 		Logs:    logs.String(),
 		Refresh: !run.Status.Terminal(),
+		Version: s.version,
 	})
 }
 

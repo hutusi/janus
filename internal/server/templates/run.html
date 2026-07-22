@@ -12,6 +12,7 @@
   <header>
     <h1><a href="/">{{template "logo" "currentColor"}} Janus</a> / run <code>{{shortID .Run.ID}}</code></h1>
     <span class="status status-{{.Run.Status}}">{{.Run.Status}}</span>
+    <span class="muted">{{.Version}}</span>
   </header>
 
   <main>

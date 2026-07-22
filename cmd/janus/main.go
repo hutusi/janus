@@ -35,8 +35,24 @@ import (
 	"github.com/hutusi/janus/internal/workspace"
 )
 
-// version is overridden at build time via -ldflags "-X main.version=...".
-var version = "dev"
+// version (the release tag) and commit (the short hash) are overridden at
+// build time via -ldflags "-X main.version=... -X main.commit=...". They are
+// stamped separately so the tag survives builds where git tags are absent
+// (shallow CI clones), where a single git-describe string would silently
+// degrade to a bare commit hash.
+var (
+	version = "dev"
+	commit  = ""
+)
+
+// versionString is the human-facing form, e.g. "v0.2.0 (f97e513)" — shown by
+// `janus version`, the dashboard header, and /healthz.
+func versionString() string {
+	if commit == "" {
+		return version
+	}
+	return version + " (" + commit + ")"
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -56,7 +72,7 @@ func main() {
 	case "run":
 		err = runRun(args)
 	case "version", "-version", "--version":
-		fmt.Println("janus", version)
+		fmt.Println("janus", versionString())
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
@@ -203,7 +219,7 @@ func runServe(args []string) error {
 
 	srv := &http.Server{
 		Addr:    cfg.Addr,
-		Handler: server.New(st, rn, version, opts...).Handler(),
+		Handler: server.New(st, rn, versionString(), opts...).Handler(),
 		// ReadTimeout bounds reading a request (headers + body), so a
 		// slow-loris POST cannot pin a connection open. WriteTimeout must stay
 		// unset: the ?follow=1 log stream is a deliberately long-lived
@@ -218,7 +234,7 @@ func runServe(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("janus listening", "addr", cfg.Addr, "version", version, "workspace_root", cfg.WorkspaceRoot)
+		logger.Info("janus listening", "addr", cfg.Addr, "version", versionString(), "workspace_root", cfg.WorkspaceRoot)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

@@ -1,7 +1,8 @@
 BINARY  := janus
 PKG     := ./...
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X main.version=$(VERSION)
+VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
+COMMIT  := $(shell git describe --always --dirty --exclude '*' 2>/dev/null)
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 

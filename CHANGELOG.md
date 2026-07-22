@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Version tag shown alongside the commit** — the dashboard header, `janus version`, and `/healthz` now display `v0.2.0 (f97e513)` instead of a raw `git describe` string. The tag and short commit are stamped as two separate ldflags vars (`main.version` / `main.commit`), so the tag no longer silently degrades to a bare commit hash in builds where git tags are absent (shallow CI clones). The run page header now shows the version too, like the run list.
+
 - **Janus medallion logo & favicon** — the dashboard gains a visual identity: a coin-style mark (the two-faced Janus bust in a ring, as on the Roman coin) rendered inline in both page headers, and served at `/favicon.svg` as the browser tab icon. One shared SVG template block is the single source for both — inline it follows the page's text color, standalone it uses the dashboard's status blue — so the binary stays the only artifact (no image files, no new routes beyond `GET /favicon.svg`).
 
 - **Dashboard durations** — the run list gains a Duration column and the run page shows a duration on the run, each job, and each step, GitHub-Actions style (`12s`, `1m 23s`, `2h 5m 3s`; `—` for never-started). In-progress durations tick every second via a tiny inline script — anchored to server timestamps and advanced by a monotonic client delta, so a skewed browser clock can't distort them; finished durations are static server-rendered text, and pages without anything in progress register no timer. The run list also auto-refreshes every 5s while any listed run is still pending or running (the run page already refreshed every 2s).

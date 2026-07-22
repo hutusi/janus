@@ -43,3 +43,21 @@ func TestRunInitDefaultPath(t *testing.T) {
 		t.Errorf("expected %s to be written: %v", config.DefaultPath, err)
 	}
 }
+
+func TestVersionString(t *testing.T) {
+	origVersion, origCommit := version, commit
+	t.Cleanup(func() { version, commit = origVersion, origCommit })
+
+	version, commit = "v0.2.0", ""
+	if got := versionString(); got != "v0.2.0" {
+		t.Errorf("versionString without commit = %q, want v0.2.0", got)
+	}
+	version, commit = "v0.2.0", "f97e513"
+	if got := versionString(); got != "v0.2.0 (f97e513)" {
+		t.Errorf("versionString with commit = %q, want v0.2.0 (f97e513)", got)
+	}
+	version, commit = "dev", "f97e513-dirty"
+	if got := versionString(); got != "dev (f97e513-dirty)" {
+		t.Errorf("versionString tagless = %q, want dev (f97e513-dirty)", got)
+	}
+}
