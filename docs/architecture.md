@@ -87,9 +87,13 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
 
 ## Concurrency & safety
 
-- All mutations to a `Run` go through `runState.update`, which holds a mutex and
-  persists under it — so parallel job goroutines never race, and the store always
-  serializes a consistent snapshot. Tests run under `-race`.
+- During **execution**, all mutations to a `Run` go through `runState.update`,
+  which holds a mutex and persists under it — so parallel job goroutines never
+  race, and the store always serializes a consistent snapshot. *Before*
+  execution the run needs no such serialization: it is owned exclusively by its
+  single trigger goroutine (`runner.runTrigger` populates it and records
+  pre-execution outcomes directly), and stores snapshot on write, so no other
+  goroutine can observe a partial mutation. Tests run under `-race`.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
 - Checkout git subprocesses run non-interactively (`GIT_TERMINAL_PROMPT=0`,
   ssh `BatchMode=yes` + bounded connect + keepalive unless the operator sets

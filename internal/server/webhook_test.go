@@ -339,6 +339,23 @@ jobs:
 	}
 }
 
+func TestRedactURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://user:token@gitlab.example.com/acme/app.git", "https://gitlab.example.com/acme/app.git"},
+		{"https://oauth2@gitlab.example.com/acme/app.git", "https://gitlab.example.com/acme/app.git"},
+		{"https://gitlab.example.com/acme/app.git", "https://gitlab.example.com/acme/app.git"},
+		{"ssh://git@gitlab.example.com/acme/app.git", "ssh://gitlab.example.com/acme/app.git"},
+		{"git@gitlab.example.com:acme/app.git", "git@gitlab.example.com:acme/app.git"}, // scp-style: not a secret
+		{"://not a url", "://not a url"},
+		{"/local/path", "/local/path"},
+	}
+	for _, tc := range cases {
+		if got := redactURL(tc.in); got != tc.want {
+			t.Errorf("redactURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestWebhookCheckoutFailureRecordsFailedRun(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

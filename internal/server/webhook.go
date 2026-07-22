@@ -4,10 +4,28 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
 )
+
+// redactURL strips userinfo from ://-style URLs for logging — a clone URL may
+// carry embedded credentials (https://user:token@host/...), which must not
+// reach the journal. scp-style git@host:path strings pass through unchanged
+// (their "user" is not a secret), as does anything unparsable.
+func redactURL(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.User == nil {
+		return s
+	}
+	u.User = nil
+	return u.String()
+}
 
 // maxWebhookBody caps a webhook payload. Oversized bodies are rejected with
 // 413 — truncating instead would fail signature verification with a
@@ -70,12 +88,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Logged before Trigger so every delivery leaves evidence of what will be
 	// cloned, even if the background checkout later stalls.
-	s.logger.Info("webhook trigger accepted", "provider", name, "event", ev.Kind, "repo", ev.RepoURL, "branch", ev.Branch)
+	s.logger.Info("webhook trigger accepted", "provider", name, "event", ev.Kind, "repo", redactURL(ev.RepoURL), "branch", ev.Branch)
 	res, err := s.runner.Trigger(*ev)
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
 		// A rejected repo is a policy decision (or an attack / misconfig) — a
 		// hard 403, distinct from the 2xx "no pipeline" case below.
-		s.logger.Warn("webhook rejected: repo not allowed", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch)
+		s.logger.Warn("webhook rejected: repo not allowed", "provider", name, "repo", redactURL(ev.RepoURL), "branch", ev.Branch)
 		writeJSON(w, http.StatusForbidden, map[string]string{"status": "rejected", "reason": "repository not in allowlist"})
 		return
 	}
@@ -83,7 +101,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// Overload is Janus's concern, not the repository's — deliberately
 		// non-2xx so the provider retries the delivery instead of the event
 		// being silently dropped.
-		s.logger.Warn("webhook shed: runner at capacity", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch)
+		s.logger.Warn("webhook shed: runner at capacity", "provider", name, "repo", redactURL(ev.RepoURL), "branch", ev.Branch)
 		w.Header().Set("Retry-After", "30")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "busy"})
 		return
@@ -91,7 +109,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, runner.ErrStoreUnavailable) {
 		// The store couldn't record the run — Janus's problem, not the repo's.
 		// Non-2xx so the provider retries instead of the event being dropped.
-		s.logger.Error("webhook could not be recorded: store unavailable", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch, "err", err)
+		s.logger.Error("webhook could not be recorded: store unavailable", "provider", name, "repo", redactURL(ev.RepoURL), "branch", ev.Branch, "err", err)
 		w.Header().Set("Retry-After", "30")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 		return
@@ -99,7 +117,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Synchronous validation failed (an over-long event field). The
 		// push/MR itself is the repository's concern — stay 2xx, but log it.
-		s.logger.Warn("webhook trigger did not run", "provider", name, "repo", ev.RepoURL, "branch", ev.Branch, "err", err)
+		s.logger.Warn("webhook trigger did not run", "provider", name, "repo", redactURL(ev.RepoURL), "branch", ev.Branch, "err", err)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "error", "error": err.Error()})
 		return
 	}
