@@ -1180,3 +1180,76 @@ jobs:
 		}
 	}
 }
+
+func TestTriggerPathFilterFailsOpenOnDiffError(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, `name: ci
+on:
+  push:
+    paths: ["src/**"]
+jobs:
+  build:
+    steps:
+      - run: echo built
+  docs:
+    paths: ["docs/**"]
+    steps:
+      - run: echo docs
+`)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	// A valid-hex but unreachable base: the fetch fails, the changed set stays
+	// unknown, and every path filter must fail open — a broken diff must never
+	// skip CI (a regression that skips here would silently drop real work).
+	res, err := r.Trigger(model.Event{Kind: model.EventPush, RepoURL: repo,
+		SHA: sha, Before: strings.Repeat("d", 40), Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("diff-error push: status = %s (%s), want success (fail open)", run.Status, run.Reason)
+	}
+	for _, jr := range run.Jobs {
+		if jr.Status != model.StatusSuccess {
+			t.Errorf("diff-error push: job %s = %s, want success (filters inert)", jr.Name, jr.Status)
+		}
+	}
+}
+
+func TestTriggerMergeRequestIgnoresJobPathFilters(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, `name: ci
+on:
+  merge_request: {}
+jobs:
+  app:
+    paths: ["src/**"]
+    steps:
+      - run: echo app
+`)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	// Path filters are push-only: an MR event never computes a changed set,
+	// so a job-level paths key must not skip anything.
+	res, err := r.Trigger(model.Event{Kind: model.EventMergeRequest, RepoURL: repo,
+		SHA: sha, Ref: "refs/heads/feature", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("MR run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	if got := run.Jobs[0].Status; got != model.StatusSuccess {
+		t.Errorf("MR job status = %s, want success (path filters inert on MR events)", got)
+	}
+}
