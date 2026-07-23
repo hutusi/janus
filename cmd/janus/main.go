@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -46,12 +47,56 @@ var (
 )
 
 // versionString is the human-facing form, e.g. "v0.2.0 (f97e513)" — shown by
-// `janus version`, the dashboard header, and /healthz.
+// `janus version`, the dashboard header, and /healthz. Builds that bypass the
+// Makefile/release ldflags (plain go build/install) fall back to the metadata
+// the Go toolchain embeds on its own; only `go run`, which embeds nothing,
+// still reports plain "dev".
 func versionString() string {
-	if commit == "" {
-		return version
+	v, c := version, commit
+	if v == "dev" && c == "" {
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			if bv, bc := fromBuildInfo(bi); bv != "" || bc != "" {
+				if bv != "" {
+					v = bv
+				}
+				c = bc
+			}
+		}
 	}
-	return version + " (" + commit + ")"
+	if c == "" {
+		return v
+	}
+	return v + " (" + c + ")"
+}
+
+// fromBuildInfo derives (version, commit) from Go's embedded build info: since
+// Go 1.24 `go build` from a git checkout stamps a tag-derived main-module
+// version (the tag itself, or a pseudo-version past it) plus vcs.revision /
+// vcs.modified. Unknown values come back empty. A "+dirty" version suffix is
+// stripped — dirtiness is reported on the commit, matching the ldflags form.
+func fromBuildInfo(bi *debug.BuildInfo) (string, string) {
+	v := bi.Main.Version
+	if v == "(devel)" {
+		v = ""
+	}
+	v = strings.TrimSuffix(v, "+dirty")
+	var rev string
+	var dirty bool
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if len(rev) > 7 {
+		rev = rev[:7]
+	}
+	if rev != "" && dirty {
+		rev += "-dirty"
+	}
+	return v, rev
 }
 
 func main() {
