@@ -623,7 +623,7 @@ func TestSyncMirrorCreatesAndResolves(t *testing.T) {
 	if head != sha {
 		t.Errorf("resolved head = %s, want %s (abbreviation expanded)", head, sha)
 	}
-	for key, want := range map[string]string{"core.bare": "true", "gc.auto": "0"} {
+	for key, want := range map[string]string{"core.bare": "true", "gc.auto": "0", "maintenance.auto": "false"} {
 		out, err := exec.Command("git", "-C", mirror, "config", "--get", key).CombinedOutput()
 		if err != nil {
 			t.Fatalf("config %s: %v\n%s", key, err, out)

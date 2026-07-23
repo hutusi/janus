@@ -319,8 +319,10 @@ func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 // this specific pairing is safe: every mirror file becomes visible only via
 // atomic rename (packs, indexes, loose objects, refs), so a hardlink can
 // never capture partial content; the objects this run needs were verified
-// present while the sync held the repo lock; and gc.auto=0 rules out the
-// repack/prune rewrites the warning is really about. What remains is a rare
+// present while the sync held the repo lock; and auto-maintenance is
+// disabled in the mirror (gc.auto=0, maintenance.auto=false — see
+// configureMirror), ruling out the repack/prune rewrites the warning is
+// really about. What remains is a rare
 // clone *error* (e.g. a --prune'd loose ref unlinked between readdir and
 // link), which the caller handles by retrying with a direct checkout.
 // Serializing clones against fetches was considered and rejected: it would
@@ -429,16 +431,28 @@ func ensureMirror(ctx context.Context, dir, repoURL string) (*Workspace, error) 
 //     (GitLab's refs/merge-requests/*, refs/keep-around/*, ...) with
 //     unbounded growth. --replace-all then --add leaves exactly these two
 //     entries no matter what was there before.
-//   - gc.auto=0 — git must never repack or prune behind a concurrent --local
-//     clone: existing packs staying immutable is what makes materializing
-//     without the repo lock safe (and keeps commits fetched by bare SHA
-//     alive despite being unreachable from any ref).
+//   - gc.auto=0 AND maintenance.auto=false — git must never repack or prune
+//     behind a concurrent --local clone: existing packs staying immutable is
+//     what makes materializing without the repo lock safe (and keeps commits
+//     fetched by bare SHA alive despite being unreachable from any ref).
+//     Both knobs are needed: gc.auto=0 covers the default post-fetch gc task
+//     (and older gits that run `gc --auto` directly), but host config can
+//     route auto-maintenance to tasks that ignore gc.auto and rewrite object
+//     files (maintenance.strategy=incremental, loose-objects,
+//     incremental-repack — e.g. set globally by scalar), and modern git
+//     detaches maintenance into the background, outliving the repo lock.
+//     maintenance.auto=false stops the post-fetch hook entirely; scheduled
+//     `git maintenance start` jobs touch only registered repos, which the
+//     mirror never is. Repo-local config rather than fetch flags — flag
+//     spellings vary by git version and unknown flags error, while config
+//     keys are always accepted and cover every git invocation in the mirror.
 func configureMirror(ctx context.Context, m *Workspace, repoURL string) error {
 	for _, args := range [][]string{
 		{"config", "remote.origin.url", repoURL},
 		{"config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"},
 		{"config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"},
 		{"config", "gc.auto", "0"},
+		{"config", "maintenance.auto", "false"},
 	} {
 		if err := m.git(ctx, args...); err != nil {
 			return err
