@@ -613,11 +613,15 @@ func TestIndexPagination(t *testing.T) {
 		t.Error("page 3 lists pg1, want only the oldest run")
 	}
 
-	// Degradation: a page past the end renders empty but keeps the pager; a
-	// non-numeric page falls back to page 1.
-	past := getText(t, ts.URL+"/?page=99")
-	if strings.Contains(past, "pg0") || !strings.Contains(past, `class="pager`) {
-		t.Error("past-the-end page should list nothing but keep the pager")
+	// Degradation: a page past the end renders empty but keeps the pager
+	// (including int64-max, whose offset multiplication would wrap negative
+	// without the maxIndexPage clamp and mislabel page 1); a non-numeric page
+	// falls back to page 1.
+	for _, q := range []string{"/?page=99", "/?page=9223372036854775807"} {
+		past := getText(t, ts.URL+q)
+		if strings.Contains(past, "pg0") || !strings.Contains(past, `class="pager`) {
+			t.Errorf("%s should list nothing but keep the pager", q)
+		}
 	}
 	if bad := getText(t, ts.URL+"/?page=abc"); !strings.Contains(bad, "pg0") {
 		t.Error("non-numeric page should fall back to page 1")
@@ -659,6 +663,11 @@ func TestFaviconAndLogo(t *testing.T) {
 		}
 		if !strings.Contains(page, `<svg class="logo"`) || !strings.Contains(page, `fill="currentColor"`) {
 			t.Errorf("%s misses the inline currentColor header logo", path)
+		}
+		// The visible "Janus" wordmark names the mark; the svg must stay
+		// decorative or screen readers announce "Janus Janus".
+		if !strings.Contains(page, `aria-hidden="true"`) || strings.Contains(page, "aria-label") {
+			t.Errorf("%s inline logo must be aria-hidden with no aria-label", path)
 		}
 	}
 }

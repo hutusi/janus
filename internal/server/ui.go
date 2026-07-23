@@ -101,6 +101,12 @@ func formatDuration(d time.Duration) string {
 // can shrink it.
 var indexPageSize = 50
 
+// maxIndexPage caps the user-supplied ?page= so the offset multiplication in
+// handleIndex cannot overflow and wrap negative (which the stores would read
+// as "from the start", rendering page 1 under an absurd page label). Not a
+// product limit: at 50 runs/page this is 50M runs, far beyond any retention.
+const maxIndexPage = 1 << 20
+
 // indexData is the model for the run-list page.
 type indexData struct {
 	Version string
@@ -113,7 +119,7 @@ type indexData struct {
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	pageNo := 1
 	if n, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && n > 1 {
-		pageNo = n
+		pageNo = min(n, maxIndexPage)
 	}
 	runs, err := s.store.ListRuns(indexPageSize, (pageNo-1)*indexPageSize)
 	if err != nil {
