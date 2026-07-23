@@ -13,7 +13,8 @@ internal/
                      Event, ChangedFiles, runtime (Run/JobRun/StepRun)
   pipeline           YAML parse + strict validation + interpolation   (pure, no I/O)
   engine             DAG build, scheduler, host-process executor
-  workspace          per-run shallow git checkout + cleanup, or in-place reuse;
+  workspace          per-run shallow git checkout + cleanup, in-place reuse, or
+                     per-repo bare mirror + local per-run materialization;
                      ChangedFiles (fetch the push base at depth 1 + bounded tree diff)
   provider           webhook providers (GitLab) -> normalized Event
   runner             checkout -> parse -> match -> path-filter -> execute coordinator
@@ -73,7 +74,11 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
                            a ref-fallback checkout is verified against the
                            requested SHA — a moved ref fails the run rather
                            than silently executing a commit the run's
-                           metadata does not identify)
+                           metadata does not identify; under
+                           workspace_strategy: mirror the commit is first
+                           synced into a per-repo bare mirror and the
+                           workspace is cloned locally from it, with any
+                           mirror failure falling back to this direct path)
       read + pipeline.Parse  (pipeline_path from the checkout; a manual
                               trigger's pipeline_path field overrides it)
       match event against on:  (manual always matches)
@@ -183,7 +188,13 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   instead gets one reusable `persist-*` directory, updated by fetch +
   hard-reset and serialized by a per-repo **try-lock** — a concurrent trigger
   for the same repo falls back to a fresh per-run dir rather than blocking.
-  `persist-*` dirs deliberately survive restarts and the sweep.
+  Under `workspace_strategy: mirror`, the same try-lock serializes only the
+  per-repo `mirror-*` bare mirror's fetch; runs then materialize ordinary
+  `run-*` dirs from the mirror without holding the lock (packs are immutable,
+  `gc.auto` is off), and lock contention or any mirror failure falls back to
+  a direct checkout — the mirror accelerates runs but can never fail one the
+  direct path would serve. `persist-*` and `mirror-*` dirs deliberately
+  survive restarts and the sweep.
 - **No isolation:** jobs are host processes and can do anything the `janus` user
   can. Run as a dedicated unprivileged user. Containers are out of scope.
 

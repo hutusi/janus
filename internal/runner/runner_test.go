@@ -72,6 +72,9 @@ func TestSweepRemovesOrphanWorkspaces(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "persist-abc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, "mirror-abc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	st := store.NewMemory()
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1})
 	if err := r.Sweep(); err != nil {
@@ -85,6 +88,9 @@ func TestSweepRemovesOrphanWorkspaces(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "persist-abc")); err != nil {
 		t.Error("persist-* workspace should survive the sweep")
+	}
+	if _, err := os.Stat(filepath.Join(root, "mirror-abc")); err != nil {
+		t.Error("mirror-* cache should survive the sweep")
 	}
 }
 
@@ -1251,5 +1257,168 @@ jobs:
 	}
 	if got := run.Jobs[0].Status; got != model.StatusSuccess {
 		t.Errorf("MR job status = %s, want success (path filters inert on MR events)", got)
+	}
+}
+
+func TestTriggerMirrorUsesRunDirAndCachesMirror(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyMirror})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	if base := filepath.Base(run.WorkspaceDir); !strings.HasPrefix(base, "run-") {
+		t.Fatalf("workspace dir = %q, want a per-run run-* dir", run.WorkspaceDir)
+	}
+	waitGone(t, run.WorkspaceDir, 5*time.Second)
+	mirror := filepath.Join(root, mirrorDirName(repo))
+	if _, err := os.Stat(mirror); err != nil {
+		t.Fatalf("mirror cache should exist after the run: %v", err)
+	}
+
+	// Remove the source repo and trigger the same commit again: the run must
+	// be served entirely from the mirror — any fetch would fail loudly.
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	run2 := waitRun(t, st, res2.RunID, 15*time.Second)
+	if run2.Status != model.StatusSuccess {
+		t.Fatalf("cached run status = %s (%s), want success without the remote", run2.Status, run2.Reason)
+	}
+	waitGone(t, run2.WorkspaceDir, 5*time.Second)
+}
+
+func TestTriggerMirrorContentionFallsBackToFresh(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyMirror})
+
+	// Simulate a sync of the same repo holding the mirror lock.
+	mu := r.repoLock(repo)
+	mu.Lock()
+	defer mu.Unlock()
+
+	res, err := r.Trigger(model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger under contention: %v", err)
+	}
+	// Completes without ever blocking on the held lock, straight from the remote.
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	if base := filepath.Base(run.WorkspaceDir); !strings.HasPrefix(base, "run-") {
+		t.Errorf("workspace dir = %q, want a run-* dir", run.WorkspaceDir)
+	}
+	if _, err := os.Stat(filepath.Join(root, mirrorDirName(repo))); !os.IsNotExist(err) {
+		t.Errorf("no mirror may be created while the lock is held (stat err = %v)", err)
+	}
+	waitGone(t, run.WorkspaceDir, 5*time.Second)
+}
+
+func TestTriggerMirrorSyncFailureFallsBack(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("permission-based failure injection needs POSIX permissions")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root ignores permissions")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyMirror})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// Build a healthy mirror, then make it unwritable: the sync's config
+	// write fails while the structural probe still passes, so the mirror is
+	// broken in a way self-healing must not "fix" by deleting the cache.
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	if run := waitRun(t, st, res.RunID, 15*time.Second); run.Status != model.StatusSuccess {
+		t.Fatalf("priming run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	mirror := filepath.Join(root, mirrorDirName(repo))
+	if err := os.Chmod(mirror, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(mirror, 0o755) })
+
+	// A new commit forces the sync to touch the read-only mirror; the run
+	// must still succeed on the direct path — the mirror is inert on error.
+	if err := os.WriteFile(filepath.Join(repo, "next.txt"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-q", "-m", "v2"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha2 := strings.TrimSpace(string(out))
+	res2, err := r.Trigger(model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha2, Ref: "refs/heads/main", Branch: "main"})
+	if err != nil {
+		t.Fatalf("Trigger with broken mirror: %v", err)
+	}
+	run2 := waitRun(t, st, res2.RunID, 15*time.Second)
+	if run2.Status != model.StatusSuccess {
+		t.Fatalf("run status with broken mirror = %s (%s), want success via direct checkout", run2.Status, run2.Reason)
+	}
+}
+
+func TestTriggerMirrorConcurrentSameRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyMirror})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// Two concurrent triggers of the same repo: one may win the mirror lock,
+	// the other must proceed regardless (mirror or direct) — both succeed.
+	res1, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("first Trigger: %v", err)
+	}
+	res2, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	for _, id := range []string{res1.RunID, res2.RunID} {
+		if run := waitRun(t, st, id, 30*time.Second); run.Status != model.StatusSuccess {
+			t.Errorf("run %s status = %s (%s), want success", id, run.Status, run.Reason)
+		}
 	}
 }

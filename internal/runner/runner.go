@@ -87,6 +87,7 @@ type Runner struct {
 const (
 	StrategyFresh      = "fresh"      // new directory per run, shallow fetch, removed after
 	StrategyPersistent = "persistent" // one reusable workspace per repo, updated in place
+	StrategyMirror     = "mirror"     // per-repo bare mirror cache; pristine per-run checkouts materialized locally
 )
 
 // Options configures a Runner.
@@ -234,7 +235,8 @@ func (r *Runner) pruneHistory() {
 	}
 }
 
-// repoLock returns the mutex serializing the persistent workspace of repoURL.
+// repoLock returns the mutex serializing repoURL's shared on-disk state: its
+// persistent workspace, or its bare mirror's fetches.
 func (r *Runner) repoLock(repoURL string) *sync.Mutex {
 	r.locksMu.Lock()
 	defer r.locksMu.Unlock()
@@ -256,10 +258,18 @@ func persistDirName(repoURL string) string {
 	return "persist-" + hex.EncodeToString(sum[:8])
 }
 
+// mirrorDirName is the stable directory name for a repo's bare mirror, with
+// the same keying rationale as persistDirName.
+func mirrorDirName(repoURL string) string {
+	sum := sha256.Sum256([]byte(repoURL))
+	return "mirror-" + hex.EncodeToString(sum[:8])
+}
+
 // Sweep removes leftover workspaces from a previous process (crash recovery).
 // Call once at startup, before serving. Only per-run directories (run-*) are
-// removed; persistent per-repo workspaces (persist-*) deliberately survive
-// restarts — their caches are the point.
+// removed; per-repo caches — persistent workspaces (persist-*) and bare
+// mirrors (mirror-*) — deliberately survive restarts: their caches are the
+// point, and a mirror interrupted mid-creation self-heals on next use.
 func (r *Runner) Sweep() error {
 	matches, err := filepath.Glob(filepath.Join(r.wsRoot, "run-*"))
 	if err != nil {
@@ -547,15 +557,35 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// Workspace selection. Under the persistent strategy each repo has one
 	// reusable directory, serialized by a per-repo try-lock; if another run of
 	// the same repo holds it, this run falls back to a fresh per-run dir —
-	// occasionally slower, never blocking.
+	// occasionally slower, never blocking. Under the mirror strategy every run
+	// gets a fresh dir, materialized from a per-repo bare mirror when one can
+	// be synced; the same try-lock serializes only the sync (materialization
+	// reads immutable objects, so same-repo runs overlap freely), and on
+	// contention or any sync failure the run proceeds on the direct
+	// from-remote path — the mirror is an accelerator, never a gate.
 	var wsDir string
 	reuse := false
 	unlock := func() {}
-	if r.strategy == StrategyPersistent {
+	var mirrorDir, mirrorSHA string
+	switch r.strategy {
+	case StrategyPersistent:
 		if mu := r.repoLock(ev.RepoURL); mu.TryLock() {
 			unlock = mu.Unlock
 			reuse = true
 			wsDir = filepath.Join(r.wsRoot, persistDirName(ev.RepoURL))
+		}
+	case StrategyMirror:
+		if mu := r.repoLock(ev.RepoURL); mu.TryLock() {
+			dir := filepath.Join(r.wsRoot, mirrorDirName(ev.RepoURL))
+			sctx, scancel := context.WithTimeout(runCtx, checkoutTimeout)
+			head, err := workspace.SyncMirror(sctx, dir, ev.RepoURL, ev.SHA, ev.Ref)
+			scancel()
+			mu.Unlock()
+			if err != nil {
+				r.logger.Warn("mirror sync failed; using direct checkout", "repo", ev.RepoURL, "err", err)
+			} else {
+				mirrorDir, mirrorSHA = dir, head
+			}
 		}
 	}
 	if !reuse {
@@ -571,12 +601,29 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// originating HTTP request: the caller already answered its client, and a
 	// webhook platform hanging up must not cancel work it was just told is
 	// underway.
-	cctx, cancel := context.WithTimeout(runCtx, checkoutTimeout)
-	ws, err := workspace.Checkout(cctx, workspace.Options{
+	opt := workspace.Options{
 		Dir: wsDir, RepoURL: ev.RepoURL, SHA: ev.SHA, Ref: ev.Ref,
 		Keep: r.keepWS || reuse, Reuse: reuse,
-	})
+	}
+	if mirrorDir != "" {
+		opt.MirrorDir, opt.SHA = mirrorDir, mirrorSHA
+	}
+	cctx, cancel := context.WithTimeout(runCtx, checkoutTimeout)
+	ws, err := workspace.Checkout(cctx, opt)
 	cancel()
+	if err != nil && mirrorDir != "" && runCtx.Err() == nil {
+		// Materializing from the mirror failed (e.g. it was damaged between
+		// sync and clone): retry once directly from the remote under a fresh
+		// deadline, so a broken mirror never fails a run the direct path
+		// would have served. The dir may hold a partial clone — clear it so
+		// the direct checkout starts from an empty directory.
+		r.logger.Warn("mirror checkout failed; retrying with direct checkout", "repo", ev.RepoURL, "err", err)
+		_ = os.RemoveAll(wsDir)
+		opt.MirrorDir, opt.SHA = "", ev.SHA
+		cctx, cancel = context.WithTimeout(runCtx, checkoutTimeout)
+		ws, err = workspace.Checkout(cctx, opt)
+		cancel()
+	}
 	if err != nil {
 		// MkdirTemp created wsDir before Checkout validated the target, so a
 		// validation (or any pre-workspace) failure would otherwise leave an
