@@ -627,10 +627,10 @@ func TestPipelineFile(t *testing.T) {
 }
 
 func TestMatches(t *testing.T) {
-	pushMain := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{Branches: []string{"main"}}}}
-	mrMain := &model.Workflow{On: model.Triggers{MergeRequest: &model.BranchFilter{Branches: []string{"main"}}}}
-	pushAny := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{}}}
-	pushIgnoreMain := &model.Workflow{On: model.Triggers{Push: &model.BranchFilter{Ignore: []string{"main"}}}}
+	pushMain := &model.Workflow{On: model.Triggers{Push: &model.Trigger{BranchFilter: model.BranchFilter{Branches: []string{"main"}}}}}
+	mrMain := &model.Workflow{On: model.Triggers{MergeRequest: &model.Trigger{BranchFilter: model.BranchFilter{Branches: []string{"main"}}}}}
+	pushAny := &model.Workflow{On: model.Triggers{Push: &model.Trigger{}}}
+	pushIgnoreMain := &model.Workflow{On: model.Triggers{Push: &model.Trigger{BranchFilter: model.BranchFilter{Ignore: []string{"main"}}}}}
 
 	tests := []struct {
 		name string

@@ -20,12 +20,47 @@ var jobNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // only to reject the absurd, so per-run artifacts (the run JSON, the log-file
 // set, the dashboard's step table) stay finite for a decidedly-bounded input.
 const (
-	maxJobs         = 256
-	maxStepsPerJob  = 256
-	maxJobNameLen   = 256
-	maxCommandBytes = 64 << 10
-	maxGroupLen     = 256
+	maxJobs           = 256
+	maxStepsPerJob    = 256
+	maxJobNameLen     = 256
+	maxCommandBytes   = 64 << 10
+	maxGroupLen       = 256
+	maxPathPatterns   = 50
+	maxPathPatternLen = 256
 )
+
+// validatePathFilter checks one `paths`/`paths-ignore` declaration (trigger or
+// job level; where names the owner for error messages). Beyond the shared
+// allowlist-or-denylist rule, empty lists are rejected — `paths: []` would
+// match nothing and silently skip every push, a trap rather than a feature.
+func validatePathFilter(where string, f *model.PathFilter) error {
+	if f == nil {
+		return nil
+	}
+	if f.Paths != nil && f.Ignore != nil {
+		return fmt.Errorf("%s cannot set both `paths` and `paths-ignore`", where)
+	}
+	for key, patterns := range map[string][]string{"paths": f.Paths, "paths-ignore": f.Ignore} {
+		if patterns == nil {
+			continue
+		}
+		if len(patterns) == 0 {
+			return fmt.Errorf("%s `%s` must list at least one pattern", where, key)
+		}
+		if len(patterns) > maxPathPatterns {
+			return fmt.Errorf("%s `%s` has too many patterns: %d (max %d)", where, key, len(patterns), maxPathPatterns)
+		}
+		for _, p := range patterns {
+			if p == "" {
+				return fmt.Errorf("%s `%s` contains an empty pattern", where, key)
+			}
+			if len(p) > maxPathPatternLen {
+				return fmt.Errorf("%s `%s` pattern is too long: %d characters (max %d)", where, key, len(p), maxPathPatternLen)
+			}
+		}
+	}
+	return nil
+}
 
 // allowedShells is the closed set of step `shell:` values. "" selects the OS
 // default (/bin/sh on unix, cmd on Windows); the engine (shellArgv) maps each
@@ -51,12 +86,24 @@ func validate(wf *model.Workflow) error {
 	// A trigger takes `branches` (allowlist) or `branches-ignore` (denylist),
 	// never both. Slice nil-ness survives toModel, so nil vs non-nil
 	// distinguishes "key absent" from "key present" (even `branches: []`).
+	// The same rule applies to `paths`/`paths-ignore` — which are further
+	// restricted to push: an MR's changed set needs a merge base against the
+	// target branch, history the shallow checkout deliberately avoids.
 	for _, tr := range []struct {
 		key string
-		f   *model.BranchFilter
+		f   *model.Trigger
 	}{{"push", wf.On.Push}, {"merge_request", wf.On.MergeRequest}} {
-		if tr.f != nil && tr.f.Branches != nil && tr.f.Ignore != nil {
+		if tr.f == nil {
+			continue
+		}
+		if tr.f.Branches != nil && tr.f.Ignore != nil {
 			return fmt.Errorf("`on.%s` cannot set both `branches` and `branches-ignore`", tr.key)
+		}
+		if tr.f.Paths != nil && tr.key != "push" {
+			return fmt.Errorf("`on.%s` does not support `paths`/`paths-ignore` — path filters apply to push events only", tr.key)
+		}
+		if err := validatePathFilter(fmt.Sprintf("`on.%s`", tr.key), tr.f.Paths); err != nil {
+			return err
 		}
 	}
 	if wf.Concurrency != nil && len(wf.Concurrency.Group) > maxGroupLen {
@@ -80,6 +127,9 @@ func validate(wf *model.Workflow) error {
 		// Same allowlist-or-denylist rule as the on: filters.
 		if job.Filter != nil && job.Filter.Branches != nil && job.Filter.Ignore != nil {
 			return fmt.Errorf("job %q cannot set both `branches` and `branches-ignore`", name)
+		}
+		if err := validatePathFilter(fmt.Sprintf("job %q", name), job.PathFilter); err != nil {
+			return err
 		}
 		if len(job.Steps) == 0 {
 			return fmt.Errorf("job %q: at least one step is required", name)

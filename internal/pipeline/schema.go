@@ -29,22 +29,26 @@ type rawConcurrency struct {
 }
 
 type rawTriggers struct {
-	Push         *rawBranchFilter `yaml:"push"`
-	MergeRequest *rawBranchFilter `yaml:"merge_request"`
+	Push         *rawTrigger `yaml:"push"`
+	MergeRequest *rawTrigger `yaml:"merge_request"`
 }
 
-type rawBranchFilter struct {
-	Branches []string `yaml:"branches"`
-	Ignore   []string `yaml:"branches-ignore"`
+type rawTrigger struct {
+	Branches    []string `yaml:"branches"`
+	Ignore      []string `yaml:"branches-ignore"`
+	Paths       []string `yaml:"paths"`
+	PathsIgnore []string `yaml:"paths-ignore"`
 }
 
 type rawJob struct {
-	Needs      []string          `yaml:"needs"`
-	Branches   []string          `yaml:"branches"`
-	Ignore     []string          `yaml:"branches-ignore"`
-	WorkingDir string            `yaml:"working-directory"`
-	Env        map[string]string `yaml:"env"`
-	Steps      []rawStep         `yaml:"steps"`
+	Needs       []string          `yaml:"needs"`
+	Branches    []string          `yaml:"branches"`
+	Ignore      []string          `yaml:"branches-ignore"`
+	Paths       []string          `yaml:"paths"`
+	PathsIgnore []string          `yaml:"paths-ignore"`
+	WorkingDir  string            `yaml:"working-directory"`
+	Env         map[string]string `yaml:"env"`
+	Steps       []rawStep         `yaml:"steps"`
 }
 
 type rawStep struct {
@@ -62,12 +66,8 @@ func (r *rawWorkflow) toModel() *model.Workflow {
 		Env:  r.Env,
 		Jobs: make(map[string]*model.Job, len(r.Jobs)),
 	}
-	if r.On.Push != nil {
-		wf.On.Push = &model.BranchFilter{Branches: r.On.Push.Branches, Ignore: r.On.Push.Ignore}
-	}
-	if r.On.MergeRequest != nil {
-		wf.On.MergeRequest = &model.BranchFilter{Branches: r.On.MergeRequest.Branches, Ignore: r.On.MergeRequest.Ignore}
-	}
+	wf.On.Push = r.On.Push.toModel()
+	wf.On.MergeRequest = r.On.MergeRequest.toModel()
 	if r.Concurrency != nil {
 		wf.Concurrency = &model.Concurrency{
 			Group:            r.Concurrency.Group,
@@ -91,7 +91,27 @@ func (r *rawWorkflow) toModel() *model.Workflow {
 		if rj.Branches != nil || rj.Ignore != nil {
 			job.Filter = &model.BranchFilter{Branches: rj.Branches, Ignore: rj.Ignore}
 		}
+		job.PathFilter = pathFilter(rj.Paths, rj.PathsIgnore)
 		wf.Jobs[name] = job
 	}
 	return wf
+}
+
+func (t *rawTrigger) toModel() *model.Trigger {
+	if t == nil {
+		return nil
+	}
+	return &model.Trigger{
+		BranchFilter: model.BranchFilter{Branches: t.Branches, Ignore: t.Ignore},
+		Paths:        pathFilter(t.Paths, t.PathsIgnore),
+	}
+}
+
+// pathFilter builds a PathFilter only when a key was present, preserving
+// nil-ness like the branch filters.
+func pathFilter(paths, ignore []string) *model.PathFilter {
+	if paths == nil && ignore == nil {
+		return nil
+	}
+	return &model.PathFilter{Paths: paths, Ignore: ignore}
 }
