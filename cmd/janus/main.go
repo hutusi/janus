@@ -229,10 +229,10 @@ func runServe(args []string) error {
 		Strategy:     cfg.WorkspaceStrategy,
 		Logger:       logger,
 	})
-	if cfg.WorkspaceStrategy == "persistent" {
+	if cfg.WorkspaceStrategy == runner.StrategyPersistent {
 		logger.Info("persistent workspaces enabled; builds reuse per-repo directories (not hermetic)")
 	}
-	if cfg.WorkspaceStrategy == "mirror" {
+	if cfg.WorkspaceStrategy == runner.StrategyMirror {
 		logger.Info("mirror workspaces enabled; per-repo bare mirrors cached under workspace_root, runs stay hermetic")
 	}
 	if err := rn.Sweep(); err != nil {

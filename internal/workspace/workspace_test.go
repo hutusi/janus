@@ -805,6 +805,33 @@ func TestSyncMirrorSelfHeals(t *testing.T) {
 			t.Errorf("refspecs after two syncs = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("transient probe failure keeps the mirror", func(t *testing.T) {
+		// A cancelled context (shutdown, checkout deadline) failing the
+		// health probe says nothing about the repository — it must error
+		// without deleting the cache, unlike git's own corruption verdicts
+		// above.
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if _, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main"); err != nil {
+			t.Fatalf("first SyncMirror: %v", err)
+		}
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := SyncMirror(cancelled, mirror, src, sha, "refs/heads/main"); err == nil {
+			t.Error("SyncMirror with a cancelled context should fail")
+		}
+		out, err := exec.Command("git", "-C", mirror, "rev-parse", "--is-bare-repository").CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "true" {
+			t.Fatalf("mirror damaged by a transient probe failure: %q (%v)", strings.TrimSpace(string(out)), err)
+		}
+		head, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror after transient failure: %v", err)
+		}
+		if head != sha {
+			t.Errorf("head = %s, want %s", head, sha)
+		}
+	})
 }
 
 func TestSyncMirrorRejectsUnknownSHAAndInjection(t *testing.T) {

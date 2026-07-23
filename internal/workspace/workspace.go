@@ -380,19 +380,39 @@ func SyncMirror(ctx context.Context, dir, repoURL, sha, ref string) (string, err
 }
 
 // ensureMirror opens the bare mirror at dir, creating it if absent. A dir
-// that exists but doesn't answer as a bare repository — garbage, or debris
-// from an interrupted creation — is rebuilt from scratch once (the same
-// self-heal contract as persistent workspaces), and the mirror's required
-// configuration is re-asserted on every call (see configureMirror). Fetch
-// failures deliberately do NOT rebuild: they're usually the network's fault,
-// and deleting a large healthy mirror on a transient error would force a
-// full re-clone on the same bad network.
+// that exists but that git itself rejects as a bare repository — garbage, or
+// debris from an interrupted creation — is rebuilt from scratch once (the
+// same self-heal contract as persistent workspaces), and the mirror's
+// required configuration is re-asserted on every call (see configureMirror).
+// Only git's own verdict triggers the rebuild: a probe that fails because
+// the context was cancelled or git couldn't run at all (resource or
+// permission trouble) says nothing about the repository, so it propagates as
+// an error — the caller falls back to a direct checkout for this run and the
+// cache survives. Fetch failures likewise deliberately do NOT rebuild:
+// they're usually the network's fault, and deleting a large healthy mirror
+// on a transient error would force a full re-clone on the same bad network.
 func ensureMirror(ctx context.Context, dir, repoURL string) (*Workspace, error) {
 	m := &Workspace{Dir: dir, keep: true, env: gitEnv(os.Environ(), false, false)}
 	healthy := false
 	if _, err := os.Stat(dir); err == nil {
-		if bare, err := m.gitOut(ctx, "rev-parse", "--is-bare-repository"); err == nil && bare == "true" {
+		switch bare, err := m.gitOut(ctx, "rev-parse", "--is-bare-repository"); {
+		case err == nil && bare == "true":
 			healthy = true
+		case err == nil:
+			// git answered, and the answer is "not a bare repository" —
+			// rebuild below.
+		case ctx.Err() != nil:
+			// Cancellation/deadline — checked before the ExitError test,
+			// because a deadline killing git mid-run also surfaces as one.
+			return nil, err
+		default:
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				// git never ran to a verdict (spawn or resource failure):
+				// unknown health is not corruption.
+				return nil, err
+			}
+			// git ran and rejected the directory — rebuild below.
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
