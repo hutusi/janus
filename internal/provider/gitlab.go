@@ -78,6 +78,7 @@ type glCommit struct {
 func (g GitLab) parseGitLabPush(body []byte) (*model.Event, error) {
 	var p struct {
 		Ref         string     `json:"ref"`
+		Before      string     `json:"before"`
 		After       string     `json:"after"`
 		CheckoutSHA string     `json:"checkout_sha"`
 		Project     glProject  `json:"project"`
@@ -104,6 +105,11 @@ func (g GitLab) parseGitLabPush(body []byte) (*model.Event, error) {
 		Ref:      p.Ref,
 		Branch:   strings.TrimPrefix(p.Ref, "refs/heads/"),
 		SHA:      sha,
+	}
+	// An all-zeros before means a newly created branch: there is no base to
+	// diff against, so leave Before empty and let path filters fail open.
+	if !isZeroSHA(p.Before) {
+		ev.Before = p.Before
 	}
 	if n := len(p.Commits); n > 0 {
 		ev.Title = p.Commits[n-1].Title

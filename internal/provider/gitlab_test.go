@@ -163,3 +163,32 @@ func TestGitLabParseIgnored(t *testing.T) {
 		t.Errorf("MR close: got %v, want ErrIgnoredEvent", err)
 	}
 }
+
+func TestGitLabPushBefore(t *testing.T) {
+	gl := GitLab{}
+	mk := func(before string) []byte {
+		return []byte(`{"ref":"refs/heads/main","before":"` + before + `",
+			"after":"da1560886d4f094c3e6c9ef40349f7d38b5d27d7",
+			"project":{"git_http_url":"https://gitlab.example.com/acme/app.git"}}`)
+	}
+	r := httptest.NewRequest("POST", "/webhooks/gitlab", nil)
+	r.Header.Set("X-Gitlab-Event", "Push Hook")
+
+	ev, err := gl.Parse(r, mk("95790bf891e76fee5e1747ab589903a6a1f80f22"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if ev.Before != "95790bf891e76fee5e1747ab589903a6a1f80f22" {
+		t.Errorf("Before = %q, want the payload's before SHA", ev.Before)
+	}
+
+	// A new branch's all-zeros before has no diff base: normalized to empty
+	// so path filters fail open.
+	ev, err = gl.Parse(r, mk("0000000000000000000000000000000000000000"))
+	if err != nil {
+		t.Fatalf("parse zero-before: %v", err)
+	}
+	if ev.Before != "" {
+		t.Errorf("zero before normalized to %q, want empty", ev.Before)
+	}
+}

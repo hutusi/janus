@@ -386,6 +386,69 @@ jobs:
 			wantInErr: "`on.merge_request` cannot set both",
 		},
 		{
+			name: "paths and paths-ignore on push",
+			src: `
+name: ci
+on: { push: { paths: [docs/**], paths-ignore: [README.md] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`on.push` cannot set both `paths` and `paths-ignore`",
+		},
+		{
+			name: "paths on merge_request",
+			src: `
+name: ci
+on: { merge_request: { paths: [docs/**] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "path filters apply to push events only",
+		},
+		{
+			name: "empty paths list",
+			src: `
+name: ci
+on: { push: { paths: [] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "must list at least one pattern",
+		},
+		{
+			name: "paths and paths-ignore on a job",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    paths: [docs/**]
+    paths-ignore: [README.md]
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "job \"a\" cannot set both `paths` and `paths-ignore`",
+		},
+		{
+			name: "empty pattern in job paths",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    paths: ["docs/**", ""]
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "contains an empty pattern",
+		},
+		{
 			name: "unsupported interpolation in job working-directory",
 			src: `
 name: ci
@@ -827,5 +890,67 @@ func TestInterpolateBounded(t *testing.T) {
 	// Comfortably under the cap → no error, correct output.
 	if got, err := ctx.Interpolate("hi ${{ env.BIG }}", 1<<20); err != nil || got != "hi "+strings.Repeat("x", 1000) {
 		t.Errorf("under-cap interpolation = %q, %v", got, err)
+	}
+}
+
+func TestParsePathFilters(t *testing.T) {
+	wf, err := Parse([]byte(`
+name: ci
+on:
+  push:
+    paths: ["docs/**", "*.md"]
+jobs:
+  build:
+    paths-ignore: [README.md]
+    steps:
+      - run: echo hi
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pf := wf.On.Push.Paths
+	if pf == nil || len(pf.Paths) != 2 || pf.Paths[0] != "docs/**" {
+		t.Fatalf("on.push paths filter = %+v, want the two declared patterns", pf)
+	}
+	jf := wf.Jobs["build"].PathFilter
+	if jf == nil || jf.Ignore == nil || len(jf.Ignore) != 1 || jf.Paths != nil {
+		t.Fatalf("job paths-ignore filter = %+v, want ignore-only", jf)
+	}
+	// No paths keys → nil filters, so runs are unconstrained.
+	wf2, err := Parse([]byte("name: ci\non: { push: {} }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"))
+	if err != nil {
+		t.Fatalf("parse plain: %v", err)
+	}
+	if wf2.On.Push.Paths != nil || wf2.Jobs["a"].PathFilter != nil {
+		t.Error("absent paths keys must leave filters nil")
+	}
+}
+
+func TestParsePathPatternCaps(t *testing.T) {
+	pipe := func(patterns []string) string {
+		return "name: ci\non: { push: { paths: [\"" + strings.Join(patterns, "\", \"") + "\"] } }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"
+	}
+	many := func(n int) []string {
+		ps := make([]string, n)
+		for i := range ps {
+			ps[i] = fmt.Sprintf("p%d/**", i)
+		}
+		return ps
+	}
+
+	// Exactly at the caps: accepted.
+	if _, err := Parse([]byte(pipe(many(maxPathPatterns)))); err != nil {
+		t.Errorf("%d patterns should be accepted: %v", maxPathPatterns, err)
+	}
+	if _, err := Parse([]byte(pipe([]string{strings.Repeat("a", maxPathPatternLen)}))); err != nil {
+		t.Errorf("a %d-char pattern should be accepted: %v", maxPathPatternLen, err)
+	}
+
+	// One past the caps: rejected.
+	if _, err := Parse([]byte(pipe(many(maxPathPatterns + 1)))); err == nil || !strings.Contains(err.Error(), "too many patterns") {
+		t.Errorf("%d patterns: err = %v, want too-many-patterns", maxPathPatterns+1, err)
+	}
+	if _, err := Parse([]byte(pipe([]string{strings.Repeat("a", maxPathPatternLen+1)}))); err == nil || !strings.Contains(err.Error(), "pattern is too long") {
+		t.Errorf("over-long pattern: err = %v, want pattern-too-long", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -522,5 +523,88 @@ func TestCheckoutValidation(t *testing.T) {
 	}
 	if _, err := Checkout(context.Background(), Options{Dir: t.TempDir(), RepoURL: "x"}); err == nil {
 		t.Error("expected error when neither SHA nor Ref is provided")
+	}
+}
+
+func TestChangedFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha1 := initGitRepo(t)
+	// Real servers (GitLab) allow fetching reachable SHAs; local fixtures
+	// refuse unadvertised objects by default.
+	if out, err := exec.Command("git", "-C", src, "config", "uploadpack.allowReachableSHA1InWant", "true").CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+	sha2 := commitFile(t, src, "guide.md", "docs\n")
+	sha3 := commitFile(t, src, "code.go", "package x\n")
+
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: sha3, Ref: "refs/heads/main",
+	})
+	if err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+
+	files, err := ws.ChangedFiles(context.Background(), sha1)
+	if err != nil {
+		t.Fatalf("ChangedFiles(sha1): %v", err)
+	}
+	sort.Strings(files)
+	if len(files) != 2 || files[0] != "code.go" || files[1] != "guide.md" {
+		t.Errorf("changed since sha1 = %v, want [code.go guide.md]", files)
+	}
+
+	files, err = ws.ChangedFiles(context.Background(), sha2)
+	if err != nil {
+		t.Fatalf("ChangedFiles(sha2): %v", err)
+	}
+	if len(files) != 1 || files[0] != "code.go" {
+		t.Errorf("changed since sha2 = %v, want [code.go]", files)
+	}
+
+	if _, err := ws.ChangedFiles(context.Background(), "not-a-sha"); err == nil {
+		t.Error("a non-hex before must be rejected")
+	}
+	if _, err := ws.ChangedFiles(context.Background(), strings.Repeat("a", 40)); err == nil {
+		t.Error("an unknown before must error so the caller fails open")
+	}
+}
+
+func TestChangedFilesBounds(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha1 := initGitRepo(t)
+	if out, err := exec.Command("git", "-C", src, "config", "uploadpack.allowReachableSHA1InWant", "true").CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+	sha2 := commitFile(t, src, " spaced.md", "leading space\n")
+
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: sha2, Ref: "refs/heads/main",
+	})
+	if err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+
+	// A filename's leading whitespace is significant and must survive the
+	// raw read (a trimmed name could make a filter wrongly skip CI).
+	files, err := ws.ChangedFiles(context.Background(), sha1)
+	if err != nil {
+		t.Fatalf("ChangedFiles: %v", err)
+	}
+	if len(files) != 1 || files[0] != " spaced.md" {
+		t.Errorf("changed = %q, want [\" spaced.md\"] with the space intact", files)
+	}
+
+	// Over the byte budget: error (caller fails open), never a partial list.
+	orig := maxChangedBytes
+	maxChangedBytes = 4
+	t.Cleanup(func() { maxChangedBytes = orig })
+	if _, err := ws.ChangedFiles(context.Background(), sha1); err == nil {
+		t.Error("an over-budget diff must error so the caller fails open")
 	}
 }

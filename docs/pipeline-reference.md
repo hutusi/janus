@@ -19,6 +19,7 @@ name: ci                                  # required
 on:                                       # required: at least one trigger
   push:
     branches: [main]                      # optional; omit/empty = all branches
+    paths: ["src/**", "go.mod"]           # optional; run only when these changed
   merge_request:                          # GitLab term; normalized internally
     branches-ignore: [wip]                # optional; every branch except these
 
@@ -49,6 +50,10 @@ jobs:                                     # required: at least one job
     branches: [main]                      # optional; job runs only on these branches
     steps:
       - run: ./deploy.sh
+  docs:
+    paths-ignore: ["**.go"]               # optional; skip when only these changed
+    steps:
+      - run: ./build-docs.sh
 ```
 
 ### Keys
@@ -58,6 +63,8 @@ jobs:                                     # required: at least one job
 | `name`                     | top level        | yes      | Workflow name. |
 | `on.push.branches`         | top level        | —        | Run on push to these branches (empty = all). |
 | `on.push.branches-ignore`  | top level        | —        | Run on push to every branch **except** these. Mutually exclusive with `branches`. |
+| `on.push.paths`            | top level        | —        | Run only when a changed file matches a [path pattern](#path-filters). Push-only; mutually exclusive with `paths-ignore`. |
+| `on.push.paths-ignore`     | top level        | —        | Skip the run when **every** changed file matches. Push-only; mutually exclusive with `paths`. |
 | `on.merge_request.branches`| top level        | —        | Run on merge requests targeting these branches. |
 | `on.merge_request.branches-ignore` | top level | —       | Run on merge requests except those **targeting** these branches. Mutually exclusive with `branches`. |
 | `concurrency.group`        | top level        | —        | [Concurrency group](#concurrency-groups) template; tokens limited to `branch`, `ref`, `event`, `env.NAME`. Empty/omitted = `<name>-<branch or ref>`. |
@@ -67,6 +74,8 @@ jobs:                                     # required: at least one job
 | `jobs.<id>.needs`          | job              | —        | Names of jobs that must succeed first (forms a DAG). |
 | `jobs.<id>.branches`       | job              | —        | Run this job only on these branches; elsewhere it is recorded `skipped`. |
 | `jobs.<id>.branches-ignore`| job              | —        | Run this job on every branch **except** these. Mutually exclusive with `branches`. |
+| `jobs.<id>.paths`          | job              | —        | Run this job only when a changed file matches; otherwise it is recorded `skipped` (and so are jobs that `needs` it). See [path filters](#path-filters). |
+| `jobs.<id>.paths-ignore`   | job              | —        | Skip this job when **every** changed file matches. Mutually exclusive with `paths`. |
 | `jobs.<id>.working-directory` | job           | —        | Default directory (relative to the workspace) for the job's steps. |
 | `jobs.<id>.steps[].run`    | step             | yes      | Command to run on the host via the step shell. |
 | `jobs.<id>.steps[].shell`  | step             | —        | Shell for `run`: `sh`/`bash`/`cmd`/`powershell`/`pwsh`. Default: `/bin/sh` (unix), `cmd` (Windows). |
@@ -101,6 +110,50 @@ run itself finishes `skipped` with a reason. This is the supported way to run
 one pipeline with a branch-dependent tail (build everywhere, deploy on `main`)
 — see [examples/ci.yml](../examples/ci.yml); there is still no `if:` or
 expression language.
+
+### Path filters
+
+`paths` / `paths-ignore` restrict work to pushes that actually touched the
+matching files — the monorepo staples "skip CI for docs-only pushes" and
+"build only the service whose subtree changed". At the trigger level
+(`on.push.paths`) a non-matching push ends as a terminal `skipped` run with a
+reason; at the job level the job is recorded `skipped` (and, transitively, so
+is any job that `needs` it), exactly like the branch filters.
+
+Patterns are a GitHub-Actions-style glob subset, matched against
+slash-separated repo-relative paths, anchored at both ends:
+
+| Pattern | Matches | Not |
+|---------|---------|-----|
+| `Makefile` | exactly `Makefile` | `sub/Makefile` |
+| `*.go` | `main.go` | `cmd/main.go` (`*` stays in one segment) |
+| `docs/**` | anything under `docs/` | `docs` itself |
+| `**/*.go` | any `.go` file at any depth (incl. the root) | — |
+| `cmd/*/main.go` | `cmd/janus/main.go` | `cmd/a/b/main.go` |
+
+That is the whole syntax: `*` within a segment, `**` across segments
+(including zero: `a/**/b` matches `a/b`), `?` for one character, everything
+else literal. No character classes and no `!` negation — `paths` is the
+allowlist form, `paths-ignore` the denylist form, and declaring both on one
+trigger or job is a validation error (as is an empty list, which would match
+nothing and silently skip every push).
+
+Semantics: `paths` passes when **at least one** changed file matches **any**
+pattern; `paths-ignore` passes unless **every** changed file is ignored. A
+renamed file counts as a change to both its old and new path.
+
+**Path filters apply to push events only** and **fail open**. The changed set
+is `git diff` between the push's `before` commit and the checked-out head — a
+pure tree diff, so the shallow (depth-1) checkout design is unchanged; the
+base commit is fetched on demand, and only workflows that declare a path
+filter pay that extra round-trip. Whenever the set cannot be determined — a
+newly created branch (no base), a force-push whose base is gone, a server
+that refuses fetch-by-SHA, a diff beyond 10 000 files — the filters are
+ignored and the pipeline **runs**: a path filter must never wrongly skip CI.
+Merge-request and manual events always run path-filtered work (an MR's
+changed set needs a merge base, history the shallow checkout deliberately
+avoids — so `on.merge_request` rejects `paths` at validation), and local
+`janus run` ignores path filters entirely, like `concurrency:`.
 
 ### Concurrency groups
 
@@ -194,6 +247,10 @@ These produce a clear validation error rather than running:
 
 - `branches` together with `branches-ignore` on the same trigger or job — pick
   an allowlist or a denylist.
+- `paths` together with `paths-ignore` on the same trigger or job (same rule);
+  `paths` on `on.merge_request` (push-only — see
+  [path filters](#path-filters)); an empty `paths: []` (it would match nothing
+  and silently skip every push).
 - `if:` / conditionals / expressions — no expression language. For the common
   "deploy only on main" case, use a declarative
   [job-level branch filter](#job-level-branch-filters) instead.
@@ -207,8 +264,9 @@ These produce a clear validation error rather than running:
   the job name, and a wider charset would let two jobs share one file.
 - Absurd sizes — a pipeline file over 1 MiB (rejected at read, before parsing),
   more than 256 jobs, more than 256 steps in a job, a job name over 256
-  characters, or a step `run` over 64 KiB. Generous limits that only reject the
-  pathological, so per-run artifacts stay finite.
+  characters, a step `run` over 64 KiB, or a `paths`/`paths-ignore` list with
+  more than 50 patterns or a pattern over 256 characters. Generous limits that
+  only reject the pathological, so per-run artifacts stay finite.
 - A second YAML document (`---`) in the file — it would be silently ignored,
   hiding part of the file from validation.
 - An unterminated `${{` — it would reach the shell verbatim.

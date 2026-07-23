@@ -33,8 +33,17 @@ type Concurrency struct {
 // Triggers describes which events start the workflow. A nil pointer means the
 // corresponding trigger was not declared in the YAML.
 type Triggers struct {
-	Push         *BranchFilter
-	MergeRequest *BranchFilter
+	Push         *Trigger
+	MergeRequest *Trigger
+}
+
+// Trigger is one entry under `on:`: a branch filter plus, for push triggers
+// only, an optional changed-paths filter (validation rejects `paths` on
+// merge_request — an MR's changed set needs a merge base, which the shallow
+// checkout deliberately avoids).
+type Trigger struct {
+	BranchFilter
+	Paths *PathFilter
 }
 
 // BranchFilter restricts a trigger to a set of branches. Branches is an
@@ -77,6 +86,14 @@ type Job struct {
 	// the job runs on every branch. A non-matching job — and any job that
 	// needs one — is recorded skipped instead of executed.
 	Filter *BranchFilter
+	// PathFilter restricts the job to pushes whose changed files match (the
+	// job-level `paths`/`paths-ignore` keys). Nil means the job runs
+	// regardless of what changed. Like Filter, a non-matching job — and any
+	// job that needs one — is recorded skipped. Only push events with a known
+	// changed set are constrained; other events (and pushes whose diff could
+	// not be determined) run the job — a path filter fails open, never
+	// wrongly skipping CI.
+	PathFilter *PathFilter
 	// WorkingDir is the default working directory for the job's steps,
 	// relative to the workspace; a step's own working-directory overrides it.
 	// ${{ }} interpolation applies. Empty means the workspace root.
@@ -117,6 +134,12 @@ type Event struct {
 	Branch   string    `json:"branch"`          // e.g. main
 	SHA      string    `json:"sha,omitempty"`   // commit to check out
 	Title    string    `json:"title,omitempty"` // commit/MR title, for display
+
+	// Before is the commit the pushed ref pointed at before this push (the
+	// GitLab payload's `before`), used to compute the changed-file set for
+	// `paths` filters. Empty when unknown: new branches (all-zeros before),
+	// merge requests, and manual triggers — path filters then fail open.
+	Before string `json:"before,omitempty"`
 
 	// PipelinePath overrides the pipeline file for this trigger, relative to
 	// the configured file's directory, e.g. "release.yml" for

@@ -251,7 +251,7 @@ jobs:
 	if run.Status != model.StatusSkipped {
 		t.Fatalf("run status = %s, want skipped when every job is filtered out", run.Status)
 	}
-	if !strings.Contains(run.Reason, "no job matches") {
+	if !strings.Contains(run.Reason, "skipped by branch or path filters") {
 		t.Errorf("run reason = %q, want it to explain the branch filter", run.Reason)
 	}
 }
@@ -577,5 +577,78 @@ jobs:
 		if peak != tc.wantPeak {
 			t.Errorf("max=%d: peak concurrency = %d, want %d", tc.max, peak, tc.wantPeak)
 		}
+	}
+}
+
+func TestPopulateRunPathFilterSkips(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  docs:
+    paths: ["docs/**"]
+    steps:
+      - run: "true"
+  app:
+    paths: ["internal/**"]
+    steps:
+      - run: "true"
+  verify:
+    needs: [app]
+    steps:
+      - run: "true"
+`)
+	e := New(store.NewMemory())
+	ev := model.Event{Kind: model.EventPush, Branch: "main"}
+
+	run := e.NewPendingRun(ev)
+	e.PopulateRun(run, wf, t.TempDir(), model.ChangedFiles{Known: true, Files: []string{"docs/guide.md"}})
+	want := map[string]model.Status{"docs": model.StatusPending, "app": model.StatusSkipped, "verify": model.StatusSkipped}
+	for name, status := range want {
+		if got := jobRun(run, name).Status; got != status {
+			t.Errorf("docs-only push: %s = %s, want %s", name, got, status)
+		}
+	}
+	for _, sr := range jobRun(run, "app").Steps {
+		if sr.Status != model.StatusSkipped {
+			t.Errorf("skipped job's step %d = %s, want skipped", sr.Index, sr.Status)
+		}
+	}
+
+	// Unknown changed set: path filters fail open, nothing is pre-skipped.
+	run = e.NewPendingRun(ev)
+	e.PopulateRun(run, wf, t.TempDir(), model.ChangedFiles{})
+	for _, name := range []string{"docs", "app", "verify"} {
+		if got := jobRun(run, name).Status; got != model.StatusPending {
+			t.Errorf("unknown changed set: %s = %s, want pending (fail open)", name, got)
+		}
+	}
+}
+
+func TestRunAllJobsPathFilteredSkipsRun(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  app:
+    paths: ["src/**"]
+    steps:
+      - run: "true"
+`)
+	st := store.NewMemory()
+	e := New(st)
+	run := e.NewPendingRun(model.Event{Kind: model.EventPush, Branch: "main"})
+	e.PopulateRun(run, wf, t.TempDir(), model.ChangedFiles{Known: true, Files: []string{"docs/a.md"}})
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Execute(context.Background(), run, wf, run.WorkspaceDir); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped when every job is path-filtered", run.Status)
+	}
+	if !strings.Contains(run.Reason, "skipped by branch or path filters") {
+		t.Errorf("reason = %q, want the filter wording", run.Reason)
 	}
 }
