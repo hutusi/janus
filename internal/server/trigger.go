@@ -80,7 +80,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.runner.Trigger(ev)
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
-		s.logger.Warn("trigger rejected: repo not allowed", "repo", redactURL(ev.RepoURL))
+		s.logger.Warn("trigger rejected: repo not allowed", "repo", model.RedactURL(ev.RepoURL))
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}

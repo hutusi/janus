@@ -559,10 +559,12 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// the same repo holds it, this run falls back to a fresh per-run dir —
 	// occasionally slower, never blocking. Under the mirror strategy every run
 	// gets a fresh dir, materialized from a per-repo bare mirror when one can
-	// be synced; the same try-lock serializes only the sync (materialization
-	// reads immutable objects, so same-repo runs overlap freely), and on
-	// contention or any sync failure the run proceeds on the direct
-	// from-remote path — the mirror is an accelerator, never a gate.
+	// be synced; the same try-lock serializes only the sync — materialization
+	// runs unlocked and may overlap a later run's fetch, which is safe because
+	// mirror files only ever appear via atomic rename and gc never rewrites
+	// them (see mirrorCheckout) — and on contention or any sync failure the
+	// run proceeds on the direct from-remote path: the mirror is an
+	// accelerator, never a gate.
 	var wsDir string
 	reuse := false
 	unlock := func() {}
@@ -582,7 +584,9 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 			scancel()
 			mu.Unlock()
 			if err != nil {
-				r.logger.Warn("mirror sync failed; using direct checkout", "repo", ev.RepoURL, "err", err)
+				// Both fields redacted: the URL may embed credentials, and the
+				// error echoes the URL through git's argument list and stderr.
+				r.logger.Warn("mirror sync failed; using direct checkout", "repo", model.RedactURL(ev.RepoURL), "err", model.RedactURL(err.Error()))
 			} else {
 				mirrorDir, mirrorSHA = dir, head
 			}
@@ -617,7 +621,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		// deadline, so a broken mirror never fails a run the direct path
 		// would have served. The dir may hold a partial clone — clear it so
 		// the direct checkout starts from an empty directory.
-		r.logger.Warn("mirror checkout failed; retrying with direct checkout", "repo", ev.RepoURL, "err", err)
+		r.logger.Warn("mirror checkout failed; retrying with direct checkout", "repo", model.RedactURL(ev.RepoURL), "err", model.RedactURL(err.Error()))
 		_ = os.RemoveAll(wsDir)
 		opt.MirrorDir, opt.SHA = "", ev.SHA
 		cctx, cancel = context.WithTimeout(runCtx, checkoutTimeout)

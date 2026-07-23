@@ -313,6 +313,18 @@ func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 // branch). origin is then re-pointed at the real remote so on-demand fetches
 // after the checkout (ChangedFiles' before commit) reach the remote, not the
 // mirror.
+//
+// The clone may run concurrently with another run's fetch into the mirror —
+// git documents --local as racy against source modification in general, but
+// this specific pairing is safe: every mirror file becomes visible only via
+// atomic rename (packs, indexes, loose objects, refs), so a hardlink can
+// never capture partial content; the objects this run needs were verified
+// present while the sync held the repo lock; and gc.auto=0 rules out the
+// repack/prune rewrites the warning is really about. What remains is a rare
+// clone *error* (e.g. a --prune'd loose ref unlinked between readdir and
+// link), which the caller handles by retrying with a direct checkout.
+// Serializing clones against fetches was considered and rejected: it would
+// deny or delay the cache for busy repos to defend against a benign race.
 func mirrorCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 	if err := os.MkdirAll(opt.Dir, 0o700); err != nil {
 		return nil, err
@@ -368,10 +380,11 @@ func SyncMirror(ctx context.Context, dir, repoURL, sha, ref string) (string, err
 // ensureMirror opens the bare mirror at dir, creating it if absent. A dir
 // that exists but doesn't answer as a bare repository — garbage, or debris
 // from an interrupted creation — is rebuilt from scratch once (the same
-// self-heal contract as persistent workspaces). Fetch failures deliberately
-// do NOT rebuild: they're usually the network's fault, and deleting a large
-// healthy mirror on a transient error would force a full re-clone on the
-// same bad network.
+// self-heal contract as persistent workspaces), and the mirror's required
+// configuration is re-asserted on every call (see configureMirror). Fetch
+// failures deliberately do NOT rebuild: they're usually the network's fault,
+// and deleting a large healthy mirror on a transient error would force a
+// full re-clone on the same bad network.
 func ensureMirror(ctx context.Context, dir, repoURL string) (*Workspace, error) {
 	m := &Workspace{Dir: dir, keep: true, env: gitEnv(os.Environ(), false, false)}
 	healthy := false
@@ -382,46 +395,48 @@ func ensureMirror(ctx context.Context, dir, repoURL string) (*Workspace, error) 
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	if healthy {
-		// Idempotent heal, as in reuseCheckout: the configured clone_url may
-		// have changed since the mirror was created.
-		m.env = gitEnv(os.Environ(),
-			gitConfigSet(ctx, dir, "core.sshCommand"),
-			gitConfigSet(ctx, dir, "core.askpass"))
-		if err := m.git(ctx, "remote", "set-url", "origin", repoURL); err != nil {
+	if !healthy {
+		if err := os.RemoveAll(dir); err != nil {
 			return nil, err
 		}
-		return m, nil
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := m.git(ctx, "init", "-q", "--bare"); err != nil {
+			return nil, err
+		}
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return nil, err
-	}
-	if err := initMirror(ctx, m, repoURL); err != nil {
-		return nil, err
-	}
+	// Re-probe now that the repository exists, mirroring Checkout: local
+	// config and includeIf "gitdir:" rules resolve correctly.
 	m.env = gitEnv(os.Environ(),
 		gitConfigSet(ctx, dir, "core.sshCommand"),
 		gitConfigSet(ctx, dir, "core.askpass"))
+	if err := configureMirror(ctx, m, repoURL); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
-// initMirror creates a bare repository at m.Dir tracking every branch and tag
-// of repoURL. Deliberately not `clone --mirror`: its +refs/*:refs/* refspec
-// would also drag in hosting-side namespaces (GitLab's refs/merge-requests/*,
-// refs/keep-around/*, ...) with unbounded growth, and init lets the first
-// sync share the same fetch path as every later one. gc.auto is disabled so
-// git never repacks or prunes behind a concurrent --local clone — existing
-// packs stay immutable, which is what makes cloning without the repo lock
-// safe (and keeps commits fetched by bare SHA alive despite being
-// unreachable from any ref).
-func initMirror(ctx context.Context, m *Workspace, repoURL string) error {
-	if err := os.MkdirAll(m.Dir, 0o700); err != nil {
-		return err
-	}
+// configureMirror (re)asserts every setting the mirror's correctness rests
+// on, idempotently, on every sync:
+//
+//   - remote.origin.url — the configured clone_url may change over time;
+//     written as a config key (not `remote add`/`set-url`, which each fail
+//     depending on whether origin already exists), so a creation interrupted
+//     right after `init --bare` heals here instead of wedging every sync.
+//   - explicit heads+tags refspecs — deliberately not `clone --mirror`'s
+//     +refs/*:refs/*, which would also drag in hosting-side namespaces
+//     (GitLab's refs/merge-requests/*, refs/keep-around/*, ...) with
+//     unbounded growth. --replace-all then --add leaves exactly these two
+//     entries no matter what was there before.
+//   - gc.auto=0 — git must never repack or prune behind a concurrent --local
+//     clone: existing packs staying immutable is what makes materializing
+//     without the repo lock safe (and keeps commits fetched by bare SHA
+//     alive despite being unreachable from any ref).
+func configureMirror(ctx context.Context, m *Workspace, repoURL string) error {
 	for _, args := range [][]string{
-		{"init", "-q", "--bare"},
-		{"remote", "add", "origin", repoURL},
-		{"config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"},
+		{"config", "remote.origin.url", repoURL},
+		{"config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"},
 		{"config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"},
 		{"config", "gc.auto", "0"},
 	} {

@@ -749,6 +749,62 @@ func TestSyncMirrorSelfHeals(t *testing.T) {
 			t.Errorf("head after rebuild = %s, want %s", head, sha)
 		}
 	})
+
+	t.Run("bare repo without origin", func(t *testing.T) {
+		// A creation interrupted right after `git init --bare` leaves a valid
+		// bare repo with no remote and no config — the bare-ness probe alone
+		// would accept it and then every sync would fail on the missing
+		// origin. The idempotent configuration must repair it in place.
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if err := os.MkdirAll(mirror, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("git", "-C", mirror, "init", "-q", "--bare").CombinedOutput(); err != nil {
+			t.Fatalf("init --bare: %v\n%s", err, out)
+		}
+		head, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror over half-initialized mirror: %v", err)
+		}
+		if head != sha {
+			t.Errorf("head = %s, want %s", head, sha)
+		}
+		out, err := exec.Command("git", "-C", mirror, "config", "--get", "gc.auto").CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "0" {
+			t.Errorf("gc.auto = %q (%v), want 0 — configuration not repaired", strings.TrimSpace(string(out)), err)
+		}
+	})
+
+	t.Run("bare repo missing refspecs", func(t *testing.T) {
+		// Partial config (url only, no refspecs, gc left enabled) must also
+		// converge to exactly the intended settings — including on repeated
+		// syncs, which must not duplicate refspec entries.
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if err := os.MkdirAll(mirror, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{
+			{"init", "-q", "--bare"},
+			{"config", "remote.origin.url", src},
+		} {
+			if out, err := exec.Command("git", append([]string{"-C", mirror}, args...)...).CombinedOutput(); err != nil {
+				t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+			}
+		}
+		for i := 0; i < 2; i++ {
+			if _, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main"); err != nil {
+				t.Fatalf("SyncMirror #%d: %v", i+1, err)
+			}
+		}
+		out, err := exec.Command("git", "-C", mirror, "config", "--get-all", "remote.origin.fetch").CombinedOutput()
+		if err != nil {
+			t.Fatalf("get-all remote.origin.fetch: %v\n%s", err, out)
+		}
+		want := "+refs/heads/*:refs/heads/*\n+refs/tags/*:refs/tags/*"
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("refspecs after two syncs = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestSyncMirrorRejectsUnknownSHAAndInjection(t *testing.T) {
