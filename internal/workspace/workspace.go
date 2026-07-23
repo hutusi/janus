@@ -11,9 +11,11 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,10 +183,15 @@ func (w *Workspace) verifyHEAD(ctx context.Context, sha string) error {
 	return nil
 }
 
-// maxChangedFiles bounds the diff read by ChangedFiles. A larger diff returns
-// an error rather than a truncated list: a dropped file could wrongly skip a
-// path-filtered run, and the caller treats errors as "run everything".
+// maxChangedFiles and maxChangedBytes bound the diff read by ChangedFiles. A
+// larger diff returns an error rather than a truncated list: a dropped file
+// could wrongly skip a path-filtered run, and the caller treats errors as
+// "run everything". The byte cap is enforced while reading, so a huge push
+// never buffers an unbounded name list in memory just to be rejected.
+// maxChangedBytes is a var so tests can shrink it.
 const maxChangedFiles = 10_000
+
+var maxChangedBytes int64 = 4 << 20
 
 // commitSHARe accepts (possibly abbreviated) hex commit ids. Beyond format
 // validation it guards the value's use as a git argument — hex can never be
@@ -211,17 +218,40 @@ func (w *Workspace) ChangedFiles(ctx context.Context, before string) ([]string, 
 	}
 	// -z: NUL separators and no quoting of unusual names; --no-renames: a
 	// rename is a change to both paths, and rename detection would cost time
-	// just to hide one of them from the filter.
-	out, err := w.gitOut(ctx, "diff", "--name-only", "--no-renames", "-z", before, "HEAD")
+	// just to hide one of them from the filter. The output is read raw off a
+	// pipe under a byte budget — not through gitOut, whose whole-output
+	// buffering would be unbounded and whose TrimSpace would corrupt a
+	// filename that legitimately starts with whitespace.
+	dctx, cancel := context.WithCancel(ctx)
+	defer cancel() // over-budget: kill git rather than drain an oversized diff
+	cmd := w.gitCmd(dctx, "diff", "--name-only", "--no-renames", "-z", before, "HEAD")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
 	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(stdout, maxChangedBytes+1))
+	if err != nil || int64(len(raw)) > maxChangedBytes {
+		cancel()
+		_ = cmd.Wait()
+		if err != nil {
+			return nil, fmt.Errorf("workspace: read diff %s..HEAD: %w", before, err)
+		}
+		return nil, fmt.Errorf("workspace: diff %s..HEAD exceeds %d bytes (max for path filtering)", before, maxChangedBytes)
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("git diff: %w\n%s", err, bytes.TrimSpace(stderr.Bytes()))
+	}
 	var files []string
-	for _, f := range strings.Split(out, "\x00") {
-		if f == "" {
+	for _, f := range bytes.Split(raw, []byte{0}) {
+		if len(f) == 0 {
 			continue
 		}
-		files = append(files, f)
+		files = append(files, string(f))
 	}
 	if len(files) > maxChangedFiles {
 		return nil, fmt.Errorf("workspace: diff %s..HEAD touches %d files (max %d for path filtering)", before, len(files), maxChangedFiles)

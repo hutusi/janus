@@ -356,11 +356,11 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 		case failed:
 			run.Status = model.StatusFailed
 		case allSkipped:
-			// Every job was excluded by its branch filter: nothing executed,
-			// which is a skip, not a success.
+			// Every job was excluded by its branch or path filter: nothing
+			// executed, which is a skip, not a success.
 			run.Status = model.StatusSkipped
 			if run.Reason == "" {
-				run.Reason = fmt.Sprintf("no job matches branch %q", rs.event.Branch)
+				run.Reason = fmt.Sprintf("all jobs were skipped by branch or path filters (branch %q)", rs.event.Branch)
 			}
 		default:
 			run.Status = model.StatusSuccess

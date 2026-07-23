@@ -571,3 +571,40 @@ func TestChangedFiles(t *testing.T) {
 		t.Error("an unknown before must error so the caller fails open")
 	}
 }
+
+func TestChangedFilesBounds(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha1 := initGitRepo(t)
+	if out, err := exec.Command("git", "-C", src, "config", "uploadpack.allowReachableSHA1InWant", "true").CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+	sha2 := commitFile(t, src, " spaced.md", "leading space\n")
+
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: sha2, Ref: "refs/heads/main",
+	})
+	if err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+
+	// A filename's leading whitespace is significant and must survive the
+	// raw read (a trimmed name could make a filter wrongly skip CI).
+	files, err := ws.ChangedFiles(context.Background(), sha1)
+	if err != nil {
+		t.Fatalf("ChangedFiles: %v", err)
+	}
+	if len(files) != 1 || files[0] != " spaced.md" {
+		t.Errorf("changed = %q, want [\" spaced.md\"] with the space intact", files)
+	}
+
+	// Over the byte budget: error (caller fails open), never a partial list.
+	orig := maxChangedBytes
+	maxChangedBytes = 4
+	t.Cleanup(func() { maxChangedBytes = orig })
+	if _, err := ws.ChangedFiles(context.Background(), sha1); err == nil {
+		t.Error("an over-budget diff must error so the caller fails open")
+	}
+}

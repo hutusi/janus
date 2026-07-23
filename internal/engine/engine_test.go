@@ -251,7 +251,7 @@ jobs:
 	if run.Status != model.StatusSkipped {
 		t.Fatalf("run status = %s, want skipped when every job is filtered out", run.Status)
 	}
-	if !strings.Contains(run.Reason, "no job matches") {
+	if !strings.Contains(run.Reason, "skipped by branch or path filters") {
 		t.Errorf("run reason = %q, want it to explain the branch filter", run.Reason)
 	}
 }
@@ -622,5 +622,33 @@ jobs:
 		if got := jobRun(run, name).Status; got != model.StatusPending {
 			t.Errorf("unknown changed set: %s = %s, want pending (fail open)", name, got)
 		}
+	}
+}
+
+func TestRunAllJobsPathFilteredSkipsRun(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  app:
+    paths: ["src/**"]
+    steps:
+      - run: "true"
+`)
+	st := store.NewMemory()
+	e := New(st)
+	run := e.NewPendingRun(model.Event{Kind: model.EventPush, Branch: "main"})
+	e.PopulateRun(run, wf, t.TempDir(), model.ChangedFiles{Known: true, Files: []string{"docs/a.md"}})
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Execute(context.Background(), run, wf, run.WorkspaceDir); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped when every job is path-filtered", run.Status)
+	}
+	if !strings.Contains(run.Reason, "skipped by branch or path filters") {
+		t.Errorf("reason = %q, want the filter wording", run.Reason)
 	}
 }
