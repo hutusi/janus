@@ -23,7 +23,7 @@ Download the static binary for your platform from the
 curl -fsSL -o janus \
   https://github.com/hutusi/janus/releases/latest/download/janus-linux-amd64
 chmod +x janus
-./janus version   # janus v0.1.0
+./janus version   # janus v0.2.0 (f97e513)
 ```
 
 Verify the download against `checksums.txt` from the same release (integrity, not
@@ -81,7 +81,7 @@ make build
 
 # In another shell
 curl -s localhost:8080/healthz
-# {"status":"ok","version":"dev"}
+# {"status":"ok","version":"v0.2.0 (f97e513)"}
 # Open the dashboard at http://localhost:8080/
 ```
 
@@ -148,7 +148,7 @@ restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
 ```yaml
 name: ci
 on:
-  push: { branches: [main] }
+  push: { branches: [main], paths: ["src/**"] }  # paths: run only when these changed
   merge_request: { branches: [main] }   # GitLab term; normalized internally
 env: { CI: "true" }                      # also per-job and per-step
 jobs:

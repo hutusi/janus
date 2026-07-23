@@ -51,7 +51,7 @@ is recorded on the run's event.
 
 | GitLab event          | Action |
 |-----------------------|--------|
-| Push Hook             | Checks out `after` (the new commit) on the pushed branch. |
+| Push Hook             | Checks out `after` (the new commit) on the pushed branch; `before` is kept as the diff base for [`paths` filters](pipeline-reference.md#path-filters). |
 | Merge Request Hook    | On `open`/`reopen`/`update`, checks out the MR's head commit. |
 | Branch deletion       | Ignored (the `after` SHA is all zeros). |
 | MR `merge`/`close`/…  | Ignored. |
@@ -61,7 +61,9 @@ The event is matched against the workflow's `on:` filters:
 
 - **push** matches when `on.push` is declared and the **pushed branch** passes
   its filter — in `on.push.branches` (an empty/omitted list matches all
-  branches), or not in `on.push.branches-ignore`.
+  branches), or not in `on.push.branches-ignore`. A matching push can still be
+  recorded `skipped` when an `on.push.paths`/`paths-ignore` filter is declared
+  and none of the push's changed files match.
 - **merge_request** matches against the **target branch** — so
   `on.merge_request.branches: [main]` runs for MRs landing on `main`, and
   `branches-ignore: [main]` runs for MRs landing anywhere else. For merge
@@ -129,6 +131,13 @@ See [configuration.md](configuration.md#repository-allowlist) for matching rules
 
 ## Notes & limits
 
+- **Path filters and `before`:** when a workflow declares `paths`/
+  `paths-ignore`, Janus fetches the push's `before` commit by SHA at depth 1
+  and tree-diffs it against the checked-out head. If the server refuses
+  fetch-by-SHA, the base is gone (force-push), or the diff fails for any
+  reason, the filters are ignored and the pipeline **runs** — path filters
+  fail open, never wrongly skipping CI. GitLab serves reachable SHAs, so this
+  works out of the box.
 - **Authentication to clone:** private repos rely on the host's git
   configuration (SSH agent, credential helper, `.netrc`). Janus does not manage
   credentials. Checkouts run git non-interactively (`GIT_TERMINAL_PROMPT=0`,

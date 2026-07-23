@@ -28,7 +28,7 @@ CLI subcommands: `janus init` (scaffold `janus.yml`), `janus serve` (auto-loads 
 
 ## Architecture & docs
 
-Single binary (`cmd/janus`); all logic under `internal/`, depending inward on `internal/model`. Run lifecycle: `server` → `runner.Trigger` (validate, record pending run, answer 202) → async: `workspace.Checkout` → `pipeline.Parse` → match `on:` → `engine.Execute` (DAG scheduler → per-step `os/exec`); pre-execution outcomes land on the run as `failed`/`skipped` + reason.
+Single binary (`cmd/janus`); all logic under `internal/`, depending inward on `internal/model`. Run lifecycle: `server` → `runner.Trigger` (validate, record pending run, answer 202) → async: `workspace.Checkout` → `pipeline.Parse` → match `on:` → path filters (push-only changed-file diff; fail open when undeterminable) → `engine.Execute` (DAG scheduler → per-step `os/exec`); pre-execution outcomes land on the run as `failed`/`skipped` + reason.
 
 - [docs/architecture.md](docs/architecture.md) — package map, two-layer domain model, run lifecycle, concurrency/safety **invariants & gotchas** (strict `KnownFields`, `runState.update` as the single mutation path, process-group kill)
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — supported YAML grammar + what's rejected and why

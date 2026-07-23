@@ -9,12 +9,14 @@ module (`gopkg.in/yaml.v3`). It compiles to a static binary
 ```
 cmd/janus            CLI: serve | run | validate; flag parsing, wiring, shutdown
 internal/
-  model              domain types: spec (Workflow/Job/Step), Event, runtime (Run/JobRun/StepRun)
+  model              domain types: spec (Workflow/Trigger/Job/Step + Branch/PathFilter),
+                     Event, ChangedFiles, runtime (Run/JobRun/StepRun)
   pipeline           YAML parse + strict validation + interpolation   (pure, no I/O)
   engine             DAG build, scheduler, host-process executor
-  workspace          per-run shallow git checkout + cleanup, or in-place reuse
+  workspace          per-run shallow git checkout + cleanup, or in-place reuse;
+                     ChangedFiles (fetch the push base at depth 1 + bounded tree diff)
   provider           webhook providers (GitLab) -> normalized Event
-  runner             checkout -> parse -> match -> execute coordinator
+  runner             checkout -> parse -> match -> path-filter -> execute coordinator
   store              run/log persistence: Memory and File
   server             HTTP API, webhook endpoint, read-only dashboard
 ```
@@ -25,14 +27,19 @@ half of `engine` are pure and have the heaviest unit tests.
 ## Domain model: two layers
 
 - **Spec** (`model.Workflow/Triggers/Job/Step`) — immutable, produced by
-  `pipeline.Parse`. Jobs are a map keyed by name.
+  `pipeline.Parse`. Jobs are a map keyed by name. Each `on:` entry is a
+  `Trigger` (a `BranchFilter` plus, for push, an optional `PathFilter`); jobs
+  carry the same two filter kinds.
 - **Runtime** (`model.Run/JobRun/StepRun` + `Status`) — mutable, persisted.
   `engine.NewRun` materializes a `Run` (one `JobRun` per job, one `StepRun` per
   step) from a workflow; the YAML is never re-parsed at runtime.
 
 `model.Event` is the normalized trigger (push / merge_request / manual) that
 every provider and the manual API produce, and is the source of
-`${{ ref|sha|branch|event }}`.
+`${{ ref|sha|branch|event }}`. For pushes it also carries `Before` (the
+pre-push commit), the diff base for path filters; `model.ChangedFiles` moves
+the computed set around with an explicit `Known` flag so an undeterminable
+diff is distinguishable from an empty one.
 
 ## Pipeline parsing & strict rejection
 
@@ -60,7 +67,8 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
     platform's delivery timeout cannot race the checkout, and a client
     hangup cannot cancel it. Pre-execution outcomes land on the run as a
     terminal status + reason (failed: checkout/parse error; skipped:
-    non-matching event) — every recorded run reaches a terminal state:
+    non-matching event or a push whose changed files match no on.push
+    path filter) — every recorded run reaches a terminal state:
       workspace.Checkout  (shallow fetch of the SHA, detached checkout;
                            a ref-fallback checkout is verified against the
                            requested SHA — a moved ref fails the run rather
@@ -69,7 +77,15 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
       read + pipeline.Parse  (pipeline_path from the checkout; a manual
                               trigger's pipeline_path field overrides it)
       match event against on:  (manual always matches)
-      engine.PopulateRun (workflow name + job tree) + store.UpdateRun
+      workspace.ChangedFiles  (push events with a path filter only: fetch
+                               the payload's `before` at depth 1, bounded
+                               tree diff against HEAD; any failure leaves
+                               the set unknown and the filters inert; a
+                               known non-matching set settles the run
+                               skipped here)
+      engine.PopulateRun (workflow name + job tree; jobs excluded by a
+                          branch or path filter — and, transitively, jobs
+                          that need one — recorded skipped) + store.UpdateRun
       engine.Execute:
         buildGraph (indegree + dependents, Kahn cycle guard)
         readiness-driven scheduler:
@@ -94,6 +110,12 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   single trigger goroutine (`runner.runTrigger` populates it and records
   pre-execution outcomes directly), and stores snapshot on write, so no other
   goroutine can observe a partial mutation. Tests run under `-race`.
+- **Path filters fail open.** A `paths`/`paths-ignore` filter only ever skips
+  work on a *successfully computed* changed-file set (`ChangedFiles.Known`).
+  Every failure path — a new branch with no base, a base the server no longer
+  serves, a diff error, timeout, or over-cap diff — leaves the set unknown,
+  the filters inert, and the pipeline running. Wrongly running CI is
+  recoverable; wrongly skipping it is not.
 - Two caps bound host load: `--max-parallel-runs` and `--max-parallel-jobs`.
 - Every run executes under a **per-run cancellable context** (a
   `WithCancelCause` child of the runner's root context, so Shutdown still

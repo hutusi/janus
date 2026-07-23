@@ -25,8 +25,11 @@ On a feature branch, `deploy` is recorded as `skipped` (visible on the run in
 the dashboard and API) while `build` executes; on `master`/`main` both run.
 Job filters use the same `branches` / `branches-ignore` syntax and matching as
 `on:` filters, and a job that `needs` a branch-skipped job is skipped too.
-There is deliberately no `if:` or expression language — routing stays
-declarative.
+Jobs (and `on.push`) also accept
+[`paths` / `paths-ignore`](../docs/pipeline-reference.md#path-filters) to run
+work only when matching files changed — same skip semantics, including the
+`needs` propagation. There is deliberately no `if:` or expression language —
+routing stays declarative.
 
 Copy the file to `.janus/ci.yml` in your repository and it works with the
 default configuration; one webhook is enough.
