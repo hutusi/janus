@@ -169,12 +169,15 @@ func (e *Engine) NewPendingRun(ev model.Event) *model.Run {
 
 // PopulateRun fills a shell run (NewPendingRun) with wf's identity and job
 // tree: one JobRun per job and one StepRun per step. Jobs whose branch filter
-// does not match the run's branch — and, transitively, jobs that need one —
-// are recorded skipped up front; the rest start pending.
-func (e *Engine) PopulateRun(run *model.Run, wf *model.Workflow, workDir string) {
+// does not match the run's branch, or whose path filter does not match the
+// push's changed files — and, transitively, jobs that need one — are recorded
+// skipped up front; the rest start pending. Pass a zero ChangedFiles when the
+// changed set is unknown (local runs, non-push events): path filters are then
+// inert.
+func (e *Engine) PopulateRun(run *model.Run, wf *model.Workflow, workDir string, changed model.ChangedFiles) {
 	run.WorkflowName = wf.Name
 	run.WorkspaceDir = workDir
-	skip := branchSkipped(wf, run.Event.Branch)
+	skip := skippedJobs(wf, run.Event.Branch, changed)
 	names := make([]string, 0, len(wf.Jobs))
 	for name := range wf.Jobs {
 		names = append(names, name)
@@ -194,13 +197,17 @@ func (e *Engine) PopulateRun(run *model.Run, wf *model.Workflow, workDir string)
 	}
 }
 
-// branchSkipped returns the set of jobs excluded from a run on branch: jobs
-// whose Filter does not match, plus — transitively — jobs that need an
-// excluded job (a job must not run when the work it depends on didn't).
-func branchSkipped(wf *model.Workflow, branch string) map[string]bool {
+// skippedJobs returns the set of jobs excluded from a run: jobs whose branch
+// filter does not match, jobs whose path filter does not match a known
+// changed-file set, plus — transitively — jobs that need an excluded job (a
+// job must not run when the work it depends on didn't).
+func skippedJobs(wf *model.Workflow, branch string, changed model.ChangedFiles) map[string]bool {
 	skip := make(map[string]bool)
 	for name, job := range wf.Jobs {
 		if job.Filter != nil && !job.Filter.Matches(branch) {
+			skip[name] = true
+		}
+		if changed.Known && job.PathFilter != nil && !job.PathFilter.Matches(changed.Files) {
 			skip[name] = true
 		}
 	}
@@ -226,7 +233,7 @@ func branchSkipped(wf *model.Workflow, branch string) map[string]bool {
 // StepRun per step. It does not execute or persist anything; pass it to Execute.
 func (e *Engine) NewRun(wf *model.Workflow, ev model.Event, workDir string) *model.Run {
 	run := e.NewPendingRun(ev)
-	e.PopulateRun(run, wf, workDir)
+	e.PopulateRun(run, wf, workDir, model.ChangedFiles{})
 	return run
 }
 
@@ -291,7 +298,7 @@ func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow
 			results <- jobResult{name: name, status: e.runJob(runCtx, rs, job, jr)}
 		}()
 	}
-	// Jobs already terminal were branch-skipped by PopulateRun; they are never
+	// Jobs already terminal were filter-skipped by PopulateRun; they are never
 	// launched, and neither are their dependents (the skip is transitive), so
 	// the remaining sub-DAG is closed over runnable jobs.
 	launchable := func(name string) bool {

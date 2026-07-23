@@ -2,6 +2,15 @@ package model
 
 import "strings"
 
+// ChangedFiles is the set of files a push touched, when it could be
+// determined. The zero value (Known false) means the set is unknown — a new
+// branch with no base commit, a non-push event, a failed diff — and every
+// path filter then fails open: it must never wrongly skip CI.
+type ChangedFiles struct {
+	Known bool
+	Files []string
+}
+
 // PathFilter restricts a trigger or job to pushes whose changed files match.
 // Paths is an allowlist: at least one changed file must match at least one
 // pattern. Ignore is a denylist: at least one changed file must match none of

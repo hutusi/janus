@@ -385,6 +385,11 @@ func (r *Runner) Shutdown(grace time.Duration) {
 // clears a large shallow clone with margin.
 var checkoutTimeout = 10 * time.Minute
 
+// changedFilesTimeout bounds the extra fetch+diff behind path filters — a
+// single-commit fetch, far smaller than a checkout. On expiry the filters
+// fail open.
+var changedFilesTimeout = 2 * time.Minute
+
 // Event-field length caps. These values come from the webhook body (up to
 // 5 MiB) or the manual API, and flow into the stored run, the unauthenticated
 // dashboard, and interpolation (${{ branch }}, ${{ ref }}); bound them at the
@@ -396,6 +401,7 @@ const (
 	maxBranchLen       = 512
 	maxPipelinePathLen = 512
 	maxTitleLen        = 4 << 10 // commit/MR title, display only
+	maxBeforeLen       = 64      // hex commit id (sha1 or sha256)
 )
 
 // validateEvent rejects over-long event fields before any disk work.
@@ -410,6 +416,7 @@ func validateEvent(ev model.Event) error {
 		{"branch", ev.Branch, maxBranchLen},
 		{"pipeline_path", ev.PipelinePath, maxPipelinePathLen},
 		{"title", ev.Title, maxTitleLen},
+		{"before", ev.Before, maxBeforeLen},
 	} {
 		if len(f.value) > f.max {
 			return fmt.Errorf("%s is too long: %d bytes (max %d)", f.name, len(f.value), f.max)
@@ -612,6 +619,15 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		return
 	}
 
+	// Computed once, only when a path filter will consume it; Known stays
+	// false on any failure so filters fail open (see model.ChangedFiles).
+	changed := r.changedFiles(runCtx, ws, wf, ev, run.ID)
+	if ev.Kind == model.EventPush && wf.On.Push.Paths != nil && changed.Known && !wf.On.Push.Paths.Matches(changed.Files) {
+		abort()
+		finish(model.StatusSkipped, fmt.Sprintf("push to %q changed no files matching the on.push path filter", ev.Branch))
+		return
+	}
+
 	// The concurrency group is expanded before the populated-run update so a
 	// queued run already displays it. The group is only knowable here — the
 	// pipeline lives in the checkout — so admission (ErrBusy/503) behavior is
@@ -636,7 +652,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		r.groups.endTrigger(seq)
 	}
 
-	r.engine.PopulateRun(run, wf, ws.Dir)
+	r.engine.PopulateRun(run, wf, ws.Dir, changed)
 	if err := r.store.UpdateRun(run); err != nil {
 		// Not fatal: the run executes anyway, and the engine persists on every
 		// status change (and latches Degraded if the terminal write fails too).
@@ -756,6 +772,42 @@ func pipelineFile(def string, ev model.Event) (string, error) {
 		return "", fmt.Errorf("pipeline path %q must name a file inside %q, the pipeline directory", ev.PipelinePath, dir)
 	}
 	return full, nil
+}
+
+// changedFiles computes the push's changed-file set when a path filter will
+// consume it. The zero value (unknown) on any failure — no base commit, a
+// diff error — leaves every path filter inert: a filter must never wrongly
+// skip CI, so all failure paths run the pipeline and log why.
+func (r *Runner) changedFiles(ctx context.Context, ws *workspace.Workspace, wf *model.Workflow, ev model.Event, runID string) model.ChangedFiles {
+	if ev.Kind != model.EventPush || !hasPathFilters(wf) {
+		return model.ChangedFiles{}
+	}
+	if ev.Before == "" {
+		r.logger.Info("path filters fail open: push has no base commit", "run_id", runID)
+		return model.ChangedFiles{}
+	}
+	fctx, cancel := context.WithTimeout(ctx, changedFilesTimeout)
+	defer cancel()
+	files, err := ws.ChangedFiles(fctx, ev.Before)
+	if err != nil {
+		r.logger.Warn("path filters fail open: changed files unknown", "run_id", runID, "before", ev.Before, "err", err)
+		return model.ChangedFiles{}
+	}
+	return model.ChangedFiles{Known: true, Files: files}
+}
+
+// hasPathFilters reports whether wf declares any paths/paths-ignore key, so
+// pushes to filterless workflows never pay the extra fetch and diff.
+func hasPathFilters(wf *model.Workflow) bool {
+	if wf.On.Push != nil && wf.On.Push.Paths != nil {
+		return true
+	}
+	for _, job := range wf.Jobs {
+		if job.PathFilter != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // matches reports whether the event should start the workflow. Manual triggers

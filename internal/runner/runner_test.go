@@ -1087,3 +1087,96 @@ func TestGroupRegistryDrainsWhileRunExecutes(t *testing.T) {
 		})
 	}
 }
+
+func TestTriggerPathFilters(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	const pathPipeline = `name: ci
+on:
+  push:
+    paths: ["src/**"]
+jobs:
+  build:
+    steps:
+      - run: echo built
+  docs:
+    paths: ["docs/**"]
+    steps:
+      - run: echo docs
+`
+	repo, sha1 := initGitRepo(t, pathPipeline)
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	// Real servers allow fetching reachable SHAs (the before commit); local
+	// fixtures refuse unadvertised objects by default.
+	git("config", "uploadpack.allowReachableSHA1InWant", "true")
+	commit := func(name, content string) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(repo, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git("add", ".")
+		git("commit", "-q", "-m", "add "+name)
+		return git("rev-parse", "HEAD")
+	}
+	sha2 := commit("src/main.go", "package main\n")
+	sha3 := commit("README.md", "readme\n")
+
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow})
+	trigger := func(before, sha string) *model.Run {
+		t.Helper()
+		res, err := r.Trigger(model.Event{Kind: model.EventPush, RepoURL: repo,
+			SHA: sha, Before: before, Ref: "refs/heads/main", Branch: "main"})
+		if err != nil {
+			t.Fatalf("Trigger: %v", err)
+		}
+		return waitRun(t, st, res.RunID, 15*time.Second)
+	}
+
+	// src/** changed: the run executes; the docs-only job is path-skipped.
+	run := trigger(sha1, sha2)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("src push: status = %s (%s), want success", run.Status, run.Reason)
+	}
+	for _, jr := range run.Jobs {
+		want := model.StatusSuccess
+		if jr.Name == "docs" {
+			want = model.StatusSkipped
+		}
+		if jr.Status != want {
+			t.Errorf("src push: job %s = %s, want %s", jr.Name, jr.Status, want)
+		}
+	}
+
+	// Only README.md changed: on.push.paths does not match, run is skipped.
+	run = trigger(sha2, sha3)
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("readme push: status = %s, want skipped", run.Status)
+	}
+	if !strings.Contains(run.Reason, "path filter") {
+		t.Errorf("readme push reason = %q, want it to name the path filter", run.Reason)
+	}
+
+	// No before (new branch): filters fail open and everything runs.
+	run = trigger("", sha3)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("fail-open push: status = %s (%s), want success", run.Status, run.Reason)
+	}
+	for _, jr := range run.Jobs {
+		if jr.Status != model.StatusSuccess {
+			t.Errorf("fail-open push: job %s = %s, want success", jr.Name, jr.Status)
+		}
+	}
+}

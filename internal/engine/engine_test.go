@@ -579,3 +579,48 @@ jobs:
 		}
 	}
 }
+
+func TestPopulateRunPathFilterSkips(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  docs:
+    paths: ["docs/**"]
+    steps:
+      - run: "true"
+  app:
+    paths: ["internal/**"]
+    steps:
+      - run: "true"
+  verify:
+    needs: [app]
+    steps:
+      - run: "true"
+`)
+	e := New(store.NewMemory())
+	ev := model.Event{Kind: model.EventPush, Branch: "main"}
+
+	run := e.NewPendingRun(ev)
+	e.PopulateRun(run, wf, t.TempDir(), model.ChangedFiles{Known: true, Files: []string{"docs/guide.md"}})
+	want := map[string]model.Status{"docs": model.StatusPending, "app": model.StatusSkipped, "verify": model.StatusSkipped}
+	for name, status := range want {
+		if got := jobRun(run, name).Status; got != status {
+			t.Errorf("docs-only push: %s = %s, want %s", name, got, status)
+		}
+	}
+	for _, sr := range jobRun(run, "app").Steps {
+		if sr.Status != model.StatusSkipped {
+			t.Errorf("skipped job's step %d = %s, want skipped", sr.Index, sr.Status)
+		}
+	}
+
+	// Unknown changed set: path filters fail open, nothing is pre-skipped.
+	run = e.NewPendingRun(ev)
+	e.PopulateRun(run, wf, t.TempDir(), model.ChangedFiles{})
+	for _, name := range []string{"docs", "app", "verify"} {
+		if got := jobRun(run, name).Status; got != model.StatusPending {
+			t.Errorf("unknown changed set: %s = %s, want pending (fail open)", name, got)
+		}
+	}
+}
