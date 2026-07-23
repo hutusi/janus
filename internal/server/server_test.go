@@ -672,6 +672,39 @@ func TestFaviconAndLogo(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsCommitID(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	sha := "a1b2c3d4e5f6071829a1b2c3d4e5f6071829a1b2"
+	withSHA := &model.Run{ID: "sha1run", Status: model.StatusSuccess, WorkflowName: "ci",
+		Event:     model.Event{Kind: model.EventPush, Branch: "main", SHA: sha},
+		CreatedAt: time.Now()}
+	// A pending manual run may not know its commit yet: no empty <code> tag.
+	noSHA := &model.Run{ID: "nosha", Status: model.StatusPending, WorkflowName: "ci",
+		Event:     model.Event{Kind: model.EventManual, Branch: "main"},
+		CreatedAt: time.Now().Add(-time.Minute)}
+	for _, r := range []*model.Run{withSHA, noSHA} {
+		if err := st.SaveRun(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	short := `<code class="muted">` + sha[:8] + `</code>`
+	list := getText(t, ts.URL+"/")
+	if !strings.Contains(list, short) {
+		t.Errorf("run list misses the short commit id %s next to the branch", sha[:8])
+	}
+	if strings.Contains(list, `<code class="muted"></code>`) {
+		t.Error("a run without a SHA must not render an empty code tag")
+	}
+	if page := getText(t, ts.URL+"/runs/sha1run"); !strings.Contains(page, "<code>"+sha[:8]+"</code>") {
+		t.Errorf("run page misses the short commit id %s in the meta line", sha[:8])
+	}
+}
+
 func TestIndexRefreshOnlyWhenActive(t *testing.T) {
 	st := store.NewMemory()
 	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
