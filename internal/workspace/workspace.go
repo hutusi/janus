@@ -181,6 +181,54 @@ func (w *Workspace) verifyHEAD(ctx context.Context, sha string) error {
 	return nil
 }
 
+// maxChangedFiles bounds the diff read by ChangedFiles. A larger diff returns
+// an error rather than a truncated list: a dropped file could wrongly skip a
+// path-filtered run, and the caller treats errors as "run everything".
+const maxChangedFiles = 10_000
+
+// commitSHARe accepts (possibly abbreviated) hex commit ids. Beyond format
+// validation it guards the value's use as a git argument — hex can never be
+// mistaken for a flag.
+var commitSHARe = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+
+// ChangedFiles returns the files that differ between the before commit and
+// the checked-out HEAD, slash-separated and repo-relative, for `paths`
+// filtering. It is a pure tree diff, so it works between two disjoint
+// depth-1 commits: the checkout stays shallow and before is fetched on
+// demand (one extra round-trip, paid only by workflows that declare a path
+// filter). Any failure — unknown before (force-push pruned it, server
+// forbids fetch-by-SHA), oversized diff — is an error; callers must fail
+// open and run the pipeline.
+func (w *Workspace) ChangedFiles(ctx context.Context, before string) ([]string, error) {
+	before = strings.ToLower(strings.TrimSpace(before))
+	if !commitSHARe.MatchString(before) {
+		return nil, fmt.Errorf("workspace: before %q is not a commit SHA", before)
+	}
+	if err := w.git(ctx, "cat-file", "-e", before+"^{commit}"); err != nil {
+		if err := w.git(ctx, "fetch", "--depth", "1", "origin", before); err != nil {
+			return nil, err
+		}
+	}
+	// -z: NUL separators and no quoting of unusual names; --no-renames: a
+	// rename is a change to both paths, and rename detection would cost time
+	// just to hide one of them from the filter.
+	out, err := w.gitOut(ctx, "diff", "--name-only", "--no-renames", "-z", before, "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, f := range strings.Split(out, "\x00") {
+		if f == "" {
+			continue
+		}
+		files = append(files, f)
+	}
+	if len(files) > maxChangedFiles {
+		return nil, fmt.Errorf("workspace: diff %s..HEAD touches %d files (max %d for path filtering)", before, len(files), maxChangedFiles)
+	}
+	return files, nil
+}
+
 // reuseCheckout updates an existing checkout in place: fetch the commit and
 // hard-reset tracked files to it. Untracked files (dependency caches, build
 // output) deliberately survive — reset, unlike checkout, also overwrites
