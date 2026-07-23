@@ -42,6 +42,9 @@ type Store interface {
 	// never holds every full record in memory; full detail is via GetRun. An
 	// offset past the end returns an empty slice, not an error.
 	ListRuns(limit, offset int) ([]*model.RunSummary, error)
+	// CountRuns returns how many runs ListRuns would list in total, so a
+	// paginated view can compute its page count.
+	CountRuns() (int, error)
 	// Prune deletes the oldest terminal runs (metadata and logs) beyond keep,
 	// returning how many were removed. Non-terminal runs are never pruned and
 	// do not count toward keep; keep <= 0 is a no-op.

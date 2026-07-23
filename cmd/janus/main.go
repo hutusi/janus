@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -35,8 +36,68 @@ import (
 	"github.com/hutusi/janus/internal/workspace"
 )
 
-// version is overridden at build time via -ldflags "-X main.version=...".
-var version = "dev"
+// version (the release tag) and commit (the short hash) are overridden at
+// build time via -ldflags "-X main.version=... -X main.commit=...". They are
+// stamped separately so the tag survives builds where git tags are absent
+// (shallow CI clones), where a single git-describe string would silently
+// degrade to a bare commit hash.
+var (
+	version = "dev"
+	commit  = ""
+)
+
+// versionString is the human-facing form, e.g. "v0.2.0 (f97e513)" — shown by
+// `janus version`, the dashboard header, and /healthz. Builds that bypass the
+// Makefile/release ldflags (plain go build/install) fall back to the metadata
+// the Go toolchain embeds on its own; only `go run`, which embeds nothing,
+// still reports plain "dev".
+func versionString() string {
+	v, c := version, commit
+	if v == "dev" && c == "" {
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			if bv, bc := fromBuildInfo(bi); bv != "" || bc != "" {
+				if bv != "" {
+					v = bv
+				}
+				c = bc
+			}
+		}
+	}
+	if c == "" {
+		return v
+	}
+	return v + " (" + c + ")"
+}
+
+// fromBuildInfo derives (version, commit) from Go's embedded build info: since
+// Go 1.24 `go build` from a git checkout stamps a tag-derived main-module
+// version (the tag itself, or a pseudo-version past it) plus vcs.revision /
+// vcs.modified. Unknown values come back empty. A "+dirty" version suffix is
+// stripped — dirtiness is reported on the commit, matching the ldflags form.
+func fromBuildInfo(bi *debug.BuildInfo) (string, string) {
+	v := bi.Main.Version
+	if v == "(devel)" {
+		v = ""
+	}
+	v = strings.TrimSuffix(v, "+dirty")
+	var rev string
+	var dirty bool
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if len(rev) > 7 {
+		rev = rev[:7]
+	}
+	if rev != "" && dirty {
+		rev += "-dirty"
+	}
+	return v, rev
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -56,7 +117,7 @@ func main() {
 	case "run":
 		err = runRun(args)
 	case "version", "-version", "--version":
-		fmt.Println("janus", version)
+		fmt.Println("janus", versionString())
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
@@ -203,7 +264,7 @@ func runServe(args []string) error {
 
 	srv := &http.Server{
 		Addr:    cfg.Addr,
-		Handler: server.New(st, rn, version, opts...).Handler(),
+		Handler: server.New(st, rn, versionString(), opts...).Handler(),
 		// ReadTimeout bounds reading a request (headers + body), so a
 		// slow-loris POST cannot pin a connection open. WriteTimeout must stay
 		// unset: the ?follow=1 log stream is a deliberately long-lived
@@ -218,7 +279,7 @@ func runServe(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("janus listening", "addr", cfg.Addr, "version", version, "workspace_root", cfg.WorkspaceRoot)
+		logger.Info("janus listening", "addr", cfg.Addr, "version", versionString(), "workspace_root", cfg.WorkspaceRoot)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

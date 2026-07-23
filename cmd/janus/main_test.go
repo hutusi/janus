@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"testing"
 
 	"github.com/hutusi/janus/internal/config"
@@ -41,5 +42,54 @@ func TestRunInitDefaultPath(t *testing.T) {
 	}
 	if _, err := os.Stat(config.DefaultPath); err != nil {
 		t.Errorf("expected %s to be written: %v", config.DefaultPath, err)
+	}
+}
+
+func TestVersionString(t *testing.T) {
+	origVersion, origCommit := version, commit
+	t.Cleanup(func() { version, commit = origVersion, origCommit })
+
+	version, commit = "v0.2.0", ""
+	if got := versionString(); got != "v0.2.0" {
+		t.Errorf("versionString without commit = %q, want v0.2.0", got)
+	}
+	version, commit = "v0.2.0", "f97e513"
+	if got := versionString(); got != "v0.2.0 (f97e513)" {
+		t.Errorf("versionString with commit = %q, want v0.2.0 (f97e513)", got)
+	}
+	version, commit = "dev", "f97e513-dirty"
+	if got := versionString(); got != "dev (f97e513-dirty)" {
+		t.Errorf("versionString tagless = %q, want dev (f97e513-dirty)", got)
+	}
+}
+
+func TestFromBuildInfo(t *testing.T) {
+	bi := func(version, rev, modified string) *debug.BuildInfo {
+		b := &debug.BuildInfo{}
+		b.Main.Version = version
+		if rev != "" {
+			b.Settings = append(b.Settings, debug.BuildSetting{Key: "vcs.revision", Value: rev})
+		}
+		if modified != "" {
+			b.Settings = append(b.Settings, debug.BuildSetting{Key: "vcs.modified", Value: modified})
+		}
+		return b
+	}
+	cases := []struct {
+		name         string
+		in           *debug.BuildInfo
+		wantV, wantC string
+	}{
+		{"exact tag", bi("v0.2.0", "6c93b86ab1c2d3e4", "false"), "v0.2.0", "6c93b86"},
+		{"dirty", bi("v0.2.0+dirty", "6c93b86ab1c2d3e4", "true"), "v0.2.0", "6c93b86-dirty"},
+		{"pseudo-version", bi("v0.2.1-0.20260723140000-6c93b86ab1c2", "6c93b86ab1c2d3e4", "false"), "v0.2.1-0.20260723140000-6c93b86ab1c2", "6c93b86"},
+		{"devel no vcs", bi("(devel)", "", ""), "", ""},
+		{"empty", bi("", "", ""), "", ""},
+	}
+	for _, c := range cases {
+		v, rev := fromBuildInfo(c.in)
+		if v != c.wantV || rev != c.wantC {
+			t.Errorf("%s: fromBuildInfo = (%q, %q), want (%q, %q)", c.name, v, rev, c.wantV, c.wantC)
+		}
 	}
 }

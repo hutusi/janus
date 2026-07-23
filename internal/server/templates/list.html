@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{if .Refresh}}<meta http-equiv="refresh" content="5">{{end}}
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>Janus — runs</title>
   {{template "style"}}
 </head>
 <body>
   <header>
-    <h1>Janus</h1>
+    <h1>{{template "logo" "currentColor"}} Janus</h1>
     <span class="muted">{{.Version}}</span>
   </header>
 
@@ -36,10 +37,18 @@
       </tbody>
     </table>
     {{end}}
+    {{if .Pages}}
+    <nav class="pager muted">
+      {{range .Pages}}{{if eq . $.Page}}<strong>{{.}}</strong>{{else if eq . 1}}<a href="/">1</a>{{else}}<a href="/?page={{.}}">{{.}}</a>{{end}}
+      {{end}}
+    </nav>
+    {{end}}
   </main>
   {{template "elapsedscript"}}
 </body>
 </html>{{end}}
+
+{{define "logo"}}<svg class="logo" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 32 32" aria-hidden="true" fill="{{.}}"><path fill-rule="evenodd" d="M16 1A15 15 0 1 0 16 31A15 15 0 1 0 16 1ZM16 3.5A12.5 12.5 0 1 0 16 28.5A12.5 12.5 0 1 0 16 3.5ZM16 7.2Q14.6 5.8 12.6 6.2Q10.8 7.4 10.5 11L7.8 16 10.7 16.6Q9.7 17.5 10.4 18.7Q9.9 19.6 10.9 20.9Q11.6 21.9 13.5 22.3L13.6 29 18.4 29 18.5 22.3Q20.4 21.9 21.1 20.9Q22.1 19.6 21.6 18.7Q22.3 17.5 21.3 16.6L24.2 16 21.5 11Q21.2 7.4 19.4 6.2Q17.4 5.8 16 7.2Z"/></svg>{{end}}
 
 {{define "dur"}}{{if and (not .StartedAt.IsZero) .FinishedAt.IsZero}}<span class="elapsed" data-started="{{millis .StartedAt}}">{{duration .StartedAt .FinishedAt}}</span>{{else}}{{duration .StartedAt .FinishedAt}}{{end}}{{end}}
 
@@ -77,6 +86,7 @@
   body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 0 1.5rem 2rem; }
   header { display: flex; align-items: baseline; gap: .75rem; padding: 1rem 0; border-bottom: 1px solid #8884; }
   h1 { font-size: 1.25rem; margin: 0; }
+  .logo { vertical-align: text-bottom; }
   .muted { color: #8889; }
   table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
   th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8883; }
@@ -91,6 +101,9 @@
   .status-cancelled { background: #ef6c0033; color: #ef6c00; }
   .status-skipped   { background: #61616133; color: #757575; }
   .status-pending   { background: #61616133; color: #757575; }
+  .pager { margin-top: 1rem; }
+  .pager a, .pager strong { padding: .1rem .45rem; }
+  .pager strong { background: #8882; border-radius: 3px; }
   .jobs { margin: 1rem 0; }
   .job { margin: .4rem 0; }
   .steps { margin: .2rem 0 .6rem 1.2rem; }

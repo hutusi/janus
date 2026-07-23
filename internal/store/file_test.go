@@ -352,3 +352,22 @@ func TestFileStoreMissingRun(t *testing.T) {
 	}
 	_ = rc.Close()
 }
+
+func TestFileCountRuns(t *testing.T) {
+	st, _ := NewFile(t.TempDir())
+	if n, err := st.CountRuns(); err != nil || n != 0 {
+		t.Fatalf("empty CountRuns = %d, %v; want 0, nil", n, err)
+	}
+	base := time.Now()
+	for i := 0; i < 3; i++ {
+		_ = st.SaveRun(sampleRun("c"+string(rune('0'+i)), base.Add(time.Duration(-i)*time.Minute)))
+	}
+	n, err := st.CountRuns()
+	if err != nil || n != 3 {
+		t.Fatalf("CountRuns = %d, %v; want 3, nil", n, err)
+	}
+	listed, err := st.ListRuns(0, 0)
+	if err != nil || len(listed) != n {
+		t.Errorf("CountRuns = %d but ListRuns lists %d (err %v); they must agree", n, len(listed), err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -559,6 +560,114 @@ func TestDashboardDurations(t *testing.T) {
 	for _, page := range []string{list, donePage, livePage} {
 		if !strings.Contains(page, "setInterval") {
 			t.Error("dashboard page misses the elapsed ticker script")
+		}
+	}
+}
+
+func TestIndexPagination(t *testing.T) {
+	orig := indexPageSize
+	indexPageSize = 2
+	t.Cleanup(func() { indexPageSize = orig })
+
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Single run: everything fits on one page, no pager.
+	base := time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC)
+	save := func(i int) {
+		t.Helper()
+		run := &model.Run{ID: fmt.Sprintf("pg%d", i), Status: model.StatusSuccess, WorkflowName: "ci",
+			Event: model.Event{Kind: model.EventPush}, CreatedAt: base.Add(-time.Duration(i) * time.Minute)}
+		if err := st.SaveRun(run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(0)
+	if body := getText(t, ts.URL+"/"); strings.Contains(body, `class="pager`) {
+		t.Error("single-page run list renders a pager, want none")
+	}
+
+	// Five runs at 2 per page → 3 pages; pg0 newest … pg4 oldest.
+	for i := 1; i < 5; i++ {
+		save(i)
+	}
+	page1 := getText(t, ts.URL+"/")
+	for _, want := range []string{`class="pager`, `<strong>1</strong>`, `href="/?page=2"`, `href="/?page=3"`, "pg0", "pg1"} {
+		if !strings.Contains(page1, want) {
+			t.Errorf("page 1 misses %q", want)
+		}
+	}
+	if strings.Contains(page1, "pg2") {
+		t.Error("page 1 lists pg2, want it on page 2")
+	}
+
+	page3 := getText(t, ts.URL+"/?page=3")
+	for _, want := range []string{"pg4", `<strong>3</strong>`, `href="/"`, `href="/?page=2"`} {
+		if !strings.Contains(page3, want) {
+			t.Errorf("page 3 misses %q", want)
+		}
+	}
+	if strings.Contains(page3, "pg1") {
+		t.Error("page 3 lists pg1, want only the oldest run")
+	}
+
+	// Degradation: a page past the end renders empty but keeps the pager
+	// (including int64-max, whose offset multiplication would wrap negative
+	// without the maxIndexPage clamp and mislabel page 1); a non-numeric page
+	// falls back to page 1.
+	for _, q := range []string{"/?page=99", "/?page=9223372036854775807"} {
+		past := getText(t, ts.URL+q)
+		if strings.Contains(past, "pg0") || !strings.Contains(past, `class="pager`) {
+			t.Errorf("%s should list nothing but keep the pager", q)
+		}
+	}
+	if bad := getText(t, ts.URL+"/?page=abc"); !strings.Contains(bad, "pg0") {
+		t.Error("non-numeric page should fall back to page 1")
+	}
+}
+
+func TestFaviconAndLogo(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/favicon.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/favicon.svg status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("/favicon.svg Content-Type = %q, want image/svg+xml", ct)
+	}
+	svg := string(body)
+	if !strings.Contains(svg, "<svg") || !strings.Contains(svg, faviconFill) {
+		t.Errorf("/favicon.svg misses svg markup or the %s brand fill:\n%s", faviconFill, svg)
+	}
+
+	run := &model.Run{ID: "logo", Status: model.StatusSuccess, WorkflowName: "ci",
+		Event: model.Event{Kind: model.EventPush}, CreatedAt: time.Now()}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/runs/logo"} {
+		page := getText(t, ts.URL+path)
+		if !strings.Contains(page, `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`) {
+			t.Errorf("%s misses the favicon link", path)
+		}
+		if !strings.Contains(page, `<svg class="logo"`) || !strings.Contains(page, `fill="currentColor"`) {
+			t.Errorf("%s misses the inline currentColor header logo", path)
+		}
+		// The visible "Janus" wordmark names the mark; the svg must stay
+		// decorative or screen readers announce "Janus Janus".
+		if !strings.Contains(page, `aria-hidden="true"`) || strings.Contains(page, "aria-label") {
+			t.Errorf("%s inline logo must be aria-hidden with no aria-label", path)
 		}
 	}
 }

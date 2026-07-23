@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,22 +97,52 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
+// indexPageSize is how many runs the dashboard lists per page. Var so tests
+// can shrink it.
+var indexPageSize = 50
+
+// maxIndexPage caps the user-supplied ?page= so the offset multiplication in
+// handleIndex cannot overflow and wrap negative (which the stores would read
+// as "from the start", rendering page 1 under an absurd page label). Not a
+// product limit: at 50 runs/page this is 50M runs, far beyond any retention.
+const maxIndexPage = 1 << 20
+
 // indexData is the model for the run-list page.
 type indexData struct {
 	Version string
 	Runs    []*model.RunSummary
-	Refresh bool // auto-refresh while any listed run is not terminal
+	Refresh bool  // auto-refresh while any listed run is not terminal
+	Page    int   // current page, 1-based
+	Pages   []int // all page numbers; nil when everything fits on one page
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
-	runs, err := s.store.ListRuns(50, 0)
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	pageNo := 1
+	if n, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && n > 1 {
+		pageNo = min(n, maxIndexPage)
+	}
+	runs, err := s.store.ListRuns(indexPageSize, (pageNo-1)*indexPageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Only the listed page is scanned: an active run pushed past the first 50
-	// wouldn't trigger the refresh, but listing is newest-first so active runs
-	// are essentially always on it.
+	total, err := s.store.CountRuns()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// With retention (history_limit, default 1000) the page count stays small,
+	// so the pager renders every number — no ellipsis windowing.
+	var pages []int
+	if totalPages := (total + indexPageSize - 1) / indexPageSize; totalPages > 1 {
+		pages = make([]int, totalPages)
+		for i := range pages {
+			pages[i] = i + 1
+		}
+	}
+	// Only the listed page is scanned: an active run on another page wouldn't
+	// trigger the refresh, but listing is newest-first so active runs are
+	// essentially always on the first one.
 	refresh := false
 	for _, r := range runs {
 		if !r.Status.Terminal() {
@@ -119,7 +150,28 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 			break
 		}
 	}
-	s.render(w, "list.html", indexData{Version: s.version, Runs: runs, Refresh: refresh})
+	s.render(w, "list.html", indexData{
+		Version: s.version, Runs: runs, Refresh: refresh, Page: pageNo, Pages: pages,
+	})
+}
+
+// faviconFill is the brand color for the standalone favicon — the dashboard's
+// running-status blue. Inline header logos use currentColor instead, so only
+// the favicon (which has no surrounding text color) needs a fixed fill.
+const faviconFill = "#1565c0"
+
+// handleFavicon serves the shared "logo" template block as a standalone SVG,
+// so the mark has a single source of truth for both the favicon and the
+// inline header logos.
+func (s *Server) handleFavicon(w http.ResponseWriter, _ *http.Request) {
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, "logo", faviconFill); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = buf.WriteTo(w)
 }
 
 // runPageData is the model for the run-detail page.
@@ -127,6 +179,7 @@ type runPageData struct {
 	Run     *model.Run
 	Logs    string
 	Refresh bool // auto-refresh while the run is not terminal
+	Version string
 }
 
 func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +194,7 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 		Run:     run,
 		Logs:    logs.String(),
 		Refresh: !run.Status.Terminal(),
+		Version: s.version,
 	})
 }
 
