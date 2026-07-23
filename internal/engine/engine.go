@@ -211,8 +211,8 @@ func skippedJobs(wf *model.Workflow, branch string, changed model.ChangedFiles) 
 			skip[name] = true
 		}
 	}
-	for changed := len(skip) > 0; changed; {
-		changed = false
+	for dirty := len(skip) > 0; dirty; {
+		dirty = false
 		for name, job := range wf.Jobs {
 			if skip[name] {
 				continue
@@ -220,7 +220,7 @@ func skippedJobs(wf *model.Workflow, branch string, changed model.ChangedFiles) 
 			for _, dep := range job.Needs {
 				if skip[dep] {
 					skip[name] = true
-					changed = true
+					dirty = true
 					break
 				}
 			}

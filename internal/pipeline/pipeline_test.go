@@ -925,3 +925,32 @@ jobs:
 		t.Error("absent paths keys must leave filters nil")
 	}
 }
+
+func TestParsePathPatternCaps(t *testing.T) {
+	pipe := func(patterns []string) string {
+		return "name: ci\non: { push: { paths: [\"" + strings.Join(patterns, "\", \"") + "\"] } }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"
+	}
+	many := func(n int) []string {
+		ps := make([]string, n)
+		for i := range ps {
+			ps[i] = fmt.Sprintf("p%d/**", i)
+		}
+		return ps
+	}
+
+	// Exactly at the caps: accepted.
+	if _, err := Parse([]byte(pipe(many(maxPathPatterns)))); err != nil {
+		t.Errorf("%d patterns should be accepted: %v", maxPathPatterns, err)
+	}
+	if _, err := Parse([]byte(pipe([]string{strings.Repeat("a", maxPathPatternLen)}))); err != nil {
+		t.Errorf("a %d-char pattern should be accepted: %v", maxPathPatternLen, err)
+	}
+
+	// One past the caps: rejected.
+	if _, err := Parse([]byte(pipe(many(maxPathPatterns + 1)))); err == nil || !strings.Contains(err.Error(), "too many patterns") {
+		t.Errorf("%d patterns: err = %v, want too-many-patterns", maxPathPatterns+1, err)
+	}
+	if _, err := Parse([]byte(pipe([]string{strings.Repeat("a", maxPathPatternLen+1)}))); err == nil || !strings.Contains(err.Error(), "pattern is too long") {
+		t.Errorf("over-long pattern: err = %v, want pattern-too-long", err)
+	}
+}
