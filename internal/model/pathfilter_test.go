@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestMatchPath(t *testing.T) {
 	cases := []struct {
@@ -46,11 +50,30 @@ func TestMatchPath(t *testing.T) {
 		{"", "a", false},
 		{"**", "", true},
 		{"*", "", true},
+		// `?` is one character, not one byte.
+		{"?.go", "文.go", true},
+		{"a?c", "a文c", true},
+		{"??", "文", false},
 	}
 	for _, c := range cases {
 		if got := MatchPath(c.pattern, c.path); got != c.want {
 			t.Errorf("MatchPath(%q, %q) = %v, want %v", c.pattern, c.path, got, c.want)
 		}
+	}
+}
+
+// TestMatchPathAdversarial pins the O(pattern × path) bound: a backtracking
+// matcher takes combinatorial time on this input (effectively hanging the
+// test), the DP returns instantly.
+func TestMatchPathAdversarial(t *testing.T) {
+	pattern := strings.Repeat("*a", 40) + "b"
+	path := strings.Repeat("a", 300)
+	start := time.Now()
+	if MatchPath(pattern, path) {
+		t.Error("pattern requires a trailing b, path has none")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("adversarial match took %v, want well under a second", d)
 	}
 }
 
