@@ -226,7 +226,7 @@ func runServe(args []string) error {
 		MaxRuns:      cfg.MaxParallelRuns,
 		HistoryLimit: cfg.HistoryLimit,
 		Allowlist:    allow,
-		Persistent:   cfg.WorkspaceStrategy == "persistent",
+		Strategy:     cfg.WorkspaceStrategy,
 		Logger:       logger,
 	})
 	if cfg.WorkspaceStrategy == "persistent" {

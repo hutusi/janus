@@ -104,7 +104,7 @@ func TestTriggerPersistentUsesRepoDir(t *testing.T) {
 	root := t.TempDir()
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
-	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Persistent: true})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyPersistent})
 	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
 
 	res, err := r.Trigger(ev)
@@ -148,7 +148,7 @@ func TestTriggerPersistentContentionFallsBackToFresh(t *testing.T) {
 	root := t.TempDir()
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
-	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Persistent: true})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyPersistent})
 
 	// Simulate a run of the same repo holding the persistent workspace.
 	mu := r.repoLock(repo)

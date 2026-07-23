@@ -54,7 +54,7 @@ type Runner struct {
 	wsRoot       string
 	pipelinePath string
 	keepWS       bool
-	persistent   bool
+	strategy     string
 	historyLimit int
 	allow        allowlist.Allowlist
 	logger       *slog.Logger
@@ -83,12 +83,18 @@ type Runner struct {
 	groups *groupReg // concurrency-group membership and trigger-order accounting (see groupReg)
 }
 
+// Workspace strategies (Options.Strategy). An empty string means fresh.
+const (
+	StrategyFresh      = "fresh"      // new directory per run, shallow fetch, removed after
+	StrategyPersistent = "persistent" // one reusable workspace per repo, updated in place
+)
+
 // Options configures a Runner.
 type Options struct {
 	WSRoot       string              // where per-run workspaces are created
 	PipelinePath string              // in-repo path to the pipeline file (an event may override it)
 	KeepWS       bool                // keep workspaces after runs (debugging)
-	Persistent   bool                // one reusable workspace per repo, updated in place (workspace_strategy: persistent)
+	Strategy     string              // workspace strategy (Strategy* consts; "" = fresh)
 	MaxRuns      int                 // max concurrent runs (<=0 means 4)
 	HistoryLimit int                 // max terminal runs to retain (<=0 = unlimited); pruned after each run
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
@@ -119,7 +125,7 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		wsRoot:       opts.WSRoot,
 		pipelinePath: opts.PipelinePath,
 		keepWS:       opts.KeepWS,
-		persistent:   opts.Persistent,
+		strategy:     opts.Strategy,
 		historyLimit: opts.HistoryLimit,
 		allow:        opts.Allowlist,
 		logger:       logger,
@@ -545,7 +551,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	var wsDir string
 	reuse := false
 	unlock := func() {}
-	if r.persistent {
+	if r.strategy == StrategyPersistent {
 		if mu := r.repoLock(ev.RepoURL); mu.TryLock() {
 			unlock = mu.Unlock
 			reuse = true

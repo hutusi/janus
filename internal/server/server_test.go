@@ -129,7 +129,7 @@ func newTestServerPersistent(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatalf("allowlist.New: %v", err)
 	}
-	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow, Persistent: true})
+	rn := runner.New(st, eng, runner.Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 4, Allowlist: allow, Strategy: runner.StrategyPersistent})
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithAPIToken(testAPIToken),
