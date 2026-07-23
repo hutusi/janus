@@ -259,7 +259,9 @@ These produce a clear validation error rather than running:
 - `runs-on:`, `container:`, `services:` — jobs run as host processes.
 - `secrets:` — use host environment variables.
 - `cache:`, `permissions:`, `outputs:`, step `id:`/`name:`; `concurrency:`
-  anywhere but the top level, or as GitHub's string shorthand.
+  anywhere but the top level, or as GitHub's string shorthand. Reusing checkouts
+  and untracked build caches between runs is a server setting, not a pipeline
+  key — see [persistent workspaces](configuration.md#persistent-workspaces).
 - Job names outside `[A-Za-z0-9_-]` — the store derives log-file names from
   the job name, and a wider charset would let two jobs share one file.
 - Absurd sizes — a pipeline file over 1 MiB (rejected at read, before parsing),

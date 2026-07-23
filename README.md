@@ -205,10 +205,16 @@ your own build with `deploy/install.sh --binary ./janus` (no download step).
 ## Out of scope
 
 containers/VMs · matrix · `uses:` / third-party actions · `if:` / expressions ·
-distributed runners · artifact storage · caching · secrets beyond host env · a
-Windows service installer (the binary runs on Windows, but only the systemd unit
-and `deploy/install.sh` are provided). Node/Go/Python are assumed to be installed
-on the host.
+distributed runners · artifact storage · artifact/dependency caching (the
+pipeline `cache:` key) · secrets beyond host env · a Windows service installer
+(the binary runs on Windows, but only the systemd unit and `deploy/install.sh`
+are provided). Node/Go/Python are assumed to be installed on the host.
+
+Repo checkouts, by contrast, *are* cached: every checkout is a shallow depth-1
+fetch (never a full clone), and `workspace_strategy: persistent` reuses one
+workspace per repository with incremental fetches, keeping untracked build
+caches such as `node_modules` — see
+[persistent workspaces](docs/configuration.md#persistent-workspaces).
 
 ## Development
 
