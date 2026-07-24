@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,14 +47,14 @@ func newNotifier(t *testing.T, targets []Target, opts ...Option) *Notifier {
 }
 
 // failedRun is a fully-executed run that finished failed, with credentials in
-// its repo URL so redaction can be checked.
+// its repo URL so redaction can be checked. Reason is left empty — an ordinary
+// job failure carries none, so the payload must derive one from the failed jobs.
 func failedRun() *model.Run {
 	start := time.Now().Add(-5 * time.Second)
 	return &model.Run{
 		ID:           "abc123",
 		WorkflowName: "ci",
 		Status:       model.StatusFailed,
-		Reason:       "job build failed",
 		Event: model.Event{
 			Provider: "gitlab",
 			Kind:     model.EventPush,
@@ -109,6 +110,9 @@ func TestNotifyPostsPayload(t *testing.T) {
 	}
 	if p["run_id"] != "abc123" || p["workflow"] != "ci" || p["status"] != "failed" {
 		t.Errorf("core fields wrong: %v", p)
+	}
+	if p["reason"] != "failed jobs: build" {
+		t.Errorf("reason = %v, want derived \"failed jobs: build\"", p["reason"])
 	}
 	if repo, _ := p["repo_url"].(string); strings.Contains(repo, "tok@") || strings.Contains(repo, "user:") {
 		t.Errorf("repo_url not redacted: %q", repo)
@@ -297,6 +301,48 @@ func TestCloseTimeoutCancelsHungDelivery(t *testing.T) {
 	}
 }
 
+func TestNotifyRunLinkJoinsBaseURLPath(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	n := newNotifier(t, []Target{{URL: ts.URL, On: []string{"failed"}}}, WithBaseURL("https://ci.example.com/base"))
+
+	n.Notify(failedRun())
+	n.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var p map[string]any
+	if err := json.Unmarshal(got.body, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p["url"] != "https://ci.example.com/base/runs/abc123" {
+		t.Errorf("url = %v, want a structural join under /base", p["url"])
+	}
+}
+
+func TestNotifyDropsWhenSaturated(t *testing.T) {
+	release := make(chan struct{})
+	var hits int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	// Cap of one: the first delivery takes the only slot (acquired synchronously
+	// in Notify) and blocks in the handler, so the second must be dropped.
+	n := newNotifier(t, []Target{{URL: ts.URL, On: []string{"failed"}}}, WithMaxInFlight(1))
+
+	n.Notify(failedRun()) // occupies the single slot
+	n.Notify(failedRun()) // slot full → dropped, non-blocking, no panic
+
+	close(release) // let the first delivery complete
+	n.Close(2 * time.Second)
+
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("server received %d deliveries, want 1 (the second must be dropped)", got)
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -311,8 +357,16 @@ func TestNewValidation(t *testing.T) {
 		{"url without host", []Target{{URL: "http://"}}, "", true},
 		{"unknown on value", []Target{{URL: "https://x/y", On: []string{"running"}}}, "", true},
 		{"pending is not notifiable", []Target{{URL: "https://x/y", On: []string{"pending"}}}, "", true},
-		{"bad base_url", nil, "ftp://nope", true},
+		// Targets are lenient: a webhook URL legitimately carries a path, query, or basic-auth.
+		{"target may carry a path and query", []Target{{URL: "https://x/y?token=abc"}}, "", false},
+		{"target may carry userinfo", []Target{{URL: "https://u:p@x/y"}}, "", false},
+		{"bad base_url scheme", nil, "ftp://nope", true},
 		{"good base_url", nil, "https://ci.example.com", false},
+		{"base_url with path ok", nil, "https://ci.example.com/base", false},
+		// base_url is strict: it is copied into every payload and joined with a path.
+		{"base_url with userinfo rejected", nil, "https://u:p@ci.example.com", true},
+		{"base_url with query rejected", nil, "https://ci.example.com/?x=1", true},
+		{"base_url with fragment rejected", nil, "https://ci.example.com/#f", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

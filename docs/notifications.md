@@ -27,7 +27,7 @@ notifications:
 | `url` | yes | The `http`/`https` endpoint to POST. An invalid URL is a startup error. |
 | `on` | no | Which terminal outcomes deliver to this target: any of `success`, `failed`, `cancelled`, `skipped`. Omitted = **failures only**. An unknown value is a startup error. |
 | `secret` | no | Sent as an `Authorization: Bearer <secret>` header so the receiver can authenticate the delivery. |
-| `base_url` | no | Top-level (not per-target). When set, each payload includes `url = <base_url>/runs/<id>`. |
+| `base_url` | no | Top-level (not per-target). When set, each payload includes a run link joined structurally under it (`<base_url>/runs/<id>`). Must be a plain `http`/`https` URL — userinfo, a query, or a fragment is a startup error (it would leak into or break every link). |
 
 Because `notifications` is a list, per-target secrets have no `JANUS_*` env
 fallback (unlike `gitlab_secret` / `api_token`) — they live in the file. **Keep
@@ -43,7 +43,7 @@ body (a failing run shown):
   "run_id": "a1b2c3d4",
   "workflow": "ci",
   "status": "failed",
-  "reason": "job build failed",
+  "reason": "failed jobs: build",
   "provider": "gitlab",
   "event": "push",
   "repo_url": "https://gitlab.example.com/acme/app.git",
@@ -68,9 +68,11 @@ body (a failing run shown):
 Notes:
 
 - **`status`** is the run's terminal state — one of `success`, `failed`,
-  `cancelled`, `skipped`. **`reason`** explains a non-clean outcome (a checkout or
-  parse failure, a non-matching event, a cancellation) and is omitted for a clean
-  run.
+  `cancelled`, `skipped`. **`reason`** explains a non-clean outcome: for a
+  pre-execution failure (checkout/parse), a non-matching event, or a cancellation
+  it is the run's recorded reason; for an ordinary job failure it is derived as
+  `failed jobs: <names>` (which the `jobs` array also details). It is omitted for
+  a clean success.
 - **`repo_url`** has any embedded credentials (`https://user:token@host/…`)
   stripped before it is sent.
 - **`started_at`** and **`duration_seconds`** are present only for runs that
