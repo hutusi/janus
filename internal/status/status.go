@@ -1,18 +1,22 @@
-// Package status reports a run's lifecycle state to GitLab's Commit Status API
-// (POST /api/v4/projects/{id}/statuses/{sha}), so pass/fail shows natively on
-// the triggering commit or merge request. It is Janus's second outbound HTTP
-// user, after internal/notify, and copies that package's safety posture: the
-// reporter owns its own context (never the run's), a slow/failing/hung GitLab is
-// logged and never fails or blocks a run, redirects are not followed (so the
-// PRIVATE-TOKEN can't ride a downgrade), and Close drains in-flight posts at
-// shutdown. Posts for one commit are serialized (running before terminal) so
-// GitLab never settles on the wrong state, and are best-effort by design.
+// Package status reports a run's lifecycle state to a git host's commit-status
+// API, so pass/fail shows natively on the triggering commit or merge request. It
+// is Janus's second outbound HTTP user, after internal/notify, and copies that
+// package's safety posture: the reporter owns its own context (never the run's),
+// a slow/failing/hung host is logged and never fails or blocks a run, redirects
+// are not followed (so the API token can't ride a downgrade), and Close drains
+// in-flight posts at shutdown. Posts for one commit are serialized (running
+// before terminal) so the host never settles on the wrong state, and are
+// best-effort by design.
+//
+// One Reporter fans out across providers: each host's endpoint, auth, state
+// vocabulary, and body shape live behind a `dialect`, and Report dispatches by
+// the run's provider. The worker pool, ordering, drain, and no-redirect policy
+// are shared — a dialect only renders a run+state into a ready-to-send post.
 package status
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -20,11 +24,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/hutusi/janus/internal/model"
 )
@@ -38,36 +39,41 @@ const (
 	defaultWorkers = 8
 	// workerQueueLen buffers each worker before posts are dropped.
 	workerQueueLen = 64
-	// statusContext is the GitLab status "context" (its grouping key): one row
-	// per commit whose lifecycle updates running -> terminal.
+	// statusContext is the status "context" (its grouping key): one row per commit
+	// whose lifecycle updates running -> terminal.
 	statusContext = "janus"
-	// GitLab caps description, target_url, and ref at 255 characters (Unicode code
-	// points, not bytes); an over-limit field is rejected and the whole status is
-	// lost.
-	maxDescLen      = 255
-	maxTargetURLLen = 255
-	maxRefLen       = 255
-	// retryBackoff delays the single retry after GitLab's 409 (concurrent update).
+	// retryBackoff delays the single retry after a host's 409 (concurrent update).
 	retryBackoff = 500 * time.Millisecond
 )
 
-// Reporter posts commit statuses to GitLab. Construct it with New; it is safe
-// for concurrent use by multiple run goroutines.
+// dialect renders a run and state into a provider-specific status post, or
+// ok=false to skip: a state the host has no row for, an event missing the host's
+// addressing fields, or an unresolvable API base. targetURL is the shared
+// run-page link (empty when no base_url); each dialect applies its own limits.
+type dialect interface {
+	build(run *model.Run, state model.Status, targetURL string) (postJob, bool)
+}
+
+// Reporter posts commit statuses. Construct it with New; it is safe for
+// concurrent use by multiple run goroutines.
 type Reporter struct {
-	token       string
-	client      *http.Client
-	logger      *slog.Logger
-	baseRaw     string   // WithBaseURL input, parsed into baseURL by New
-	instanceRaw string   // WithInstanceURL input, parsed into instanceURL by New
-	baseURL     *url.URL // public base for target_url links; nil = no link
-	instanceURL *url.URL // GitLab instance base override; nil = derive per event
-	timeout     time.Duration
-	numWorkers  int
+	client     *http.Client
+	logger     *slog.Logger
+	baseRaw    string   // WithBaseURL input, parsed into baseURL by New
+	baseURL    *url.URL // public base for run-page links; nil = no link
+	timeout    time.Duration
+	numWorkers int
+
+	// Per-provider credentials, captured by the With<Provider> options and
+	// resolved into dialects by New. A provider with no dialect is simply not
+	// reported (Report no-ops for it).
+	glToken, glURLRaw string
+	dialects          map[string]dialect
 
 	// workers is a fixed pool of ordered FIFO channels; a post is routed to
-	// workers[fnv(key)%N], so all posts for one (project, sha, context) run
-	// sequentially through the same worker — running always precedes the
-	// terminal, and we never post to one commit concurrently (which GitLab 409s).
+	// workers[shard(key)], so all posts for one (provider, repo, sha, context) run
+	// sequentially through the same worker — running always precedes the terminal,
+	// and we never post to one commit concurrently (which some hosts 409).
 	workers    []chan postJob
 	mu         sync.Mutex // guards closed and sends on the worker channels
 	closed     bool
@@ -78,13 +84,16 @@ type Reporter struct {
 	wg     sync.WaitGroup // worker goroutines
 }
 
-// postJob is one enqueued status POST.
+// postJob is one enqueued status POST, fully rendered by a dialect.
 type postJob struct {
-	endpoint string
-	body     []byte
+	key      string            // routing key: same key -> same FIFO worker
+	endpoint string            // fully-formed status-API URL
+	body     []byte            // JSON payload
+	header   map[string]string // auth (+ any host header); Content-Type added by post
 	runID    string
 	label    string
-	overHTTP bool
+	overHTTP bool // endpoint is plaintext http -> warn once
+	retry409 bool // retry a single time on 409 (GitLab; GitHub never 409s)
 }
 
 // Option configures a Reporter.
@@ -100,14 +109,17 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // WithBaseURL sets the daemon's public base URL; when non-empty, statuses carry
-// a target_url link to the run page (<base_url>/runs/<id>). Validated by New.
+// a run-page link (<base_url>/runs/<id>). Validated by New.
 func WithBaseURL(u string) Option { return func(r *Reporter) { r.baseRaw = u } }
 
-// WithInstanceURL sets the GitLab instance base URL (e.g. https://gitlab.example.com).
-// When set it overrides deriving the API base from the event's clone URL —
-// required for clone_url "ssh" (an scp-style URL has no derivable HTTPS
-// authority) and for self-hosted instances on a subpath. Validated by New.
-func WithInstanceURL(u string) Option { return func(r *Reporter) { r.instanceRaw = u } }
+// WithGitLab enables GitLab commit-status reporting with an outbound API token
+// (personal/project access token, `api` scope) and an optional instance base URL
+// (e.g. https://gitlab.example.com). The instance URL overrides deriving the API
+// base from the event's clone URL — required for clone_url "ssh" and self-hosted
+// instances on a subpath. Both validated by New.
+func WithGitLab(token, instanceURL string) Option {
+	return func(r *Reporter) { r.glToken, r.glURLRaw = token, instanceURL }
+}
 
 // WithHTTPClient overrides the HTTP client (mainly for tests). Its own Timeout
 // governs; WithTimeout is ignored.
@@ -138,14 +150,12 @@ func WithWorkers(n int) Option {
 	}
 }
 
-// New validates the token and any URLs and returns a Reporter. It rejects an
-// empty token and a malformed or credential-bearing base_url/gitlab_url —
-// surfaced by the caller as a startup error, like allowlist.New.
-func New(token string, opts ...Option) (*Reporter, error) {
-	if strings.TrimSpace(token) == "" {
-		return nil, errors.New("gitlab api token is empty")
-	}
-	r := &Reporter{token: token, logger: slog.Default(), timeout: defaultTimeout, numWorkers: defaultWorkers}
+// New validates the configured providers and any URLs and returns a Reporter. It
+// rejects a configuration with no provider, an empty token, and a malformed or
+// credential-bearing base_url / instance URL — surfaced by the caller as a
+// startup error, like allowlist.New.
+func New(opts ...Option) (*Reporter, error) {
+	r := &Reporter{logger: slog.Default(), timeout: defaultTimeout, numWorkers: defaultWorkers, dialects: make(map[string]dialect)}
 	for _, opt := range opts {
 		opt(r)
 	}
@@ -159,20 +169,23 @@ func New(token string, opts ...Option) (*Reporter, error) {
 		}
 		r.baseURL = u
 	}
-	if r.instanceRaw != "" {
-		u, err := validateBaseURL(r.instanceRaw)
+	if r.glToken != "" || r.glURLRaw != "" {
+		d, err := newGitLabDialect(r.glToken, r.glURLRaw, r.logger)
 		if err != nil {
-			return nil, fmt.Errorf("gitlab_url: %w", err)
+			return nil, err
 		}
-		r.instanceURL = u
+		r.dialects["gitlab"] = d
+	}
+	if len(r.dialects) == 0 {
+		return nil, errors.New("no commit-status provider configured")
 	}
 	if r.client == nil {
 		r.client = &http.Client{Timeout: r.timeout}
 	}
-	// Never follow redirects, regardless of client source: the PRIVATE-TOKEN
-	// header must not be forwarded to a redirect target (e.g. an https->http
-	// downgrade). Enforced even on a WithHTTPClient-supplied client so that knob
-	// can't silently drop the protection; a client that set its own policy keeps it.
+	// Never follow redirects, regardless of client source: the API token must not
+	// be forwarded to a redirect target (e.g. an https->http downgrade). Enforced
+	// even on a WithHTTPClient-supplied client so that knob can't silently drop the
+	// protection; a client that set its own policy keeps it.
 	if r.client.CheckRedirect == nil {
 		r.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
@@ -186,60 +199,34 @@ func New(token string, opts ...Option) (*Reporter, error) {
 	return r, nil
 }
 
-// Report posts run's current lifecycle state to GitLab's commit-status API. It
-// returns as soon as the post is enqueued, so it never blocks or fails the
-// caller. state is the run's current status (StatusRunning for the
-// pre-execution post, or the terminal status); the reporter maps it and no-ops
-// for states or events it does not report (pending, skipped, non-GitLab events,
-// events without a project id / sha, or an unresolvable API base).
+// Report posts run's current lifecycle state to its provider's commit-status
+// API. It returns as soon as the post is enqueued, so it never blocks or fails
+// the caller. state is the run's current status (StatusRunning for the
+// pre-execution post, or the terminal status); the run's provider selects the
+// dialect, which maps the state and no-ops for states/events it does not report.
 func (r *Reporter) Report(run *model.Run, state model.Status) {
-	glState := gitlabState(state)
-	if glState == "" {
+	d := r.dialects[run.Event.Provider]
+	if d == nil {
+		return // no reporter configured for this provider (or a manual trigger)
+	}
+	job, ok := d.build(run, state, r.runURL(run.ID))
+	if !ok {
 		return
 	}
-	ev := run.Event
-	if ev.Provider != "gitlab" || ev.ProjectID <= 0 || ev.SHA == "" {
-		return
-	}
-	base := r.instanceURL
-	if base == nil {
-		base = deriveBase(ev.RepoURL)
-	}
-	if base == nil {
-		r.logger.Debug("commit status skipped: no resolvable GitLab API base", "run_id", run.ID, "project", ev.ProjectID)
-		return
-	}
-	endpoint := base.JoinPath("api", "v4", "projects", strconv.FormatInt(ev.ProjectID, 10), "statuses", ev.SHA).String()
-
-	body, err := json.Marshal(statusBody{
-		State:       glState,
-		Context:     statusContext,
-		Ref:         refName(ev.Ref),
-		TargetURL:   r.targetURL(run.ID),
-		Description: clip(description(run, state), maxDescLen),
-	})
-	if err != nil {
-		r.logger.Warn("commit status payload could not be encoded", "run_id", run.ID, "err", err)
-		return
-	}
-
-	label := "gitlab project " + strconv.FormatInt(ev.ProjectID, 10)
-	key := label + "|" + ev.SHA + "|" + statusContext
-	job := postJob{endpoint: endpoint, body: body, runID: run.ID, label: label, overHTTP: base.Scheme == "http"}
-	if !r.enqueue(key, job) {
-		r.logger.Warn("commit status dropped: worker queue full", "run_id", run.ID, "target", label)
+	if !r.enqueue(job) {
+		r.logger.Warn("commit status dropped: worker queue full", "run_id", run.ID, "target", job.label)
 	}
 }
 
 // enqueue routes a job to its key's ordered worker, non-blocking. It reports
 // false if the queue is full or the reporter is closed.
-func (r *Reporter) enqueue(key string, j postJob) bool {
+func (r *Reporter) enqueue(j postJob) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return false
 	}
-	ch := r.workers[shard(key, len(r.workers))]
+	ch := r.workers[shard(j.key, len(r.workers))]
 	select {
 	case ch <- j:
 		return true
@@ -263,12 +250,12 @@ func (r *Reporter) deliver(j postJob) {
 	}()
 	if j.overHTTP {
 		r.warnedHTTP.Do(func() {
-			r.logger.Warn("posting commit status over plaintext http; the PRIVATE-TOKEN is sent unencrypted — use https")
+			r.logger.Warn("posting commit status over plaintext http; the API token is sent unencrypted — use https")
 		})
 	}
-	// GitLab returns 409 on a concurrent update to the same commit status and
-	// documents it as retryable; try once more after a short backoff.
-	if r.post(j) == http.StatusConflict {
+	// Some hosts (GitLab) return 409 on a concurrent update to the same commit
+	// status and document it as retryable; try once more after a short backoff.
+	if code := r.post(j); j.retry409 && code == http.StatusConflict {
 		select {
 		case <-time.After(retryBackoff):
 			r.post(j)
@@ -286,7 +273,9 @@ func (r *Reporter) post(j postJob) int {
 		return 0
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("PRIVATE-TOKEN", r.token)
+	for k, v := range j.header {
+		req.Header.Set(k, v)
+	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		r.logger.Warn("commit status post failed", "run_id", j.runID, "target", j.label, "err", safeError(err))
@@ -321,17 +310,18 @@ func (r *Reporter) Close(timeout time.Duration) {
 	r.cancel()
 }
 
-func (r *Reporter) targetURL(runID string) string {
+// runURL is the base-joined run-page link a dialect may use for a status's
+// target_url, or "" when no base_url is set. Length limits are the dialect's
+// concern (they vary per host).
+func (r *Reporter) runURL(runID string) string {
 	if r.baseURL == nil {
 		return ""
 	}
-	u := r.baseURL.JoinPath("runs", runID).String()
-	if utf8.RuneCountInString(u) > maxTargetURLLen { // characters, not bytes
-		return "" // GitLab rejects an over-length target_url; drop it rather than lose the status
-	}
-	return u
+	return r.baseURL.JoinPath("runs", runID).String()
 }
 
+// statusBody is the JSON payload. GitLab sets every field; GitHub leaves Ref
+// empty (omitempty drops it). Both use the "state/context" pair.
 type statusBody struct {
 	State       string `json:"state"`
 	Context     string `json:"context"`
@@ -340,48 +330,9 @@ type statusBody struct {
 	Description string `json:"description,omitempty"`
 }
 
-// refName strips the refs/heads/ prefix so the status carries the branch name
-// GitLab associates the pipeline with — the pushed branch, or an MR's source
-// branch (parseGitLabMR sets Ref = "refs/heads/" + source_branch). Without it a
-// status can attach to the wrong/null external pipeline and vanish from the MR.
-// A ref over GitLab's 255-char cap (event refs are accepted up to 512) is
-// omitted rather than truncated — a truncated ref would name a different branch,
-// and the status still posts keyed on the SHA.
-func refName(ref string) string {
-	r := strings.TrimPrefix(ref, "refs/heads/")
-	if utf8.RuneCountInString(r) > maxRefLen { // characters, not bytes
-		return ""
-	}
-	return r
-}
-
-// shard maps a key to a worker index. Same key -> same worker -> FIFO order.
-func shard(key string, n int) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return int(h.Sum32() % uint32(n)) //nolint:gosec // n is small and positive
-}
-
-// gitlabState maps a Janus status to a GitLab commit-status state, or "" for
-// states GitLab has no equivalent for / that we deliberately don't post
-// (pending, skipped). A skipped run means the workflow didn't apply to the
-// commit; posting success would green-check code CI never validated.
-func gitlabState(s model.Status) string {
-	switch s {
-	case model.StatusRunning:
-		return "running"
-	case model.StatusSuccess:
-		return "success"
-	case model.StatusFailed:
-		return "failed"
-	case model.StatusCancelled:
-		return "canceled" // GitLab's spelling
-	}
-	return ""
-}
-
-// description is the human-facing status line. It keys off the reported state
-// (not run.Status, which for the pre-execution "running" post is still pending).
+// description is the human-facing status line, shared by all dialects. It keys
+// off the reported state (not run.Status, which for the pre-execution "running"
+// post is still pending).
 func description(run *model.Run, state model.Status) string {
 	wf := run.WorkflowName
 	if wf == "" {
@@ -408,10 +359,17 @@ func description(run *model.Run, state model.Status) string {
 // clip limits s to max characters (code points), so it never over-clips a
 // multibyte string nor splits a rune into invalid UTF-8.
 func clip(s string, max int) string {
-	if utf8.RuneCountInString(s) <= max {
+	if len([]rune(s)) <= max {
 		return s
 	}
 	return string([]rune(s)[:max])
+}
+
+// shard maps a key to a worker index. Same key -> same worker -> FIFO order.
+func shard(key string, n int) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return int(h.Sum32() % uint32(n)) //nolint:gosec // n is small and positive
 }
 
 // deriveBase returns scheme://host of an http/https clone URL (dropping any
@@ -427,7 +385,7 @@ func deriveBase(repoURL string) *url.URL {
 
 // validateBaseURL requires an http/https URL with a host and no userinfo, query,
 // or fragment (it is joined with a path and, for base_url, copied into the
-// target_url link). Errors are value-free: the value may reach a startup log.
+// run-page link). Errors are value-free: the value may reach a startup log.
 func validateBaseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {

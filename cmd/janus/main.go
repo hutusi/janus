@@ -238,9 +238,9 @@ func runServe(args []string) error {
 	// guard honest).
 	var reporter *status.Reporter
 	if cfg.GitLabAPIToken != "" {
-		reporter, err = status.New(cfg.GitLabAPIToken,
+		reporter, err = status.New(
+			status.WithGitLab(cfg.GitLabAPIToken, cfg.GitLabURL),
 			status.WithBaseURL(cfg.BaseURL),
-			status.WithInstanceURL(cfg.GitLabURL),
 			status.WithLogger(logger),
 		)
 		if err != nil {

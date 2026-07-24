@@ -68,12 +68,12 @@ func gitlabRun(status model.Status) *model.Run {
 	}
 }
 
-// newReporter points the GitLab API base at ts (via WithInstanceURL) so posts
-// land on the test server regardless of the run's RepoURL.
+// newReporter points the GitLab API base at ts (via the WithGitLab instance URL)
+// so posts land on the test server regardless of the run's RepoURL.
 func newReporter(t *testing.T, ts *httptest.Server, opts ...Option) *Reporter {
 	t.Helper()
-	all := append([]Option{WithLogger(discardLogger()), WithInstanceURL(ts.URL)}, opts...)
-	r, err := New("tok-secret", all...)
+	all := append([]Option{WithLogger(discardLogger()), WithGitLab("tok-secret", ts.URL)}, opts...)
+	r, err := New(all...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -185,11 +185,11 @@ func TestReportScoping(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reqs := make(chan captured, 1)
 			ts := recordingServer(t, reqs)
-			opts := []Option{WithLogger(discardLogger())}
+			instance := ""
 			if tc.instance {
-				opts = append(opts, WithInstanceURL(ts.URL))
+				instance = ts.URL
 			}
-			r, err := New("tok", opts...)
+			r, err := New(WithLogger(discardLogger()), WithGitLab("tok", instance))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -210,7 +210,7 @@ func TestReportDerivesBaseFromRepoURL(t *testing.T) {
 	reqs := make(chan captured, 1)
 	ts := recordingServer(t, reqs)
 	// No instance URL: the API base must be derived from the run's http RepoURL.
-	r, err := New("tok", WithLogger(discardLogger()))
+	r, err := New(WithLogger(discardLogger()), WithGitLab("tok", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,8 +314,8 @@ func TestReportSuppliedClientStillNoRedirect(t *testing.T) {
 	t.Cleanup(primary.Close)
 	// A caller-supplied client that set no CheckRedirect must still not forward
 	// the PRIVATE-TOKEN across a redirect — New enforces the no-follow policy.
-	r, err := New("tok",
-		WithInstanceURL(primary.URL),
+	r, err := New(
+		WithGitLab("tok", primary.URL),
 		WithLogger(discardLogger()),
 		WithHTTPClient(&http.Client{}),
 	)
@@ -351,10 +351,8 @@ func TestNewValidation(t *testing.T) {
 			if tc.base != "" {
 				opts = append(opts, WithBaseURL(tc.base))
 			}
-			if tc.instance != "" {
-				opts = append(opts, WithInstanceURL(tc.instance))
-			}
-			_, err := New(tc.token, opts...)
+			opts = append(opts, WithGitLab(tc.token, tc.instance))
+			_, err := New(opts...)
 			if tc.wantErr && err == nil {
 				t.Fatal("want error, got nil")
 			}
@@ -498,8 +496,8 @@ func TestReportCleartextWarning(t *testing.T) {
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			var n int32
-			r, err := New("tok",
-				WithInstanceURL(tc.instance),
+			r, err := New(
+				WithGitLab("tok", tc.instance),
 				WithLogger(logger),
 				WithHTTPClient(&http.Client{Transport: okRT{&n}}),
 			)
@@ -520,7 +518,7 @@ func TestReportClipsDescriptionAndTargetURL(t *testing.T) {
 	ts := recordingServer(t, reqs)
 	// A base URL long enough that <base>/runs/<id> exceeds GitLab's 255 cap.
 	longBase := "https://ci.example.com/" + strings.Repeat("a", 300)
-	r, err := New("tok", WithInstanceURL(ts.URL), WithBaseURL(longBase), WithLogger(discardLogger()))
+	r, err := New(WithGitLab("tok", ts.URL), WithBaseURL(longBase), WithLogger(discardLogger()))
 	if err != nil {
 		t.Fatal(err)
 	}
