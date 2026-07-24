@@ -81,7 +81,11 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	res, err := s.runner.Trigger(ev)
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
 		s.logger.Warn("trigger rejected: repo not allowed", "repo", model.RedactURL(ev.RepoURL))
-		writeError(w, http.StatusForbidden, err.Error())
+		// Fixed message, not err.Error(): Trigger wraps the raw repo URL into
+		// the error, and a credential-bearing URL redacted from the log must
+		// not resurface in a response body that proxies and error trackers
+		// capture. Same wording as the webhook handler's rejection.
+		writeError(w, http.StatusForbidden, "repository not in allowlist")
 		return
 	}
 	if errors.Is(err, runner.ErrBusy) || errors.Is(err, runner.ErrStoreUnavailable) {

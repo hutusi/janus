@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -400,9 +401,21 @@ func TestWebhookDisallowedRepoForbidden(t *testing.T) {
 
 func TestTriggerDisallowedRepoForbidden(t *testing.T) {
 	ts := newTestServerAllow(t, "https://allowed.example.com")
-	resp := postTrigger(t, ts, `{"repo_url":"https://gitlab.example.com/acme/app.git","ref":"refs/heads/main"}`)
+	// A credential-bearing URL: rejected, and the secret must not be echoed
+	// back in the response body (Trigger's error wraps the raw URL).
+	resp := postTrigger(t, ts, `{"repo_url":"https://ci:sekret@gitlab.example.com/acme/app.git","ref":"refs/heads/main"}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sekret") {
+		t.Errorf("403 body echoes the credential: %s", raw)
+	}
+	if !strings.Contains(string(raw), "repository not in allowlist") {
+		t.Errorf("403 body = %s, want the fixed allowlist message", raw)
 	}
 }
