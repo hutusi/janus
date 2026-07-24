@@ -69,13 +69,17 @@ status carries a `target_url` to the run page when `base_url` is set, and a
 
 ## Semantics
 
-- **Best-effort — never fails or blocks a run.** Each post runs on its own bounded
-  goroutine with a timeout; a slow, failing (`>= 300`), or unreachable GitLab is
-  logged and dropped. Posts are drained on shutdown.
-- **Single attempt, no retry.** A dropped post is not retried. Because `running`
-  is posted before the build and the terminal after it, a crash between them (or a
-  dropped terminal post) can leave the commit showing `running`; re-running or
-  re-pushing refreshes it.
+- **Best-effort — never fails or blocks a run.** Posts for one commit are
+  delivered **in order** (FIFO) through a fixed pool of bounded worker queues, so
+  `running` always precedes the terminal and Janus never posts to one commit
+  concurrently. Each post has a timeout; a slow, failing (`>= 300`), or unreachable
+  GitLab is logged and dropped, and if a queue is full further posts to it are
+  dropped. Posts are drained on shutdown.
+- **Single attempt, one conflict retry.** A `409` (GitLab's documented
+  concurrent-update response) is retried once; any other failure is dropped, not
+  retried. Because `running` is posted before the build and the terminal after it,
+  a crash between them (or a dropped terminal post) can leave the commit showing
+  `running`; re-running or re-pushing refreshes it.
 - **Only after durable persistence.** The terminal status is posted only once the
   run's terminal state is recorded in the store, so GitLab never shows a result
   the daemon didn't keep.

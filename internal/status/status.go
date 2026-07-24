@@ -40,10 +40,11 @@ const (
 	// statusContext is the GitLab status "context" (its grouping key): one row
 	// per commit whose lifecycle updates running -> terminal.
 	statusContext = "janus"
-	// GitLab caps both description and target_url at 255 characters; an
-	// over-limit field is rejected and the status is lost.
+	// GitLab caps description, target_url, and ref at 255 characters; an
+	// over-limit field is rejected and the whole status is lost.
 	maxDescLen      = 255
 	maxTargetURLLen = 255
+	maxRefLen       = 255
 	// retryBackoff delays the single retry after GitLab's 409 (concurrent update).
 	retryBackoff = 500 * time.Millisecond
 )
@@ -339,8 +340,15 @@ type statusBody struct {
 // GitLab associates the pipeline with — the pushed branch, or an MR's source
 // branch (parseGitLabMR sets Ref = "refs/heads/" + source_branch). Without it a
 // status can attach to the wrong/null external pipeline and vanish from the MR.
+// A ref over GitLab's 255-char cap (event refs are accepted up to 512) is
+// omitted rather than truncated — a truncated ref would name a different branch,
+// and the status still posts keyed on the SHA.
 func refName(ref string) string {
-	return strings.TrimPrefix(ref, "refs/heads/")
+	r := strings.TrimPrefix(ref, "refs/heads/")
+	if len(r) > maxRefLen {
+		return ""
+	}
+	return r
 }
 
 // shard maps a key to a worker index. Same key -> same worker -> FIFO order.

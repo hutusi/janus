@@ -388,6 +388,30 @@ func TestReportIncludesRef(t *testing.T) {
 	}
 }
 
+func TestReportOmitsOverlongRef(t *testing.T) {
+	// Event refs are accepted up to 512 bytes, but GitLab caps ref at 255; an
+	// over-cap ref is omitted (not truncated to a different branch) so the status
+	// still posts, keyed on the SHA.
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	r := newReporter(t, ts)
+
+	run := gitlabRun(model.StatusSuccess)
+	run.Event.Ref = "refs/heads/" + strings.Repeat("b", 300)
+	r.Report(run, model.StatusSuccess)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var b statusBody
+	_ = json.Unmarshal(got.body, &b)
+	if b.Ref != "" {
+		t.Errorf("ref = %q, want it omitted for an over-255 branch name", b.Ref)
+	}
+	if b.State != "success" {
+		t.Errorf("status should still post; state = %q", b.State)
+	}
+}
+
 func TestReportCleartextWarning(t *testing.T) {
 	tests := []struct {
 		name     string
