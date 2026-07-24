@@ -34,3 +34,20 @@ api_token: ""                       # bearer token for /api/* ; POST /api/trigge
 allow_repos:
   - "https://gitlab.example.com/acme"
   # - "*"   # allow any repository
+
+# Public base URL of this daemon. When set, notifications include a link to the
+# run page (<base_url>/runs/<id>). Leave empty to omit the link.
+# base_url: "https://ci.example.com"
+
+# Outbound notifications: POST a JSON run summary to each endpoint when a run
+# finishes. Omitted/empty = disabled. Each entry:
+#   url:    where to POST (http/https, required)
+#   on:     which outcomes deliver — any of success, failed, cancelled, skipped
+#           (omitted = failed only)
+#   secret: optional; sent as "Authorization: Bearer <secret>" (keep this file
+#           chmod 600 if you set one — there is no env fallback for it)
+# Delivery is best-effort: a slow or failing endpoint never fails or blocks a run.
+# notifications:
+#   - url: "https://example.com/janus-hook"
+#     on: [failed, success]
+#     secret: ""

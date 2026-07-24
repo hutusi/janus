@@ -60,6 +60,29 @@ type Config struct {
 	GitLabSecret      string   `yaml:"gitlab_secret"`
 	APIToken          string   `yaml:"api_token"`
 	AllowRepos        []string `yaml:"allow_repos"`
+	// BaseURL is the daemon's public base URL (e.g. https://ci.example.com). When
+	// set, notifications include a link to the run page (<base_url>/runs/<id>);
+	// empty omits the link. Nothing else uses it, so it is validated only when a
+	// notifier is built (notify.New), not in Validate.
+	BaseURL string `yaml:"base_url"`
+	// Notifications lists outbound webhook endpoints posted a JSON summary when a
+	// run finishes. Empty (the default) disables notifications entirely. Like
+	// allow_repos it is a plain wire form here; notify.New validates it and turns
+	// it into the runtime notifier.
+	Notifications []NotifyTarget `yaml:"notifications"`
+}
+
+// NotifyTarget is one endpoint under `notifications:` — the decoded wire form of
+// an outbound webhook. On lists which terminal run outcomes deliver to this
+// target ("success", "failed", "cancelled", "skipped"); empty means failures
+// only. Secret, when set, is sent as an "Authorization: Bearer <secret>" header
+// so the receiver can authenticate the delivery — there is no JANUS_* env
+// fallback for a per-target secret (a list can't map to one variable), so keep
+// the config file chmod 600 when it holds one.
+type NotifyTarget struct {
+	URL    string   `yaml:"url"`
+	On     []string `yaml:"on"`
+	Secret string   `yaml:"secret"`
 }
 
 // Defaults returns the built-in configuration used when nothing overrides it.
