@@ -27,6 +27,7 @@ clone_url: "http"                   # which clone URL from the webhook payload t
 # env vars over the file.
 gitlab_secret: ""                   # enables POST /webhooks/gitlab when set
 # github_secret: ""                 # enables POST /webhooks/github when set (HMAC-verified)
+# gitee_secret: ""                  # enables POST /webhooks/gitee when set (password or signature)
 api_token: ""                       # bearer token for /api/* ; POST /api/trigger requires it
 
 # GitLab commit-status reporting: report a run's state back to the commit/MR.

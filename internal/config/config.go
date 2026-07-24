@@ -91,6 +91,10 @@ type Config struct {
 	// github.com. The /api/v3 prefix is added automatically. File-only, like
 	// gitlab_url.
 	GitHubURL string `yaml:"github_url"`
+	// GiteeSecret is the inbound Gitee webhook secret (password or signature key);
+	// when set, /webhooks/gitee is enabled. Gitee has no commit-status API, so
+	// there is no outbound token — run feedback there goes through notifications.
+	GiteeSecret string `yaml:"gitee_secret"`
 }
 
 // NotifyTarget is one endpoint under `notifications:` — the decoded wire form of
@@ -206,6 +210,9 @@ func (c *Config) OverlayEnv() {
 	if v, ok := os.LookupEnv("JANUS_GITHUB_API_TOKEN"); ok {
 		c.GitHubAPIToken = v
 	}
+	if v, ok := os.LookupEnv("JANUS_GITEE_SECRET"); ok {
+		c.GiteeSecret = v
+	}
 }
 
 // OverlayFlags applies the CLI flags that were explicitly set (per fs.Visit)
@@ -249,6 +256,8 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.GitHubSecret = g.Get().(string)
 		case "github-api-token":
 			c.GitHubAPIToken = g.Get().(string)
+		case "gitee-secret":
+			c.GiteeSecret = g.Get().(string)
 		case "api-token":
 			c.APIToken = g.Get().(string)
 		case "allow-repos":
