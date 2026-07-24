@@ -2,8 +2,8 @@
 
 **Janus** is a minimal, self-hosted CI/CD service in a single dependency-free
 binary. It runs CI pipelines **directly as host processes** (no containers, no
-VMs), triggered by **git-server webhooks** (GitLab, GitHub, and Gitee push &
-merge/pull request) or a **manual trigger**. Pipelines are a small,
+VMs), triggered by **git-server webhooks** (GitLab, GitHub, Gitee, and GitCode
+push & merge/pull request) or a **manual trigger**. Pipelines are a small,
 GitHub-Actions-flavored YAML stored in the repository at `.janus/ci.yml`.
 
 > **Guiding rule: minimal beats complete.** The pipeline YAML describes *what
@@ -185,6 +185,7 @@ Single Go binary, standard library throughout; the only third-party module is
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 - [docs/github-webhook-setup.md](docs/github-webhook-setup.md) — wiring a GitHub webhook + commit status
 - [docs/gitee-webhook-setup.md](docs/gitee-webhook-setup.md) — wiring a Gitee (码云) webhook
+- [docs/gitcode-webhook-setup.md](docs/gitcode-webhook-setup.md) — wiring a GitCode webhook (GitLab-format)
 - [docs/deployment.md](docs/deployment.md) — run as a hardened systemd service on Linux
 - [examples/](examples/) — ready-to-copy sample pipelines (build, release)
 - [CHANGELOG.md](CHANGELOG.md) — notable changes
