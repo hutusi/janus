@@ -107,6 +107,42 @@ func TestNilReporterRunsCleanly(t *testing.T) {
 	}
 }
 
+const allFilteredPipeline = `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    branches: [release]
+    steps:
+      - run: echo hi
+`
+
+func TestReporterAllJobsFilteredSkipsRunning(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// A push to main matches on:, but the only job's branches:[release] filters
+	// it out, so the run finalizes skipped inside Execute — no "running" should
+	// be posted (which would leave GitLab stuck on running).
+	repo, sha := initGitRepo(t, allFilteredPipeline)
+	rr := &recordingReporter{}
+	st := store.NewMemory()
+	r := newReporterRunner(t, rr, st)
+	ev := model.Event{Kind: model.EventPush, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	if run := waitRun(t, st, res.RunID, 15*time.Second); run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped", run.Status)
+	}
+	r.Shutdown(5 * time.Second)
+
+	if got := rr.snapshot(); len(got) != 1 || got[0] != model.StatusSkipped {
+		t.Fatalf("reported states = %v, want exactly [skipped] (no running)", got)
+	}
+}
+
 func TestReporterTerminalGatedOnPersistence(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

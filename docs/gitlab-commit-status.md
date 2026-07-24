@@ -7,8 +7,9 @@ GitLab. It complements the generic [notifications](notifications.md) webhook:
 notifications push a summary *out* to chat/automation; commit status closes the
 loop *back* to GitLab.
 
-It is **GitLab-only** (it uses GitLab's API) and **daemon-only** (a webhook or
-manual trigger against the running server; local `janus run` never reports).
+It reports **GitLab webhook-triggered runs only** — the status is keyed on the
+project id and commit GitLab sends in the webhook. A manual API trigger (provider
+`manual`, no project id) and local `janus run` never report.
 
 ## Enabling
 

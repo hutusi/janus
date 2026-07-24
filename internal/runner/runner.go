@@ -100,6 +100,19 @@ type Notifier interface {
 	Notify(run *model.Run)
 }
 
+// hasRunnableJob reports whether any of run's jobs will actually execute — i.e.
+// was not already filtered to a terminal (skipped) state by PopulateRun. When
+// every job is filtered the run finalizes skipped, so no "running" status should
+// be posted (see the running-post call site).
+func hasRunnableJob(run *model.Run) bool {
+	for _, jr := range run.Jobs {
+		if !jr.Status.Terminal() {
+			return true
+		}
+	}
+	return false
+}
+
 // StatusReporter announces a run's lifecycle state to the provider's
 // commit-status API (implemented by *status.Reporter), so pass/fail shows on the
 // triggering commit/MR. Defined here for the same decoupling reason as Notifier;
@@ -810,9 +823,12 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	settled = true
 	// Report "running" to the commit-status API now, just before execution
 	// begins — the engine sets StatusRunning microseconds later but has no
-	// outbound seam. Best-effort; never blocks. Pre-execution outcomes returned
-	// earlier and so only ever post their single terminal state.
-	if r.reporter != nil {
+	// outbound seam. Best-effort; never blocks. Only when a job will actually
+	// run: a run that matched on: but has every job filtered out finalizes
+	// skipped inside Execute (which is not reported), so posting running first
+	// would leave the commit status stuck on running. PopulateRun already marked
+	// filtered jobs terminal, so a runnable job means a non-terminal one remains.
+	if r.reporter != nil && hasRunnableJob(run) {
 		r.reporter.Report(run, model.StatusRunning)
 	}
 	// The per-run context is cancelled on Shutdown too, so in-flight runs are

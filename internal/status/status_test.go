@@ -8,12 +8,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hutusi/janus/internal/model"
 )
+
+// okRT is a RoundTripper that returns 201 without a network call, counting
+// requests — used to exercise scheme handling without a real (or TLS) server.
+type okRT struct{ n *int32 }
+
+func (t okRT) RoundTrip(*http.Request) (*http.Response, error) {
+	atomic.AddInt32(t.n, 1)
+	return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+}
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -50,6 +60,7 @@ func gitlabRun(status model.Status) *model.Run {
 			Kind:      model.EventPush,
 			RepoURL:   "https://gitlab.example.com/acme/app.git",
 			SHA:       testSHA,
+			Ref:       "refs/heads/main",
 			Branch:    "main",
 			ProjectID: 15,
 		},
@@ -324,6 +335,132 @@ func TestNewValidation(t *testing.T) {
 				t.Errorf("error leaks the URL value %q: %v", tc.secret, err)
 			}
 		})
+	}
+}
+
+func TestReportOrdering(t *testing.T) {
+	// The running post is slowed; if posts weren't serialized per commit, the
+	// fast terminal could land first. The ordered worker guarantees running->terminal.
+	var mu sync.Mutex
+	var order []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var sb statusBody
+		_ = json.Unmarshal(b, &sb)
+		if sb.State == "running" {
+			time.Sleep(100 * time.Millisecond)
+		}
+		mu.Lock()
+		order = append(order, sb.State)
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(ts.Close)
+	r := newReporter(t, ts)
+
+	run := gitlabRun(model.StatusSuccess)
+	r.Report(run, model.StatusRunning)
+	r.Report(run, model.StatusSuccess)
+	r.Close(3 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 2 || order[0] != "running" || order[1] != "success" {
+		t.Fatalf("received order = %v, want [running success]", order)
+	}
+}
+
+func TestReportIncludesRef(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	r := newReporter(t, ts)
+
+	run := gitlabRun(model.StatusSuccess)
+	run.Event.Ref = "refs/heads/feature-x" // e.g. an MR source branch
+	r.Report(run, model.StatusSuccess)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var b statusBody
+	_ = json.Unmarshal(got.body, &b)
+	if b.Ref != "feature-x" {
+		t.Errorf("ref = %q, want feature-x (refs/heads/ stripped)", b.Ref)
+	}
+}
+
+func TestReportCleartextWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		instance string
+		wantWarn bool
+	}{
+		{"http warns", "http://gitlab.local", true},
+		{"https no warning", "https://gitlab.example.com", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			var n int32
+			r, err := New("tok",
+				WithInstanceURL(tc.instance),
+				WithLogger(logger),
+				WithHTTPClient(&http.Client{Transport: okRT{&n}}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Report(gitlabRun(model.StatusFailed), model.StatusFailed)
+			r.Close(2 * time.Second)
+			if warned := strings.Contains(buf.String(), "plaintext http"); warned != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; log: %q", warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+func TestReportClipsDescriptionAndTargetURL(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	// A base URL long enough that <base>/runs/<id> exceeds GitLab's 255 cap.
+	longBase := "https://ci.example.com/" + strings.Repeat("a", 300)
+	r, err := New("tok", WithInstanceURL(ts.URL), WithBaseURL(longBase), WithLogger(discardLogger()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := gitlabRun(model.StatusFailed)
+	run.Reason = strings.Repeat("x", 1000) // long reason -> long description
+	r.Report(run, model.StatusFailed)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var b statusBody
+	_ = json.Unmarshal(got.body, &b)
+	if len(b.Description) > 255 {
+		t.Errorf("description length = %d, want <= 255", len(b.Description))
+	}
+	if b.TargetURL != "" {
+		t.Errorf("target_url = %q, want it omitted when it would exceed 255", b.TargetURL)
+	}
+}
+
+func TestReport409Retried(t *testing.T) {
+	var n int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&n, 1) == 1 {
+			w.WriteHeader(http.StatusConflict) // first attempt: 409
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(ts.Close)
+	r := newReporter(t, ts)
+
+	r.Report(gitlabRun(model.StatusFailed), model.StatusFailed)
+	r.Close(3 * time.Second) // must exceed the retry backoff
+
+	if got := atomic.LoadInt32(&n); got != 2 {
+		t.Errorf("requests = %d, want 2 (409 retried once)", got)
 	}
 }
 
