@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Janus — a minimal self-hosted CI/CD service in a single dependency-free Go binary. It runs pipelines as **host processes (no containers/VMs)**, triggered by GitLab and GitHub webhooks (push + merge/pull request), a manual HTTP API, or the CLI. A pipeline is a small GitHub-Actions-flavored YAML at `.janus/ci.yml` in the *triggered* repo.
+Janus — a minimal self-hosted CI/CD service in a single dependency-free Go binary. It runs pipelines as **host processes (no containers/VMs)**, triggered by GitLab, GitHub, and Gitee webhooks (push + merge/pull request), a manual HTTP API, or the CLI. A pipeline is a small GitHub-Actions-flavored YAML at `.janus/ci.yml` in the *triggered* repo.
 
 **Minimal beats complete**: the pipeline YAML says *what runs and in what order* — it is not a programming language. Anything beyond the supported keys (`if:`, expressions, `matrix:`, `uses:`, templating) must be a **validation error, not a feature** (enforced in `internal/pipeline`). The only third-party module is `gopkg.in/yaml.v3`; keep it that way, and write tests with the stdlib only (no testify).
 
@@ -37,5 +37,6 @@ Single binary (`cmd/janus`); all logic under `internal/`, depending inward on `i
 - [docs/gitlab-commit-status.md](docs/gitlab-commit-status.md) — report run state to GitLab's commit-status API (config in `janus.yml`, `internal/status` per-provider `dialect`, running+terminal posts from the runner)
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 - [docs/github-webhook-setup.md](docs/github-webhook-setup.md) — wiring a GitHub webhook (`provider.GitHub`, HMAC verify) + GitHub commit status
+- [docs/gitee-webhook-setup.md](docs/gitee-webhook-setup.md) — wiring a Gitee webhook (`provider.Gitee`, password/signature verify; no commit-status API, feedback via notifications)
 - [docs/deployment.md](docs/deployment.md) — Linux systemd deployment (`deploy/janus.service`, dedicated user, balanced sandbox)
 - `README.md` — overview, quickstart, security model
