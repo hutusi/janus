@@ -473,12 +473,20 @@ func TestFinishRunRedactsReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A checkout failure echoes a credential-bearing clone URL into the reason.
-	r.finishRun(run, model.StatusFailed, "checkout: git remote add origin https://user:s3cr3t@host/repo.git: exit status 128")
-	if strings.Contains(run.Reason, "s3cr3t") || strings.Contains(run.Reason, "user:") {
-		t.Errorf("stored reason still carries credentials: %q", run.Reason)
+	if persisted := r.finishRun(run, model.StatusFailed, "checkout: git remote add origin https://user:s3cr3t@host/repo.git: exit status 128"); !persisted {
+		t.Fatal("finishRun reported the terminal state was not persisted")
 	}
-	if !strings.Contains(run.Reason, "https://host/repo.git") {
-		t.Errorf("redaction should keep the host/path visible for debugging: %q", run.Reason)
+	// Assert on the persisted record, not the in-memory pointer finishRun mutated:
+	// the memory store snapshots via marshal/unmarshal, so this is a real round-trip.
+	stored, err := st.GetRun("r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored.Reason, "s3cr3t") || strings.Contains(stored.Reason, "user:") {
+		t.Errorf("stored reason still carries credentials: %q", stored.Reason)
+	}
+	if !strings.Contains(stored.Reason, "https://host/repo.git") {
+		t.Errorf("redaction should keep the host/path visible for debugging: %q", stored.Reason)
 	}
 }
 

@@ -98,8 +98,8 @@ Notes:
 - **Best-effort, never blocking.** Notifications are dispatched only **after the
   run's terminal state is durably recorded**, on their own goroutines — so a
   store write that fails never emits a notification for an outcome that wasn't
-  persisted. A slow, failing (`>= 300`), or unreachable endpoint is logged and
-  **never fails or delays a run**.
+  persisted. A slow, unreachable, or error-returning endpoint (a non-2xx HTTP
+  response, i.e. status `>= 300`) is logged and **never fails or delays a run**.
 - **Single attempt, no redirects.** There is no retry or backoff; a failed
   delivery is dropped (and logged, the target identified only by origin — never
   its secret-bearing path). Redirects are **not** followed — a `3xx` is treated
