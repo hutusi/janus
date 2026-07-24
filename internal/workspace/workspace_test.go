@@ -2,12 +2,14 @@ package workspace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initGitRepo creates a repo with a .janus/ci.yml commit and returns its path
@@ -1003,5 +1005,87 @@ func TestChangedFilesFromMirror(t *testing.T) {
 	// The fail-open contract is untouched: an unknown before still errors.
 	if _, err := ws.ChangedFiles(context.Background(), strings.Repeat("b", 40)); err == nil {
 		t.Error("ChangedFiles resolved an unknown before commit")
+	}
+}
+
+func TestMaintainMirrorCompacts(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	if _, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main"); err != nil {
+		t.Fatalf("first SyncMirror: %v", err)
+	}
+
+	// Make compaction deterministic: keep every fetch's pack instead of
+	// unpacking small transfers to loose objects, and tighten the pack-count
+	// trigger so the second kept pack fires it.
+	if out, err := exec.Command("git", "-C", mirror, "config", "fetch.unpackLimit", "1").CombinedOutput(); err != nil {
+		t.Fatalf("config fetch.unpackLimit: %v\n%s", err, out)
+	}
+	saved := gcAutoOpts
+	gcAutoOpts = append(append([]string{}, saved...), "-c", "gc.autoPackLimit=1")
+	t.Cleanup(func() { gcAutoOpts = saved })
+
+	// A stale temporary pack, as an interrupted fetch would leave behind;
+	// gc's prune phase removes temp files past the grace period.
+	packDir := filepath.Join(mirror, "objects", "pack")
+	tmpPack := filepath.Join(packDir, "tmp_pack_stale")
+	if err := os.WriteFile(tmpPack, []byte("debris"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * 7 * 24 * time.Hour)
+	if err := os.Chtimes(tmpPack, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var last string
+	for i := 0; i < 3; i++ {
+		sha2 := commitFile(t, src, fmt.Sprintf("f%d.txt", i), "content")
+		head, err := SyncMirror(context.Background(), mirror, src, sha2, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror #%d: %v", i+1, err)
+		}
+		if head != sha2 {
+			t.Fatalf("head #%d = %s, want %s", i+1, head, sha2)
+		}
+		last = sha2
+	}
+
+	entries, err := os.ReadDir(packDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packs := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".pack") {
+			packs++
+		}
+	}
+	if packs != 1 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("pack files after compaction = %d (%v), want 1 consolidated pack", packs, names)
+	}
+	if _, err := os.Stat(tmpPack); !os.IsNotExist(err) {
+		t.Errorf("stale tmp_pack survived compaction (stat err = %v)", err)
+	}
+
+	// The compacted mirror still serves cached commits and materializations.
+	if _, err := SyncMirror(context.Background(), mirror, src, last, "refs/heads/main"); err != nil {
+		t.Errorf("SyncMirror after compaction: %v", err)
+	}
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: last, MirrorDir: mirror,
+	})
+	if err != nil {
+		t.Fatalf("Checkout from compacted mirror: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+	if ws.Head != last {
+		t.Errorf("ws.Head = %s, want %s", ws.Head, last)
 	}
 }

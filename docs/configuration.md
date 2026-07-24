@@ -212,11 +212,15 @@ How it behaves:
 - **Same-repo runs overlap freely.** Unlike `persistent`, materializing a
   workspace takes no lock: concurrent runs of one repo all clone from the
   same mirror.
-- **Dirs survive restarts** and the startup sweep, and grow over time —
-  mirrors accumulate every branch and tag ever fetched and are never
-  garbage-collected (`gc.auto` is off). Delete a repo's `mirror-*` directory
-  any time to reset it; the next run rebuilds it. Structural corruption (a
-  half-created or damaged mirror) also rebuilds automatically, while fetch
+- **Dirs survive restarts** and the startup sweep, and are compacted
+  automatically: syncs that fetch end with a `git gc --auto` pass using git's
+  own heuristics, so fetch-created packs consolidate and history rewritten
+  away by force-pushes is pruned after git's standard grace period — a
+  mirror's size tracks its repository's rather than growing forever. What is
+  *not* automatic is removal: a repository that stops building keeps its
+  mirror until you delete the `mirror-*` directory (which is also the way to
+  force a full reset — the next run rebuilds it). Structural corruption (a
+  half-created or damaged mirror) rebuilds automatically, while fetch
   failures deliberately don't — a transient network error must not throw away
   a large healthy cache.
 - `keep_workspaces` governs the materialized `run-*` checkouts as usual; it

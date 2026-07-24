@@ -561,10 +561,10 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// gets a fresh dir, materialized from a per-repo bare mirror when one can
 	// be synced; the same try-lock serializes only the sync — materialization
 	// runs unlocked and may overlap a later run's fetch, which is safe because
-	// mirror files only ever appear via atomic rename and gc never rewrites
-	// them (see mirrorCheckout) — and on contention or any sync failure the
-	// run proceeds on the direct from-remote path: the mirror is an
-	// accelerator, never a gate.
+	// mirror files only ever appear via atomic rename and compaction runs
+	// only under this same lock (see mirrorCheckout) — and on contention or
+	// any sync failure the run proceeds on the direct from-remote path: the
+	// mirror is an accelerator, never a gate.
 	var wsDir string
 	reuse := false
 	unlock := func() {}

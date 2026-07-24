@@ -319,12 +319,15 @@ func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 // this specific pairing is safe: every mirror file becomes visible only via
 // atomic rename (packs, indexes, loose objects, refs), so a hardlink can
 // never capture partial content; the objects this run needs were verified
-// present while the sync held the repo lock; and auto-maintenance is
-// disabled in the mirror (gc.auto=0, maintenance.auto=false — see
-// configureMirror), ruling out the repack/prune rewrites the warning is
-// really about. What remains is a rare
-// clone *error* (e.g. a --prune'd loose ref unlinked between readdir and
-// link), which the caller handles by retrying with a direct checkout.
+// present while the sync held the repo lock; and implicit auto-maintenance
+// is disabled in the mirror (gc.auto=0, maintenance.auto=false — see
+// configureMirror). The one path that does rewrite mirror files —
+// maintainMirror's compaction — runs only synchronously under that same
+// repo lock, and git's prune grace period keeps any recently-fetched object
+// alive, so a racing clone losing an object it needs is practically
+// impossible. What remains is a rare clone *error* (a --prune'd loose ref or
+// a repacked pack unlinked between readdir and link — hardlinks already made
+// survive), which the caller handles by retrying with a direct checkout.
 // Serializing clones against fetches was considered and rejected: it would
 // deny or delay the cache for busy repos to defend against a benign race.
 func mirrorCheckout(ctx context.Context, opt Options) (*Workspace, error) {
@@ -452,9 +455,8 @@ func ensureMirror(ctx context.Context, dir, repoURL string) (*Workspace, error) 
 //     unbounded growth. --replace-all then --add leaves exactly these two
 //     entries no matter what was there before.
 //   - gc.auto=0 AND maintenance.auto=false — git must never repack or prune
-//     behind a concurrent --local clone: existing packs staying immutable is
-//     what makes materializing without the repo lock safe (and keeps commits
-//     fetched by bare SHA alive despite being unreachable from any ref).
+//     mirror files *implicitly*: the only sanctioned rewrite path is the
+//     explicit, synchronous maintainMirror pass on the locked sync path.
 //     Both knobs are needed: gc.auto=0 covers the default post-fetch gc task
 //     (and older gits that run `gc --auto` directly), but host config can
 //     route auto-maintenance to tasks that ignore gc.auto and rewrite object
@@ -487,13 +489,17 @@ func configureMirror(ctx context.Context, m *Workspace, repoURL string) error {
 // all branches and tags first — the way a new commit normally arrives, and
 // the only way when the server refuses fetch-by-SHA — then by bare SHA for
 // commits no longer reachable from any ref. Ref-only requests always fetch:
-// the tip is whatever the remote has now.
+// the tip is whatever the remote has now. Syncs that fetched end with a
+// maintainMirror pass (cache hits stay compaction-free), after the resolve
+// so housekeeping can never affect the answer.
 func (w *Workspace) mirrorTarget(ctx context.Context, sha, ref string) (string, error) {
 	if sha != "" {
+		fetched := false
 		if w.git(ctx, "cat-file", "-e", sha+"^{commit}") != nil {
 			if err := w.git(ctx, "fetch", "-q", "--prune", "origin"); err != nil {
 				return "", err
 			}
+			fetched = true
 			if w.git(ctx, "cat-file", "-e", sha+"^{commit}") != nil {
 				if err := w.git(ctx, "fetch", "-q", "origin", sha); err != nil {
 					return "", err
@@ -507,12 +513,42 @@ func (w *Workspace) mirrorTarget(ctx context.Context, sha, ref string) (string, 
 		if !strings.HasPrefix(head, strings.ToLower(sha)) {
 			return "", fmt.Errorf("workspace: mirror resolved %s, which the requested SHA %s does not identify", head, sha)
 		}
+		if fetched {
+			w.maintainMirror(ctx)
+		}
 		return head, nil
 	}
 	if err := w.git(ctx, "fetch", "-q", "--prune", "origin"); err != nil {
 		return "", err
 	}
-	return w.gitOut(ctx, "rev-parse", "--verify", ref+"^{commit}")
+	head, err := w.gitOut(ctx, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	w.maintainMirror(ctx)
+	return head, nil
+}
+
+// gcAutoOpts re-enables git's stock auto-gc heuristics for the one sanctioned
+// compaction run (the mirror's own config pins gc.auto=0, so the -c override
+// is required — it necessarily also shadows an operator's global gc.auto; all
+// other gc settings, gc.autoPackLimit and gc.pruneExpire included, are left
+// to normal git config). autoDetach=false keeps the work in-process so it can
+// never outlive the caller's lock. A var so tests can tighten the thresholds
+// to force a compaction.
+var gcAutoOpts = []string{"-c", "gc.auto=6700", "-c", "gc.autoDetach=false"}
+
+// maintainMirror lets git's own heuristics decide whether the mirror needs
+// compacting — roughly every gc.autoPackLimit fetch-created packs — and runs
+// the work synchronously. Callers reach it only from the sync path, which the
+// runner serializes with the per-repo lock, making this the single sanctioned
+// path that may rewrite mirror files (see mirrorCheckout for why that keeps
+// unlocked clones safe). Best-effort: a failed compaction leaves a working,
+// merely uncompacted mirror, so the error is deliberately dropped rather
+// than failing a sync that already has its answer.
+func (w *Workspace) maintainMirror(ctx context.Context) {
+	args := append(append([]string{}, gcAutoOpts...), "gc", "--auto", "--quiet")
+	_ = w.git(ctx, args...)
 }
 
 // Cleanup removes the workspace directory unless Keep was set.
