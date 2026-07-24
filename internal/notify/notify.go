@@ -155,18 +155,25 @@ func New(targets []Target, opts ...Option) (*Notifier, error) {
 			return nil, fmt.Errorf("notifications[%d]: %w", i, err)
 		}
 		vt.sem = make(chan struct{}, n.maxInFlight) // per-target delivery bound
-		// A secret sent to an http:// endpoint travels in cleartext (the
-		// Authorization: Bearer header is unencrypted). Warn rather than reject —
-		// http to a loopback/internal endpoint is a legitimate setup.
-		if t.Secret != "" {
-			if u, perr := url.Parse(t.URL); perr == nil && u.Scheme == "http" {
-				n.logger.Warn("notification target sends its secret over plaintext http; the Authorization header is unencrypted — prefer https", "target", vt.label)
-			}
+		// Credentials sent to an http:// endpoint travel in cleartext: an explicit
+		// secret becomes an Authorization: Bearer header, and URL userinfo
+		// (http://user:pass@host) becomes Authorization: Basic — both unencrypted.
+		// Warn rather than reject; http to a loopback/internal endpoint is a
+		// legitimate setup.
+		if u, perr := url.Parse(t.URL); perr == nil && u.Scheme == "http" && (t.Secret != "" || u.User != nil) {
+			n.logger.Warn("notification target sends credentials over plaintext http (a secret and/or URL userinfo make the Authorization header unencrypted) — prefer https", "target", vt.label)
 		}
 		n.targets = append(n.targets, vt)
 	}
 	if n.client == nil {
-		n.client = &http.Client{Timeout: n.timeout}
+		n.client = &http.Client{
+			Timeout: n.timeout,
+			// Do not follow redirects: Go forwards the Authorization header across
+			// same-host redirects (including an https→http downgrade), which would
+			// leak the secret in cleartext. Returning the 3xx as-is also makes it a
+			// visible >= 300 failed delivery, matching the documented behavior.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	n.ctx, n.cancel = context.WithCancel(context.Background())
 	return n, nil

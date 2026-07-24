@@ -76,6 +76,13 @@ Notes:
 - **`repo_url`** and **`reason`** have any embedded credentials
   (`https://user:token@host/…`) stripped before they are sent — a checkout
   failure can otherwise echo a credential-bearing clone URL into `reason`.
+
+  > **Upgrading:** this stripping applies to records written and served *after*
+  > this version. A `run.json` written by an earlier version can still hold a
+  > credential-bearing clone URL on disk, and an old run's `reason` can still
+  > surface one through the runs API. Treat any credential ever embedded in a
+  > clone URL on a pre-fix version as **exposed** and **rotate it**; delete old
+  > run history to purge the plaintext from disk.
 - **`started_at`** and **`duration_seconds`** are present only for runs that
   actually began executing. Pre-execution outcomes (checkout/parse failure, an
   event that didn't match `on:`) never started, so both are omitted — which, with
@@ -93,9 +100,13 @@ Notes:
   store write that fails never emits a notification for an outcome that wasn't
   persisted. A slow, failing (`>= 300`), or unreachable endpoint is logged and
   **never fails or delays a run**.
-- **Single attempt.** There is no retry or backoff; a failed delivery is dropped
-  (and logged with the URL credentials redacted). If you need at-least-once
-  delivery, put a queue in front of Janus.
+- **Single attempt, no redirects.** There is no retry or backoff; a failed
+  delivery is dropped (and logged, the target identified only by origin — never
+  its secret-bearing path). Redirects are **not** followed — a `3xx` is treated
+  as a failed delivery — so the `Authorization` header is never forwarded to a
+  redirect target (which Go would otherwise do across a same-host `https`→`http`
+  downgrade, leaking the token in cleartext). If you need at-least-once delivery,
+  put a queue in front of Janus.
 - **Per-delivery timeout.** Each POST is bounded (10s) so a hung endpoint cannot
   pin resources.
 - **Bounded per target.** Concurrent deliveries are capped per target; when a

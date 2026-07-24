@@ -419,28 +419,52 @@ func TestNotifyPerTargetCapacityDeliversAllTargets(t *testing.T) {
 	}
 }
 
-func TestNewWarnsOnSecretOverHTTP(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+func TestNewWarnsOnCleartextCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		target   Target
+		wantWarn bool
+	}{
+		{"http + secret", Target{URL: "http://host/hook", Secret: "s"}, true},
+		{"http + url userinfo", Target{URL: "http://user:pass@host/hook"}, true},
+		{"https + secret", Target{URL: "https://host/hook", Secret: "s"}, false},
+		{"https + url userinfo", Target{URL: "https://user:pass@host/hook"}, false},
+		{"http, no credentials", Target{URL: "http://host/hook"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			if _, err := New([]Target{tc.target}, WithLogger(logger)); err != nil {
+				t.Fatal(err)
+			}
+			if warned := strings.Contains(buf.String(), "plaintext http"); warned != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; log: %q", warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
 
-	// A secret on an http:// target sends the Bearer header in cleartext → warn.
-	if _, err := New([]Target{{URL: "http://host/hook", Secret: "s"}}, WithLogger(logger)); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(buf.String(), "plaintext http") {
-		t.Errorf("expected a cleartext-secret warning, got: %q", buf.String())
-	}
+func TestNotifyDoesNotFollowRedirects(t *testing.T) {
+	var followed int32
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&followed, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(secondary.Close)
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secondary.URL, http.StatusFound) // 302
+	}))
+	t.Cleanup(primary.Close)
 
-	// https + secret, or http without a secret → no warning.
-	buf.Reset()
-	if _, err := New([]Target{
-		{URL: "https://host/hook", Secret: "s"},
-		{URL: "http://host/hook"},
-	}, WithLogger(logger)); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(buf.String(), "plaintext http") {
-		t.Errorf("did not expect a warning, got: %q", buf.String())
+	// A secret is set: were the redirect followed, its Authorization header could
+	// be forwarded to the secondary (possibly over a downgraded scheme).
+	n := newNotifier(t, []Target{{URL: primary.URL, On: []string{"failed"}, Secret: "topsecret"}})
+	n.Notify(failedRun())
+	n.Close(2 * time.Second)
+
+	if got := atomic.LoadInt32(&followed); got != 0 {
+		t.Errorf("notifier followed a redirect (secondary hit %d times); it must not, or the Authorization header leaks onward", got)
 	}
 }
 
