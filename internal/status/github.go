@@ -45,10 +45,13 @@ func (d githubDialect) build(run *model.Run, state model.Status, targetURL strin
 		return postJob{}, false
 	}
 	ev := run.Event
-	// GitHub addresses by "owner/repo"; split it so each segment is escaped on its
-	// own (JoinPath on the raw slug would percent-escape the "/" and break it).
+	// GitHub addresses by "owner/repo": split into two path segments and require
+	// each to be clean. RepoSlug comes from GitHub's repository.full_name (always
+	// well-formed), but guard defensively — JoinPath cleans "."/".." and does not
+	// re-escape an embedded "/", so a malformed slug could otherwise redirect the
+	// token-bearing POST onto another path on the same host.
 	owner, repo, ok := strings.Cut(ev.RepoSlug, "/")
-	if !ok || owner == "" || repo == "" || ev.SHA == "" {
+	if !ok || !cleanSlugPart(owner) || !cleanSlugPart(repo) || ev.SHA == "" {
 		return postJob{}, false
 	}
 	apiBase := d.apiBase(ev.RepoURL)
@@ -120,4 +123,12 @@ func githubState(s model.Status) string {
 		return "error"
 	}
 	return ""
+}
+
+// cleanSlugPart reports whether s is a single safe path segment for a
+// statuses-API URL: non-empty, not a "."/".." traversal, and free of embedded
+// path separators (strings.Cut splits only the first "/", so a nested slash lands
+// here and is rejected).
+func cleanSlugPart(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, `/\`)
 }

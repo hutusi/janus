@@ -7,8 +7,7 @@
   "forced": false,
   "head_commit": {
     "id": "da1560886d4f094c3e6c9ef40349f7d38b5d27d7",
-    "message": "Fix the bug\n\nA longer body that must not reach the title.",
-    "title": "Fix the bug"
+    "message": "Fix the bug\n\nA longer body that must not reach the title."
   },
   "repository": {
     "id": 35129377,

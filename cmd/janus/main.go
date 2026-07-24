@@ -325,8 +325,6 @@ func runServe(args []string) error {
 	if cfg.GitLabSecret != "" {
 		opts = append(opts, server.WithProvider(provider.GitLab{SSH: ssh}, cfg.GitLabSecret))
 		logger.Info("gitlab webhook enabled at /webhooks/gitlab", "clone_url", cfg.CloneURL)
-	} else {
-		logger.Warn("no gitlab-secret set; /webhooks/gitlab is disabled")
 	}
 	if cfg.GitHubSecret != "" {
 		opts = append(opts, server.WithProvider(provider.GitHub{SSH: ssh}, cfg.GitHubSecret))
@@ -339,6 +337,9 @@ func runServe(args []string) error {
 	if cfg.GitCodeSecret != "" {
 		opts = append(opts, server.WithProvider(provider.GitCode{SSH: ssh}, cfg.GitCodeSecret))
 		logger.Info("gitcode webhook enabled at /webhooks/gitcode", "clone_url", cfg.CloneURL)
+	}
+	if cfg.GitLabSecret == "" && cfg.GitHubSecret == "" && cfg.GiteeSecret == "" && cfg.GitCodeSecret == "" {
+		logger.Warn("no webhook provider secret set; all /webhooks/* endpoints are disabled (set gitlab-secret / github-secret / gitee-secret / gitcode-secret)")
 	}
 	if cfg.APIToken != "" {
 		opts = append(opts, server.WithAPIToken(cfg.APIToken))

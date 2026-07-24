@@ -130,24 +130,30 @@ curl -XPOST localhost:8080/api/trigger \
 
 ### Webhooks
 
-Run with a secret and persistent storage, then point a GitLab or GitHub webhook
-at it:
+Janus triggers on **GitLab**, **GitHub**, **Gitee**, and **GitCode** webhooks. Run
+with a secret for each provider you use (persistent storage optional but
+recommended), then point that provider's webhook at it:
 
 ```sh
 janus serve --data-dir /var/lib/janus \
   --gitlab-secret "$(openssl rand -hex 24)" \
   --github-secret "$(openssl rand -hex 24)"
+  # and/or --gitee-secret / --gitcode-secret
 ```
 
-Push and merge/pull-request events trigger runs that are matched against each
-workflow's `on:` filters (a GitHub pull request normalizes to the same
-`merge_request` event). Set one or both secrets to enable `/webhooks/gitlab`
-and `/webhooks/github`. Any number of repositories can share one server — each
-runs its own committed pipeline, and a hook URL's `?pipeline_path=` query
-parameter picks a different committed file. With `--data-dir`, run history and
-logs survive restarts. See
-[docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) and
-[docs/github-webhook-setup.md](docs/github-webhook-setup.md).
+Setting a provider's secret enables its endpoint — `/webhooks/gitlab`,
+`/webhooks/github`, `/webhooks/gitee`, `/webhooks/gitcode` — so you can enable any
+mix. Push and merge/pull-request events trigger runs matched against each
+workflow's `on:` filters (a GitHub/Gitee/GitCode pull/merge request normalizes to
+the same `merge_request` event, so one `.janus/ci.yml` works everywhere). Any
+number of repositories can share one server — each runs its own committed
+pipeline, and a hook URL's `?pipeline_path=` query parameter picks a different
+committed file. With `--data-dir`, run history and logs survive restarts. See the
+setup guides:
+[GitLab](docs/gitlab-webhook-setup.md) ·
+[GitHub](docs/github-webhook-setup.md) ·
+[Gitee](docs/gitee-webhook-setup.md) ·
+[GitCode](docs/gitcode-webhook-setup.md).
 
 ## Pipeline format (target)
 

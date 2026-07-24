@@ -167,6 +167,8 @@ func TestGitHubReportSkips(t *testing.T) {
 	}{
 		{"empty slug", func(r *model.Run) { r.Event.RepoSlug = "" }, "x"},
 		{"malformed slug", func(r *model.Run) { r.Event.RepoSlug = "noslash" }, "x"},
+		{"nested slug", func(r *model.Run) { r.Event.RepoSlug = "acme/app/extra" }, "x"},
+		{"traversal slug", func(r *model.Run) { r.Event.RepoSlug = "../evil" }, "x"},
 		{"empty sha", func(r *model.Run) { r.Event.SHA = "" }, "x"},
 		{"ssh repo, no github_url", func(r *model.Run) { r.Event.RepoURL = "git@github.com:acme/app.git" }, ""},
 	}
