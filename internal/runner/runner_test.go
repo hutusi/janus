@@ -535,6 +535,7 @@ func TestTriggerRejectsOversizedEventFields(t *testing.T) {
 	for _, ev := range []model.Event{
 		{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: strings.Repeat("b", maxBranchLen+1)},
 		{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: "main", Title: strings.Repeat("t", maxTitleLen+1)},
+		{Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: "main", RepoSlug: strings.Repeat("s", maxRepoSlugLen+1)},
 	} {
 		if _, err := r.Trigger(ev); err == nil {
 			t.Fatalf("Trigger with an over-long field should error: %+v", ev)
