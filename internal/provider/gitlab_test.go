@@ -53,6 +53,9 @@ func TestGitLabParsePush(t *testing.T) {
 	if ev.SHA != "da1560886d4f094c3e6c9ef40349f7d38b5d27d7" {
 		t.Errorf("sha = %q, want the `after` commit", ev.SHA)
 	}
+	if ev.ProjectID != 15 {
+		t.Errorf("project_id = %d, want 15", ev.ProjectID)
+	}
 	if ev.RepoURL != "https://gitlab.example.com/acme/app.git" {
 		t.Errorf("repo = %q", ev.RepoURL)
 	}
@@ -78,6 +81,9 @@ func TestGitLabParseMergeRequest(t *testing.T) {
 	}
 	if ev.SHA != "9b5f7c3a2e1d4b6a8c0f2e4d6b8a0c2e4f6a8b0c" {
 		t.Errorf("sha = %q, want last_commit.id", ev.SHA)
+	}
+	if ev.ProjectID != 15 {
+		t.Errorf("project_id = %d, want 15", ev.ProjectID)
 	}
 	if ev.Ref != "refs/heads/feature/login" {
 		t.Errorf("ref = %q, want source branch ref", ev.Ref)

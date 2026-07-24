@@ -48,6 +48,7 @@ func (g GitLab) Parse(r *http.Request, body []byte) (*model.Event, error) {
 }
 
 type glProject struct {
+	ID         int64  `json:"id"`
 	GitHTTPURL string `json:"git_http_url"`
 	GitSSHURL  string `json:"git_ssh_url"`
 }
@@ -99,12 +100,13 @@ func (g GitLab) parseGitLabPush(body []byte) (*model.Event, error) {
 		return nil, err
 	}
 	ev := &model.Event{
-		Provider: "gitlab",
-		Kind:     model.EventPush,
-		RepoURL:  repo,
-		Ref:      p.Ref,
-		Branch:   strings.TrimPrefix(p.Ref, "refs/heads/"),
-		SHA:      sha,
+		Provider:  "gitlab",
+		Kind:      model.EventPush,
+		RepoURL:   repo,
+		Ref:       p.Ref,
+		Branch:    strings.TrimPrefix(p.Ref, "refs/heads/"),
+		SHA:       sha,
+		ProjectID: p.Project.ID,
 	}
 	// An all-zeros before means a newly created branch: there is no base to
 	// diff against, so leave Before empty and let path filters fail open.
@@ -145,13 +147,14 @@ func (g GitLab) parseGitLabMR(body []byte) (*model.Event, error) {
 	// MR's head commit. Branch is the target so ${{ branch }} and on:
 	// merge_request.branches both refer to the destination.
 	return &model.Event{
-		Provider: "gitlab",
-		Kind:     model.EventMergeRequest,
-		RepoURL:  repo,
-		Ref:      "refs/heads/" + m.Attrs.SourceBranch,
-		Branch:   m.Attrs.TargetBranch,
-		SHA:      m.Attrs.LastCommit.ID,
-		Title:    m.Attrs.Title,
+		Provider:  "gitlab",
+		Kind:      model.EventMergeRequest,
+		RepoURL:   repo,
+		Ref:       "refs/heads/" + m.Attrs.SourceBranch,
+		Branch:    m.Attrs.TargetBranch,
+		SHA:       m.Attrs.LastCommit.ID,
+		Title:     m.Attrs.Title,
+		ProjectID: m.Project.ID,
 	}, nil
 }
 

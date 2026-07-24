@@ -449,6 +449,11 @@ func validateEvent(ev model.Event) error {
 			return fmt.Errorf("%s is too long: %d bytes (max %d)", f.name, len(f.value), f.max)
 		}
 	}
+	// ProjectID only ever becomes digits in a status-API URL path; an int64 is
+	// already bounded, so a negative is the only nonsensical value to reject.
+	if ev.ProjectID < 0 {
+		return fmt.Errorf("project_id is negative: %d", ev.ProjectID)
+	}
 	return nil
 }
 

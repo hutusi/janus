@@ -138,6 +138,11 @@ type Event struct {
 	SHA      string    `json:"sha,omitempty"`   // commit to check out
 	Title    string    `json:"title,omitempty"` // commit/MR title, for display
 
+	// ProjectID is the provider's numeric project identifier (GitLab's
+	// project.id), used to address the commit-status API. Zero when the provider
+	// did not supply one (manual triggers, other providers). Not a secret.
+	ProjectID int64 `json:"project_id,omitempty"`
+
 	// Before is the commit the pushed ref pointed at before this push (the
 	// GitLab payload's `before`), used to compute the changed-file set for
 	// `paths` filters. Empty when unknown: new branches (all-zeros before),
