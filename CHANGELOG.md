@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-24
+
 ### Added
 
 - **Mirror workspace strategy** — [`workspace_strategy: "mirror"`](docs/configuration.md#mirror-workspaces) caches a bare mirror per repository under `workspace_root` and materializes every run's workspace from it locally (hardlink clone + detached checkout), so remote traffic converges to one incremental fetch per new commit while every build still starts from a pristine checkout — `persistent`'s network savings with `fresh`'s hermeticity (untracked build caches like `node_modules` are *not* kept; that remains `persistent`'s trade). The mirror is an accelerator, never a gate: syncs are serialized by the per-repo try-lock (held for the fetch and any compaction it triggers — concurrent same-repo runs still materialize in parallel), and lock contention, a sync failure, or a clone failure all fall back to the plain direct-from-remote checkout, so a broken mirror can never fail a run the direct path would serve. Mirrors survive restarts and the startup sweep, self-heal structural corruption by rebuilding, and compact themselves during syncs via git's own `gc --auto` heuristics (force-pushed-away history is pruned after git's grace period), so a mirror's size tracks its repository's; a repo that stops building keeps its mirror until the `mirror-*` dir is deleted, which is also the full-reset lever. `fresh` remains the default.
@@ -113,6 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The example config now defaults `data_dir`/`workspace_root` to a cwd-relative `./janus-data` (created on demand, no sudo) instead of `/var/lib/janus`.
 
-[unreleased]: https://github.com/hutusi/janus/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/hutusi/janus/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/hutusi/janus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hutusi/janus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hutusi/janus/releases/tag/v0.1.0
