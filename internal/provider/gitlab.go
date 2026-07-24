@@ -82,8 +82,19 @@ func (f gitlabFormat) repoURL(p glProject) (string, error) {
 }
 
 type glCommit struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Message string `json:"message"`
+}
+
+// title returns the commit's display title. GitLab sends a dedicated `title`
+// field; GitCode uses GitLab's format but sends only `message`, so fall back to
+// its first line.
+func (c glCommit) title() string {
+	if c.Title != "" {
+		return c.Title
+	}
+	return firstLine(c.Message)
 }
 
 func (f gitlabFormat) parsePush(body []byte) (*model.Event, error) {
@@ -124,7 +135,7 @@ func (f gitlabFormat) parsePush(body []byte) (*model.Event, error) {
 		ev.Before = p.Before
 	}
 	if n := len(p.Commits); n > 0 {
-		ev.Title = p.Commits[n-1].Title
+		ev.Title = p.Commits[n-1].title()
 	}
 	return ev, nil
 }

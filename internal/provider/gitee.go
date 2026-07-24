@@ -9,10 +9,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hutusi/janus/internal/model"
 )
+
+// giteeTimestampWindow bounds how far X-Gitee-Timestamp may be from now. Gitee's
+// signature covers only "<timestamp>\n<secret>", not the request body, so a
+// leaked (timestamp, signature) pair would otherwise authenticate any forged
+// payload; requiring a recent timestamp bounds that window. Gitee documents a
+// ~1h clock-skew tolerance — a tighter window risks rejecting legitimate
+// deliveries from a clock-skewed host.
+const giteeTimestampWindow = time.Hour
 
 // Gitee handles Gitee (gitee.com) push and pull-request webhooks. Gitee
 // authenticates with the X-Gitee-Token header in one of two modes, chosen when
@@ -35,23 +45,41 @@ func (Gitee) Verify(r *http.Request, _ []byte, secret string) error {
 		return fmt.Errorf("gitee: no webhook secret configured")
 	}
 	token := r.Header.Get("X-Gitee-Token")
-	// Password mode: the plaintext secret echoed in the header.
+	// Password mode: the plaintext secret echoed in the header. Like GitLab's
+	// X-Gitlab-Token, this is a static secret and carries no freshness — its
+	// confidentiality (TLS) is the protection.
 	if subtle.ConstantTimeCompare([]byte(token), []byte(secret)) == 1 {
 		return nil
 	}
-	// Signature mode: needs the timestamp Gitee signed alongside the secret.
-	// Replay of a captured delivery only re-runs a build of a commit that already
-	// exists (never code injection), so — like the GitLab provider — the timestamp
-	// is not additionally range-checked.
+	// Signature mode: HMAC-SHA256 over "<X-Gitee-Timestamp>\n<secret>". The MAC
+	// does not cover the request body, so the timestamp must also be recent —
+	// otherwise a single captured (timestamp, signature) pair would authenticate
+	// arbitrary forged payloads (see giteeTimestampWindow).
 	if ts := r.Header.Get("X-Gitee-Timestamp"); ts != "" {
 		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write([]byte(ts + "\n" + secret))
 		sig := url.QueryEscape(base64.StdEncoding.EncodeToString(mac.Sum(nil)))
-		if subtle.ConstantTimeCompare([]byte(token), []byte(sig)) == 1 {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(sig)) == 1 && giteeTimestampFresh(ts) {
 			return nil
 		}
 	}
 	return ErrInvalidSignature
+}
+
+// giteeTimestampFresh reports whether ts (milliseconds since the Unix epoch) is
+// within giteeTimestampWindow of now, in either direction.
+func giteeTimestampFresh(ts string) bool {
+	ms, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return false
+	}
+	nowMS := time.Now().UnixMilli()
+	windowMS := giteeTimestampWindow.Milliseconds()
+	// Range-check ms directly against [now-window, now+window]. nowMS is far from
+	// the int64 extremes so the bounds cannot overflow; comparing ms rather than
+	// differencing it avoids the Duration saturation/negation overflow an extreme
+	// timestamp (e.g. math.MaxInt64) would otherwise slip through.
+	return ms >= nowMS-windowMS && ms <= nowMS+windowMS
 }
 
 func (g Gitee) Parse(r *http.Request, body []byte) (*model.Event, error) {

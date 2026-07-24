@@ -52,6 +52,11 @@ merge request matches on its **target** branch, `${{ branch }}` is the target,
 and `clone_url: "http" | "ssh"` selects `git_http_url` vs `git_ssh_url`. The same
 `.janus/ci.yml` works across every provider Janus supports.
 
+> **Fork / cross-repo merge requests are out of scope for v1** (the same limit as
+> GitLab): the merge request is cloned from its target project, so a request whose
+> source branch lives in a *fork* is not fetchable and the run fails checkout.
+> Same-repository merge requests — the common case — work.
+
 ## 4. Response codes
 
 Identical to the other providers: `202` accepted, `200` ignored event, `403`

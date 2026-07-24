@@ -5,9 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"math"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/hutusi/janus/internal/model"
 )
@@ -32,16 +36,44 @@ func TestGiteeVerify(t *testing.T) {
 		t.Errorf("bad password: got %v, want ErrInvalidSignature", err)
 	}
 
-	// Signature mode: HMAC over "<timestamp>\n<secret>".
-	const ts = "1609459200000"
-	sig := httptest.NewRequest("POST", "/webhooks/gitee", nil)
-	sig.Header.Set("X-Gitee-Timestamp", ts)
-	sig.Header.Set("X-Gitee-Token", giteeSignature(secret, ts))
-	if err := (Gitee{}).Verify(sig, nil, secret); err != nil {
-		t.Errorf("signature mode rejected: %v", err)
+	// Signature mode: HMAC over "<timestamp>\n<secret>", with a fresh timestamp.
+	signedAt := func(ms int64) *http.Request {
+		ts := strconv.FormatInt(ms, 10)
+		r := httptest.NewRequest("POST", "/webhooks/gitee", nil)
+		r.Header.Set("X-Gitee-Timestamp", ts)
+		r.Header.Set("X-Gitee-Token", giteeSignature(secret, ts))
+		return r
 	}
-	if err := (Gitee{}).Verify(sig, nil, "wrong"); !errors.Is(err, ErrInvalidSignature) {
+	now := time.Now().UnixMilli()
+	twoHours := (2 * time.Hour).Milliseconds()
+
+	if err := (Gitee{}).Verify(signedAt(now), nil, secret); err != nil {
+		t.Errorf("fresh signature rejected: %v", err)
+	}
+	if err := (Gitee{}).Verify(signedAt(now), nil, "wrong"); !errors.Is(err, ErrInvalidSignature) {
 		t.Errorf("bad signature: got %v, want ErrInvalidSignature", err)
+	}
+	// A valid MAC with a stale or future timestamp is rejected: the signature does
+	// not cover the body, so freshness bounds a leaked signature's lifetime.
+	if err := (Gitee{}).Verify(signedAt(now-twoHours), nil, secret); !errors.Is(err, ErrInvalidSignature) {
+		t.Errorf("stale signature: got %v, want ErrInvalidSignature", err)
+	}
+	if err := (Gitee{}).Verify(signedAt(now+twoHours), nil, secret); !errors.Is(err, ErrInvalidSignature) {
+		t.Errorf("future signature: got %v, want ErrInvalidSignature", err)
+	}
+	// A non-numeric timestamp is not fresh and is rejected even if the MAC matches.
+	bad := httptest.NewRequest("POST", "/webhooks/gitee", nil)
+	bad.Header.Set("X-Gitee-Timestamp", "not-a-number")
+	bad.Header.Set("X-Gitee-Token", giteeSignature(secret, "not-a-number"))
+	if err := (Gitee{}).Verify(bad, nil, secret); !errors.Is(err, ErrInvalidSignature) {
+		t.Errorf("non-numeric timestamp: got %v, want ErrInvalidSignature", err)
+	}
+	// Extreme timestamps must not slip through: freshness is a direct range check,
+	// so int64 min/max cannot overflow past the window with an otherwise-valid MAC.
+	for _, extreme := range []int64{math.MaxInt64, math.MinInt64} {
+		if err := (Gitee{}).Verify(signedAt(extreme), nil, secret); !errors.Is(err, ErrInvalidSignature) {
+			t.Errorf("extreme timestamp %d: got %v, want ErrInvalidSignature", extreme, err)
+		}
 	}
 
 	// Empty configured secret is always an error.
