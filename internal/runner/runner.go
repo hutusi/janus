@@ -543,8 +543,16 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// run is single-owner (Execute's goroutines have joined), so reading it is
 	// race-free. A nil notifier — or the (never-reached) non-terminal case — is a
 	// no-op. Notify never blocks or fails the run.
+	//
+	// Gated on terminalPersisted: the terminal state must be durably recorded
+	// before it is announced to an external endpoint. The engine discards its
+	// terminal-persist error into run.Status, and finishRun swallows its store
+	// failure, so run.Status.Terminal() alone can be true for a state the store
+	// never accepted (a full/read-only disk) — which reconciliation later flips to
+	// cancelled. Every settle path sets terminalPersisted below.
+	terminalPersisted := false
 	defer func() {
-		if r.notifier != nil && run.Status.Terminal() {
+		if r.notifier != nil && run.Status.Terminal() && terminalPersisted {
 			r.notifier.Notify(run)
 		}
 	}()
@@ -566,12 +574,12 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	settled := false
 	defer func() {
 		if !settled {
-			r.finishRun(run, model.StatusFailed, "internal error: trigger aborted before recording an outcome")
+			terminalPersisted = r.finishRun(run, model.StatusFailed, "internal error: trigger aborted before recording an outcome")
 		}
 	}()
 	finish := func(status model.Status, reason string) {
 		settled = true
-		r.finishRun(run, status, reason)
+		terminalPersisted = r.finishRun(run, status, reason)
 		r.pruneHistory()
 	}
 
@@ -777,10 +785,11 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// covers a crash), so the terminal-state net must stand down.
 	settled = true
 	// The per-run context is cancelled on Shutdown too, so in-flight runs are
-	// stopped. A terminal-persist failure is already logged and latched
-	// (Degraded()) by the engine, so the returned error is intentionally
-	// discarded here.
-	_ = r.engine.Execute(runCtx, run, wf, ws.Dir)
+	// stopped. Execute returns non-nil only when the terminal state could not be
+	// persisted (already logged and latched Degraded() by the engine); a nil error
+	// means the outcome is durably recorded, which is what gates the notification.
+	execErr := r.engine.Execute(runCtx, run, wf, ws.Dir)
+	terminalPersisted = execErr == nil
 	// Execute classifies an externally-cancelled run but cannot know why; the
 	// cause is only attachable now that its goroutines have joined and the run
 	// is single-owner again (writing Reason mid-flight would race runState).
@@ -798,11 +807,13 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 // maxReasonLen bounds Run.Reason at ingestion — git stderr flows into it.
 const maxReasonLen = 4 << 10
 
-// finishRun records a terminal pre-execution outcome on run. By now the
-// trigger's HTTP response is long gone, so a store failure cannot surface as
-// an error to anyone — log it and latch degraded for /healthz; startup
-// reconciliation is the backstop that eventually settles the stored record.
-func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) {
+// finishRun records a terminal pre-execution outcome on run and reports whether
+// the terminal state was durably persisted. By now the trigger's HTTP response
+// is long gone, so a store failure cannot surface as an error to anyone — log it
+// and latch degraded for /healthz; startup reconciliation is the backstop that
+// eventually settles the stored record. The bool gates notification: a result
+// that was never recorded must not be announced to an external endpoint.
+func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) bool {
 	// A checkout/workspace failure echoes the git command — including a
 	// credential-bearing clone URL — into the reason, which then surfaces on the
 	// (unauthenticated) dashboard, the API, and notifications. Redact before the
@@ -831,7 +842,9 @@ func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) {
 	if err := r.store.UpdateRun(run); err != nil {
 		r.logger.Error("run outcome could not be persisted", "run_id", run.ID, "status", status, "err", err)
 		r.MarkDegraded()
+		return false
 	}
+	return true
 }
 
 // pipelineFile resolves the effective in-repo pipeline path for ev. Without an

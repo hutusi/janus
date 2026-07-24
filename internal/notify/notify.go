@@ -155,6 +155,14 @@ func New(targets []Target, opts ...Option) (*Notifier, error) {
 			return nil, fmt.Errorf("notifications[%d]: %w", i, err)
 		}
 		vt.sem = make(chan struct{}, n.maxInFlight) // per-target delivery bound
+		// A secret sent to an http:// endpoint travels in cleartext (the
+		// Authorization: Bearer header is unencrypted). Warn rather than reject —
+		// http to a loopback/internal endpoint is a legitimate setup.
+		if t.Secret != "" {
+			if u, perr := url.Parse(t.URL); perr == nil && u.Scheme == "http" {
+				n.logger.Warn("notification target sends its secret over plaintext http; the Authorization header is unencrypted — prefer https", "target", vt.label)
+			}
+		}
 		n.targets = append(n.targets, vt)
 	}
 	if n.client == nil {

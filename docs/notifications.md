@@ -26,7 +26,7 @@ notifications:
 |-----|----------|---------|
 | `url` | yes | The `http`/`https` endpoint to POST. An invalid URL is a startup error. |
 | `on` | no | Which terminal outcomes deliver to this target: any of `success`, `failed`, `cancelled`, `skipped`. Omitted = **failures only**. An unknown value is a startup error. |
-| `secret` | no | Sent as an `Authorization: Bearer <secret>` header so the receiver can authenticate the delivery. |
+| `secret` | no | Sent as an `Authorization: Bearer <secret>` header so the receiver can authenticate the delivery. Use an **`https`** `url` with a secret — over `http` the header is sent in cleartext (Janus logs a startup warning). |
 | `base_url` | no | Top-level (not per-target). When set, each payload includes a run link joined structurally under it (`<base_url>/runs/<id>`). Must be a plain `http`/`https` URL — userinfo, a query, or a fragment is a startup error (it would leak into or break every link). |
 
 Because `notifications` is a list, per-target secrets have no `JANUS_*` env
@@ -88,9 +88,11 @@ Notes:
 
 ## Delivery semantics
 
-- **Best-effort, never blocking.** Notifications are dispatched after the run is
-  recorded, on their own goroutines. A slow, failing (`>= 300`), or unreachable
-  endpoint is logged and **never fails or delays a run**.
+- **Best-effort, never blocking.** Notifications are dispatched only **after the
+  run's terminal state is durably recorded**, on their own goroutines — so a
+  store write that fails never emits a notification for an outcome that wasn't
+  persisted. A slow, failing (`>= 300`), or unreachable endpoint is logged and
+  **never fails or delays a run**.
 - **Single attempt.** There is no retry or backoff; a failed delivery is dropped
   (and logged with the URL credentials redacted). If you need at-least-once
   delivery, put a queue in front of Janus.

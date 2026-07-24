@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"os/exec"
 	"sync"
 	"testing"
@@ -11,6 +12,14 @@ import (
 	"github.com/hutusi/janus/internal/model"
 	"github.com/hutusi/janus/internal/store"
 )
+
+// updateFailStore rejects every UpdateRun (as a full/read-only data dir would),
+// so a run's terminal state is never durably persisted.
+type updateFailStore struct {
+	store.Store
+}
+
+func (updateFailStore) UpdateRun(*model.Run) error { return errors.New("disk full") }
 
 // recordingNotifier is a fake Notifier that records the status of every run it
 // is told about. Safe for the concurrent calls parallel runs make.
@@ -107,6 +116,35 @@ func TestNilNotifierRunsCleanly(t *testing.T) {
 	}
 	if run := waitRun(t, st, res.RunID, 15*time.Second); run.Status != model.StatusSuccess {
 		t.Fatalf("run status = %s, want success (nil notifier must be a no-op)", run.Status)
+	}
+}
+
+func TestNotifyGatedOnTerminalPersistence(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	rn := &recordingNotifier{}
+	st := updateFailStore{store.NewMemory()}
+	allow, _ := allowlist.New([]string{"*"})
+	// The run executes fine but its terminal state can never be persisted, so the
+	// engine returns an error the runner used to discard — a notification must not
+	// announce a result the store never recorded.
+	r := New(st, engine.New(st), Options{
+		WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml",
+		MaxRuns: 1, Allowlist: allow, Notifier: rn,
+	})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	if _, err := r.Trigger(ev); err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	// The store rejects the terminal write, so the run never shows terminal in the
+	// store; drain via Shutdown, which waits for the trigger goroutine to unwind.
+	r.Shutdown(15 * time.Second)
+
+	if got := rn.snapshot(); len(got) != 0 {
+		t.Fatalf("notified %v despite the terminal persist failing; want no notification", got)
 	}
 }
 

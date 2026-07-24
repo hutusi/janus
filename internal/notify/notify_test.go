@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -415,6 +416,31 @@ func TestNotifyPerTargetCapacityDeliversAllTargets(t *testing.T) {
 
 	if len(reqsA) != 1 || len(reqsB) != 1 {
 		t.Fatalf("deliveries A=%d B=%d, want 1 each (per-target capacity)", len(reqsA), len(reqsB))
+	}
+}
+
+func TestNewWarnsOnSecretOverHTTP(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// A secret on an http:// target sends the Bearer header in cleartext → warn.
+	if _, err := New([]Target{{URL: "http://host/hook", Secret: "s"}}, WithLogger(logger)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "plaintext http") {
+		t.Errorf("expected a cleartext-secret warning, got: %q", buf.String())
+	}
+
+	// https + secret, or http without a secret → no warning.
+	buf.Reset()
+	if _, err := New([]Target{
+		{URL: "https://host/hook", Secret: "s"},
+		{URL: "http://host/hook"},
+	}, WithLogger(logger)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "plaintext http") {
+		t.Errorf("did not expect a warning, got: %q", buf.String())
 	}
 }
 
