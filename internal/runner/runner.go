@@ -58,6 +58,7 @@ type Runner struct {
 	historyLimit int
 	allow        allowlist.Allowlist
 	logger       *slog.Logger
+	notifier     Notifier
 
 	ctx    context.Context // root context for run execution and checkout; cancelled on Shutdown
 	cancel context.CancelFunc
@@ -90,6 +91,14 @@ const (
 	StrategyMirror     = "mirror"     // per-repo bare mirror cache; pristine per-run checkouts materialized locally
 )
 
+// Notifier announces a finished run to the outside world (implemented by
+// *notify.Notifier). It is defined here — rather than runner importing notify —
+// so the packages stay decoupled: runner depends only on model. A nil Notifier
+// disables notifications. Notify must not block or fail the run.
+type Notifier interface {
+	Notify(run *model.Run)
+}
+
 // Options configures a Runner.
 type Options struct {
 	WSRoot       string              // where per-run workspaces are created
@@ -100,6 +109,7 @@ type Options struct {
 	HistoryLimit int                 // max terminal runs to retain (<=0 = unlimited); pruned after each run
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
 	Logger       *slog.Logger        // for background events (prune failures); defaults to slog.Default()
+	Notifier     Notifier            // announces finished runs; nil disables notifications
 }
 
 // Result reports an accepted trigger: the recorded run's ID. The run is
@@ -130,6 +140,7 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		historyLimit: opts.HistoryLimit,
 		allow:        opts.Allowlist,
 		logger:       logger,
+		notifier:     opts.Notifier,
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
@@ -522,6 +533,21 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 // run would leak forever.
 func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCauseFunc, seq uint64, run *model.Run, ev model.Event, pipelinePath string, release func()) {
 	defer release()
+	// Announce the finished run, exactly once, on every terminal path. Placement
+	// is deliberate: registered right after release() so (LIFO) it runs just
+	// *before* it — after every other defer below has settled the run to a
+	// terminal state and persisted it (via the finish closure or Execute), but
+	// before release() calls wg.Done(). That ordering makes the notifier's
+	// synchronous hand-off happen-before Shutdown's wg.Wait() returns, which is
+	// what lets Notifier.Close drain in-flight deliveries at shutdown. By now
+	// run is single-owner (Execute's goroutines have joined), so reading it is
+	// race-free. A nil notifier — or the (never-reached) non-terminal case — is a
+	// no-op. Notify never blocks or fails the run.
+	defer func() {
+		if r.notifier != nil && run.Status.Terminal() {
+			r.notifier.Notify(run)
+		}
+	}()
 	// Idempotent safety net for the pre-enter exits (workspace/checkout/parse
 	// failures, non-matching events, panics): grouped triggers actually
 	// resolve inside enter, and ungrouped ones right after parse — a trigger
