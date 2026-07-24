@@ -28,6 +28,7 @@ import (
 	"github.com/hutusi/janus/internal/config"
 	"github.com/hutusi/janus/internal/engine"
 	"github.com/hutusi/janus/internal/model"
+	"github.com/hutusi/janus/internal/notify"
 	"github.com/hutusi/janus/internal/pipeline"
 	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
@@ -214,12 +215,28 @@ func runServe(args []string) error {
 		st = store.NewMemory()
 	}
 
+	// Outbound notifications are optional; build the notifier only when targets
+	// are configured. Leaving it nil (rather than a typed-nil interface) is what
+	// keeps the runner's `notifier != nil` guard honest.
+	var notifier *notify.Notifier
+	if len(cfg.Notifications) > 0 {
+		targets := make([]notify.Target, len(cfg.Notifications))
+		for i, t := range cfg.Notifications {
+			targets[i] = notify.Target{URL: t.URL, On: t.On, Secret: t.Secret}
+		}
+		notifier, err = notify.New(targets, notify.WithBaseURL(cfg.BaseURL), notify.WithLogger(logger))
+		if err != nil {
+			return fmt.Errorf("notifications: %w", err)
+		}
+		logger.Info("outbound notifications enabled", "targets", len(targets))
+	}
+
 	eng := engine.New(st,
 		engine.WithMaxParallelJobs(cfg.MaxParallelJobs),
 		engine.WithStepTimeout(time.Duration(cfg.StepTimeout)),
 		engine.WithLogger(logger),
 	)
-	rn := runner.New(st, eng, runner.Options{
+	runnerOpts := runner.Options{
 		WSRoot:       cfg.WorkspaceRoot,
 		PipelinePath: cfg.PipelinePath,
 		KeepWS:       cfg.KeepWorkspaces,
@@ -228,7 +245,11 @@ func runServe(args []string) error {
 		Allowlist:    allow,
 		Strategy:     cfg.WorkspaceStrategy,
 		Logger:       logger,
-	})
+	}
+	if notifier != nil {
+		runnerOpts.Notifier = notifier
+	}
+	rn := runner.New(st, eng, runnerOpts)
 	if cfg.WorkspaceStrategy == runner.StrategyPersistent {
 		logger.Info("persistent workspaces enabled; builds reuse per-repo directories (not hermetic)")
 	}
@@ -302,6 +323,11 @@ func runServe(args []string) error {
 		err := srv.Shutdown(shutdownCtx)
 		// Wait up to 30s for in-flight runs; cancel (kill processes) if they overrun.
 		rn.Shutdown(30 * time.Second)
+		// The runner has drained, so every finished run has handed its
+		// notification off; flush the in-flight deliveries before exiting.
+		if notifier != nil {
+			notifier.Close(5 * time.Second)
+		}
 		return err
 	}
 }

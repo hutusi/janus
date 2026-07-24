@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Outbound notifications** — a new [`notifications`](docs/notifications.md) list in `janus.yml` POSTs a JSON summary of a run to configured webhook endpoints when it finishes, so build results reach chat / on-call / automation without polling the dashboard or the runs API. Each target takes a `url`, an optional `on:` filter over the terminal outcomes (`success`/`failed`/`cancelled`/`skipped`; **omitted means failures only**), and an optional `secret` sent as an `Authorization: Bearer` header; an optional top-level [`base_url`](docs/configuration.md#notifications) adds a link to the run page in every payload. Configured server-side, not in the pipeline YAML — one place governs delivery for every repo, and the pipeline grammar stays minimal. Delivery is **best-effort and never fails or blocks a run**: each POST runs on its own goroutine with a per-delivery timeout, a failing or hung endpoint is logged (with credentials in the URL redacted) and dropped (single attempt, no retry), and a panic in a delivery stays contained. In-flight deliveries are drained on shutdown, so a run that finishes just before `SIGTERM` still notifies. The payload is summary-only (per-job status + counts, no step detail; `repo_url` credential-stripped; duration omitted for pre-execution outcomes that never started). Notifications are **daemon-only** — local `janus run` and startup crash-recovery bookkeeping never fire them. This introduces Janus's first outbound HTTP client; it stays stdlib-only (`net/http`), so the sole third-party module is still `gopkg.in/yaml.v3`.
+
 ## [0.3.0] - 2026-07-24
 
 ### Added
