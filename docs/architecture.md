@@ -189,12 +189,13 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   hard-reset and serialized by a per-repo **try-lock** — a concurrent trigger
   for the same repo falls back to a fresh per-run dir rather than blocking.
   Under `workspace_strategy: mirror`, the same try-lock serializes only the
-  per-repo `mirror-*` bare mirror's fetch; runs then materialize ordinary
-  `run-*` dirs from the mirror without holding the lock (packs are immutable,
-  `gc.auto` is off), and lock contention or any mirror failure falls back to
-  a direct checkout — the mirror accelerates runs but can never fail one the
-  direct path would serve. `persist-*` and `mirror-*` dirs deliberately
-  survive restarts and the sweep.
+  per-repo `mirror-*` bare mirror's fetch and its synchronous `gc --auto`
+  compaction; runs then materialize ordinary `run-*` dirs from the mirror
+  without holding the lock (mirror files only appear via atomic rename, and
+  nothing rewrites them outside that lock), and lock contention or any mirror
+  failure falls back to a direct checkout — the mirror accelerates runs but
+  can never fail one the direct path would serve. `persist-*` and `mirror-*`
+  dirs deliberately survive restarts and the sweep.
 - **No isolation:** jobs are host processes and can do anything the `janus` user
   can. Run as a dedicated unprivileged user. Containers are out of scope.
 

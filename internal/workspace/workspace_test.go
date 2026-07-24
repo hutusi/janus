@@ -2,12 +2,14 @@ package workspace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initGitRepo creates a repo with a .janus/ci.yml commit and returns its path
@@ -1004,4 +1006,167 @@ func TestChangedFilesFromMirror(t *testing.T) {
 	if _, err := ws.ChangedFiles(context.Background(), strings.Repeat("b", 40)); err == nil {
 		t.Error("ChangedFiles resolved an unknown before commit")
 	}
+}
+
+func TestMaintainMirrorCompacts(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Compaction asserts on what gc pruned, so the developer's own gc
+	// settings must not decide the outcome (a global gc.pruneExpire=never
+	// would keep the stale temp file below).
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	src, sha := initGitRepo(t)
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	if _, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main"); err != nil {
+		t.Fatalf("first SyncMirror: %v", err)
+	}
+
+	// Make compaction deterministic: keep every fetch's pack instead of
+	// unpacking small transfers to loose objects, and tighten the pack-count
+	// trigger so the second kept pack fires it.
+	if out, err := exec.Command("git", "-C", mirror, "config", "fetch.unpackLimit", "1").CombinedOutput(); err != nil {
+		t.Fatalf("config fetch.unpackLimit: %v\n%s", err, out)
+	}
+	saved := gcAutoOpts
+	gcAutoOpts = append(append([]string{}, saved...), "-c", "gc.autoPackLimit=1")
+	t.Cleanup(func() { gcAutoOpts = saved })
+
+	// A stale temporary pack, as an interrupted fetch would leave behind;
+	// gc's prune phase removes temp files past the grace period.
+	packDir := filepath.Join(mirror, "objects", "pack")
+	tmpPack := filepath.Join(packDir, "tmp_pack_stale")
+	if err := os.WriteFile(tmpPack, []byte("debris"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * 7 * 24 * time.Hour)
+	if err := os.Chtimes(tmpPack, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var last string
+	for i := 0; i < 3; i++ {
+		sha2 := commitFile(t, src, fmt.Sprintf("f%d.txt", i), "content")
+		head, err := SyncMirror(context.Background(), mirror, src, sha2, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror #%d: %v", i+1, err)
+		}
+		if head != sha2 {
+			t.Fatalf("head #%d = %s, want %s", i+1, head, sha2)
+		}
+		last = sha2
+	}
+
+	entries, err := os.ReadDir(packDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packs := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".pack") {
+			packs++
+		}
+	}
+	if packs != 1 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("pack files after compaction = %d (%v), want 1 consolidated pack", packs, names)
+	}
+	if _, err := os.Stat(tmpPack); !os.IsNotExist(err) {
+		t.Errorf("stale tmp_pack survived compaction (stat err = %v)", err)
+	}
+
+	// The compacted mirror still serves cached commits and materializations.
+	if _, err := SyncMirror(context.Background(), mirror, src, last, "refs/heads/main"); err != nil {
+		t.Errorf("SyncMirror after compaction: %v", err)
+	}
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: last, MirrorDir: mirror,
+	})
+	if err != nil {
+		t.Fatalf("Checkout from compacted mirror: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+	if ws.Head != last {
+		t.Errorf("ws.Head = %s, want %s", ws.Head, last)
+	}
+}
+
+func TestMaintainMirrorKeepsResolvedSHA(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, base := initGitRepo(t)
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", src}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	// A commit no branch or tag points at, fetchable only by its raw SHA —
+	// the shape a run gets when the ref moved on after the event.
+	git("config", "uploadpack.allowAnySHA1InWant", "true")
+	dangling := commitFile(t, src, "dangling.txt", "content")
+	git("reset", "-q", "--hard", base)
+
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	if _, err := SyncMirror(context.Background(), mirror, src, dangling, "refs/heads/main"); err != nil {
+		t.Fatalf("SyncMirror: %v", err)
+	}
+
+	// Host-style hostile settings, on the mirror itself so they outrank
+	// anything but the pinned -c options: prune everything unreachable
+	// immediately, and compact on the very next fetch. The commit above is
+	// unreachable in the mirror, so an inherited pruneExpire would delete it
+	// during compaction and hand back a SHA the mirror no longer contains.
+	for _, args := range [][]string{
+		{"config", "gc.pruneExpire", "now"},
+		{"config", "gc.autoPackLimit", "1"},
+		{"config", "gc.auto", "1"},
+		{"config", "fetch.unpackLimit", "1"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", mirror}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// Two more fetching syncs: each keeps its own pack, and the second one
+	// pushes the pack count past gc.autoPackLimit so git's auto heuristic
+	// actually runs a compaction (one sync alone leaves it below the
+	// threshold and would make this test vacuous).
+	for i := 0; i < 2; i++ {
+		next := commitFile(t, src, fmt.Sprintf("next%d.txt", i), "more")
+		head, err := SyncMirror(context.Background(), mirror, src, next, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror #%d: %v", i+2, err)
+		}
+		if head != next {
+			t.Fatalf("head #%d = %s, want %s", i+2, head, next)
+		}
+	}
+
+	// The unreachable commit survived compaction, so a later run still hits
+	// the cache instead of paying a remote fetch.
+	head, err := SyncMirror(context.Background(), mirror, src, dangling, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror for the unreachable commit after compaction: %v", err)
+	}
+	if head != dangling {
+		t.Errorf("head = %s, want %s", head, dangling)
+	}
+	if out, err := exec.Command("git", "-C", mirror, "cat-file", "-e", dangling+"^{commit}").CombinedOutput(); err != nil {
+		t.Errorf("compaction pruned the resolved commit %s: %v\n%s", dangling, err, out)
+	}
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: dangling, MirrorDir: mirror,
+	})
+	if err != nil {
+		t.Fatalf("Checkout of the unreachable commit from the mirror: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
 }
