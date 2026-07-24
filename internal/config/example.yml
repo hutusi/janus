@@ -23,8 +23,10 @@ clone_url: "http"                   # which clone URL from the webhook payload t
                                     # ("ssh" needs a key + known_hosts for the service user, and allow_repos
                                     #  entries written in the SSH form the platform sends)
 
-# Secrets — prefer the JANUS_GITLAB_SECRET / JANUS_API_TOKEN env vars over the file.
+# Secrets — prefer the JANUS_GITLAB_SECRET / JANUS_GITHUB_SECRET / JANUS_API_TOKEN
+# env vars over the file.
 gitlab_secret: ""                   # enables POST /webhooks/gitlab when set
+# github_secret: ""                 # enables POST /webhooks/github when set (HMAC-verified)
 api_token: ""                       # bearer token for /api/* ; POST /api/trigger requires it
 
 # GitLab commit-status reporting: report a run's state back to the commit/MR.
@@ -33,6 +35,13 @@ api_token: ""                       # bearer token for /api/* ; POST /api/trigge
 # gitlab_api_token: ""              # outbound token; distinct from gitlab_secret (the inbound webhook token)
 # gitlab_url: ""                    # GitLab base URL; derived from the clone URL for clone_url "http",
                                     # required for "ssh" or a self-hosted subpath, e.g. "https://gitlab.example.com"
+
+# GitHub commit-status reporting: report a run's state back to the commit/PR.
+# Set a token with the "repo:status" scope to enable it.
+# Prefer the JANUS_GITHUB_API_TOKEN env var over the file.
+# github_api_token: ""             # outbound token; distinct from github_secret (the inbound webhook secret)
+# github_url: ""                   # GitHub Enterprise Server web base, e.g. "https://github.example.com"
+                                    # (leave empty for github.com; the /api/v3 prefix is added automatically)
 
 # Repositories allowed to run. DENY BY DEFAULT: an empty/omitted list rejects
 # every webhook and manual trigger (403). Use a single "*" to allow all.

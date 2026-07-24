@@ -253,8 +253,11 @@ func TestOverlayEnv(t *testing.T) {
 	t.Setenv("JANUS_GITLAB_SECRET", "from-env")
 	t.Setenv("JANUS_API_TOKEN", "tok-env")
 	t.Setenv("JANUS_GITLAB_API_TOKEN", "api-tok-env")
+	t.Setenv("JANUS_GITHUB_SECRET", "gh-secret-env")
+	t.Setenv("JANUS_GITHUB_API_TOKEN", "gh-tok-env")
 	cfg := Defaults()
 	cfg.GitLabSecret = "from-file"
+	cfg.GitHubSecret = "gh-from-file"
 	cfg.OverlayEnv()
 	if cfg.GitLabSecret != "from-env" {
 		t.Errorf("gitlab secret = %q, want env to override file", cfg.GitLabSecret)
@@ -264,6 +267,29 @@ func TestOverlayEnv(t *testing.T) {
 	}
 	if cfg.GitLabAPIToken != "api-tok-env" {
 		t.Errorf("gitlab api token = %q, want from env", cfg.GitLabAPIToken)
+	}
+	if cfg.GitHubSecret != "gh-secret-env" {
+		t.Errorf("github secret = %q, want env to override file", cfg.GitHubSecret)
+	}
+	if cfg.GitHubAPIToken != "gh-tok-env" {
+		t.Errorf("github api token = %q, want from env", cfg.GitHubAPIToken)
+	}
+}
+
+func TestGitHubStatusConfigDecode(t *testing.T) {
+	path := writeFile(t, "github_secret: \"whsec\"\ngithub_api_token: \"ghp_xxx\"\ngithub_url: \"https://github.example.com\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GitHubSecret != "whsec" {
+		t.Errorf("github_secret = %q", cfg.GitHubSecret)
+	}
+	if cfg.GitHubAPIToken != "ghp_xxx" {
+		t.Errorf("github_api_token = %q", cfg.GitHubAPIToken)
+	}
+	if cfg.GitHubURL != "https://github.example.com" {
+		t.Errorf("github_url = %q", cfg.GitHubURL)
 	}
 }
 

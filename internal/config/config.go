@@ -79,6 +79,18 @@ type Config struct {
 	// clone_url "http"; required for "ssh" (no derivable HTTPS authority) and for
 	// self-hosted instances on a subpath. File-only, like base_url.
 	GitLabURL string `yaml:"gitlab_url"`
+	// GitHubSecret is the inbound GitHub webhook secret; when set, /webhooks/github
+	// is enabled and deliveries are HMAC-verified. Distinct from github_api_token.
+	GitHubSecret string `yaml:"github_secret"`
+	// GitHubAPIToken is an outbound GitHub token (a token with `repo:status`)
+	// enabling commit-status reporting. Distinct from github_secret (the inbound
+	// webhook secret). Empty disables it. Validated in status.New.
+	GitHubAPIToken string `yaml:"github_api_token"`
+	// GitHubURL is the GitHub Enterprise Server web base URL
+	// (e.g. https://github.example.com) for commit-status posts; leave empty for
+	// github.com. The /api/v3 prefix is added automatically. File-only, like
+	// gitlab_url.
+	GitHubURL string `yaml:"github_url"`
 }
 
 // NotifyTarget is one endpoint under `notifications:` — the decoded wire form of
@@ -188,6 +200,12 @@ func (c *Config) OverlayEnv() {
 	if v, ok := os.LookupEnv("JANUS_GITLAB_API_TOKEN"); ok {
 		c.GitLabAPIToken = v
 	}
+	if v, ok := os.LookupEnv("JANUS_GITHUB_SECRET"); ok {
+		c.GitHubSecret = v
+	}
+	if v, ok := os.LookupEnv("JANUS_GITHUB_API_TOKEN"); ok {
+		c.GitHubAPIToken = v
+	}
 }
 
 // OverlayFlags applies the CLI flags that were explicitly set (per fs.Visit)
@@ -227,6 +245,10 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.GitLabSecret = g.Get().(string)
 		case "gitlab-api-token":
 			c.GitLabAPIToken = g.Get().(string)
+		case "github-secret":
+			c.GitHubSecret = g.Get().(string)
+		case "github-api-token":
+			c.GitHubAPIToken = g.Get().(string)
 		case "api-token":
 			c.APIToken = g.Get().(string)
 		case "allow-repos":
