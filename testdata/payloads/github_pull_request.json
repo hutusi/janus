@@ -1,0 +1,27 @@
+{
+  "action": "opened",
+  "number": 1,
+  "pull_request": {
+    "number": 1,
+    "state": "open",
+    "title": "Add login form",
+    "merged": false,
+    "head": {
+      "ref": "feature/login",
+      "sha": "9b5f7c3a2e1d4b6a8c0f2e4d6b8a0c2e4f6a8b0c",
+      "repo": {
+        "id": 35129377,
+        "full_name": "acme/app",
+        "clone_url": "https://github.com/acme/app.git",
+        "ssh_url": "git@github.com:acme/app.git"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "95790bf891e76fee5e1747ab589903a6a1f80f22",
+      "repo": {
+        "full_name": "acme/app"
+      }
+    }
+  }
+}
