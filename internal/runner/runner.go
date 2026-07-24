@@ -456,6 +456,7 @@ const (
 	maxPipelinePathLen = 512
 	maxTitleLen        = 4 << 10 // commit/MR title, display only
 	maxBeforeLen       = 64      // hex commit id (sha1 or sha256)
+	maxRepoSlugLen     = 512     // owner/repo; flows into a status-API URL path
 )
 
 // validateEvent rejects over-long event fields before any disk work.
@@ -471,6 +472,7 @@ func validateEvent(ev model.Event) error {
 		{"pipeline_path", ev.PipelinePath, maxPipelinePathLen},
 		{"title", ev.Title, maxTitleLen},
 		{"before", ev.Before, maxBeforeLen},
+		{"repo_slug", ev.RepoSlug, maxRepoSlugLen},
 	} {
 		if len(f.value) > f.max {
 			return fmt.Errorf("%s is too long: %d bytes (max %d)", f.name, len(f.value), f.max)

@@ -2,9 +2,9 @@
 
 **Janus** is a minimal, self-hosted CI/CD service in a single dependency-free
 binary. It runs CI pipelines **directly as host processes** (no containers, no
-VMs), triggered by **git-server webhooks** (GitLab push & merge request) or a
-**manual trigger**. Pipelines are a small, GitHub-Actions-flavored YAML stored
-in the repository at `.janus/ci.yml`.
+VMs), triggered by **git-server webhooks** (GitLab, GitHub, Gitee, and GitCode
+push & merge/pull request) or a **manual trigger**. Pipelines are a small,
+GitHub-Actions-flavored YAML stored in the repository at `.janus/ci.yml`.
 
 > **Guiding rule: minimal beats complete.** The pipeline YAML describes *what
 > runs and in what order* — it is not a programming language. Anything beyond
@@ -128,20 +128,34 @@ curl -XPOST localhost:8080/api/trigger \
   -d '{"repo_url":"https://gitlab.com/acme/app.git","ref":"refs/heads/main","branch":"main","pipeline_path":"release.yml"}'
 ```
 
-### GitLab webhooks
+### Webhooks
 
-Run with a secret and persistent storage, then point a GitLab webhook at it:
+Janus triggers on **GitLab**, **GitHub**, **Gitee**, and **GitCode** webhooks. Run
+with a secret for each provider you use (persistent storage optional but
+recommended), then point that provider's webhook at it:
 
 ```sh
-janus serve --data-dir /var/lib/janus --gitlab-secret "$(openssl rand -hex 24)"
+# Pass a secret only for the providers you use — any subset works.
+janus serve --data-dir /var/lib/janus \
+  --gitlab-secret "$(openssl rand -hex 24)" \
+  --github-secret "$(openssl rand -hex 24)" \
+  --gitee-secret "$(openssl rand -hex 24)" \
+  --gitcode-secret "$(openssl rand -hex 24)"
 ```
 
-Push and merge-request events trigger runs that are matched against each
-workflow's `on:` filters. Any number of repositories can share one server —
-each runs its own committed pipeline, and a hook URL's `?pipeline_path=`
-query parameter picks a different committed file (register multiple hooks to
-route to multiple pipelines). With `--data-dir`, run history and logs survive
-restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
+Setting a provider's secret enables its endpoint — `/webhooks/gitlab`,
+`/webhooks/github`, `/webhooks/gitee`, `/webhooks/gitcode` — so you can enable any
+mix. Push and merge/pull-request events trigger runs matched against each
+workflow's `on:` filters (a GitHub/Gitee/GitCode pull/merge request normalizes to
+the same `merge_request` event, so one `.janus/ci.yml` works everywhere). Any
+number of repositories can share one server — each runs its own committed
+pipeline, and a hook URL's `?pipeline_path=` query parameter picks a different
+committed file. With `--data-dir`, run history and logs survive restarts. See the
+setup guides:
+[GitLab](docs/gitlab-webhook-setup.md) ·
+[GitHub](docs/github-webhook-setup.md) ·
+[Gitee](docs/gitee-webhook-setup.md) ·
+[GitCode](docs/gitcode-webhook-setup.md).
 
 ## Pipeline format (target)
 
@@ -177,6 +191,9 @@ Single Go binary, standard library throughout; the only third-party module is
 - [docs/notifications.md](docs/notifications.md) — outbound webhook notifications on run completion
 - [docs/gitlab-commit-status.md](docs/gitlab-commit-status.md) — report run status back to GitLab commits/MRs
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
+- [docs/github-webhook-setup.md](docs/github-webhook-setup.md) — wiring a GitHub webhook + commit status
+- [docs/gitee-webhook-setup.md](docs/gitee-webhook-setup.md) — wiring a Gitee (码云) webhook
+- [docs/gitcode-webhook-setup.md](docs/gitcode-webhook-setup.md) — wiring a GitCode webhook (GitLab-format)
 - [docs/deployment.md](docs/deployment.md) — run as a hardened systemd service on Linux
 - [examples/](examples/) — ready-to-copy sample pipelines (build, release)
 - [CHANGELOG.md](CHANGELOG.md) — notable changes

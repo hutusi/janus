@@ -143,6 +143,12 @@ type Event struct {
 	// did not supply one (manual triggers, other providers). Not a secret.
 	ProjectID int64 `json:"project_id,omitempty"`
 
+	// RepoSlug is the provider's "owner/repo" identifier (GitHub's
+	// repository.full_name), used to address hosts whose commit-status API is
+	// keyed by name rather than a numeric id. Empty for providers that address by
+	// ProjectID (GitLab) and for manual triggers. Not a secret.
+	RepoSlug string `json:"repo_slug,omitempty"`
+
 	// Before is the commit the pushed ref pointed at before this push (the
 	// GitLab payload's `before`), used to compute the changed-file set for
 	// `paths` filters. Empty when unknown: new branches (all-zeros before),

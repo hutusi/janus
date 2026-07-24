@@ -43,6 +43,11 @@ existing file without `--force`); see the
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
 | `gitlab_api_token` | `--gitlab-api-token` (`$JANUS_GITLAB_API_TOKEN`) | _(empty)_ | Outbound GitLab API token (`api` scope) enabling [commit-status reporting](gitlab-commit-status.md). Distinct from `gitlab_secret`. |
 | `gitlab_url` | _(none)_ | _(empty)_ | GitLab instance base URL for commit status; derived from the clone URL for `clone_url: http`, required for `ssh`/self-hosted subpaths. File-only. |
+| `github_secret` | `--github-secret` (`$JANUS_GITHUB_SECRET`) | _(empty)_ | GitHub webhook secret (HMAC-SHA256). Enables `POST /webhooks/github`. |
+| `github_api_token` | `--github-api-token` (`$JANUS_GITHUB_API_TOKEN`) | _(empty)_ | Outbound GitHub token (`repo:status` scope) enabling [commit-status reporting](github-webhook-setup.md#reporting-status-back-to-github). Distinct from `github_secret`. |
+| `github_url` | _(none)_ | _(empty)_ | GitHub Enterprise Server web base for commit status (the `/api/v3` prefix is added); leave empty for github.com, set for GHES or github.com over `clone_url: ssh`. File-only. |
+| `gitee_secret` | `--gitee-secret` (`$JANUS_GITEE_SECRET`) | _(empty)_ | Gitee webhook secret (password or signature key). Enables `POST /webhooks/gitee`. Gitee has no commit-status API — run feedback is via [notifications](#notifications). |
+| `gitcode_secret` | `--gitcode-secret` (`$JANUS_GITCODE_SECRET`) | _(empty)_ | GitCode webhook secret (token or HMAC signature key). Enables `POST /webhooks/gitcode`. GitCode has no commit-status API — run feedback is via [notifications](#notifications). |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
 | `allow_repos` | `--allow-repos` (comma-separated) | _(empty)_ | Repositories permitted to run. See "Repository allowlist" below. |
 | `base_url` | _(none)_ | _(empty)_ | Public base URL of this daemon (e.g. `https://ci.example.com`). When set, notifications include a link to the run page (`<base_url>/runs/<id>`). File-only. |
@@ -56,9 +61,12 @@ with) the file list. The config file is a single YAML document — a second
 
 Notes:
 
-- Only the two secrets have environment fallbacks (`$JANUS_GITLAB_SECRET`,
-  `$JANUS_API_TOKEN`) so they can stay out of the file. Other settings are
-  file-or-flag. Keep a config file holding secrets `chmod 600`.
+- The webhook secrets and API tokens have `$JANUS_*` environment fallbacks so
+  they can stay out of the file: `$JANUS_API_TOKEN`, `$JANUS_GITLAB_SECRET`,
+  `$JANUS_GITLAB_API_TOKEN`, `$JANUS_GITHUB_SECRET`, `$JANUS_GITHUB_API_TOKEN`,
+  `$JANUS_GITEE_SECRET`, and `$JANUS_GITCODE_SECRET`. The instance-URL settings
+  (`gitlab_url`, `github_url`) are file-only, as are non-secret settings. Keep a
+  config file holding secrets `chmod 600`.
 - Without a GitLab secret, `/webhooks/gitlab` returns `404` (disabled).
 - **`POST /api/trigger` always requires an API token** — it runs code on the
   host, so without a token it is **disabled** (`403`). Read endpoints

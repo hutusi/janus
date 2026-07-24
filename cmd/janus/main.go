@@ -168,6 +168,10 @@ func runServe(args []string) error {
 	fs.String("clone-url", def.CloneURL, `which clone URL from the webhook payload to check out: "http" or "ssh"`)
 	fs.String("gitlab-secret", "", "GitLab webhook secret token (overrides config/env; enables /webhooks/gitlab)")
 	fs.String("gitlab-api-token", "", "GitLab API token (api scope) for commit-status reporting (overrides config/env)")
+	fs.String("github-secret", "", "GitHub webhook secret (overrides config/env; enables /webhooks/github)")
+	fs.String("github-api-token", "", "GitHub API token (repo:status) for commit-status reporting (overrides config/env)")
+	fs.String("gitee-secret", "", "Gitee webhook secret (overrides config/env; enables /webhooks/gitee)")
+	fs.String("gitcode-secret", "", "GitCode webhook secret (overrides config/env; enables /webhooks/gitcode)")
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
 	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
 	if err := fs.Parse(args); err != nil {
@@ -233,25 +237,40 @@ func runServe(args []string) error {
 		logger.Info("outbound notifications enabled", "targets", len(targets))
 	}
 
-	// GitLab commit-status reporting is optional; build the reporter only when a
-	// token is configured (nil, not a typed-nil interface, keeps the runner's
-	// guard honest).
+	// Commit-status reporting is optional; build one reporter for whichever
+	// providers have an outbound API token configured (nil, not a typed-nil
+	// interface, keeps the runner's guard honest).
 	var reporter *status.Reporter
+	var stOpts []status.Option
 	if cfg.GitLabAPIToken != "" {
-		reporter, err = status.New(cfg.GitLabAPIToken,
-			status.WithBaseURL(cfg.BaseURL),
-			status.WithInstanceURL(cfg.GitLabURL),
-			status.WithLogger(logger),
-		)
+		stOpts = append(stOpts, status.WithGitLab(cfg.GitLabAPIToken, cfg.GitLabURL))
+	}
+	if cfg.GitHubAPIToken != "" {
+		stOpts = append(stOpts, status.WithGitHub(cfg.GitHubAPIToken, cfg.GitHubURL))
+	}
+	if len(stOpts) > 0 {
+		stOpts = append(stOpts, status.WithBaseURL(cfg.BaseURL), status.WithLogger(logger))
+		reporter, err = status.New(stOpts...)
 		if err != nil {
-			return fmt.Errorf("gitlab commit status: %w", err)
+			return fmt.Errorf("commit status: %w", err)
 		}
-		logger.Info("gitlab commit-status reporting enabled")
-		if cfg.GitLabSecret == "" {
-			logger.Warn("gitlab-api-token is set but gitlab-secret is not; no GitLab webhooks are accepted, so no statuses will be reported")
+		if cfg.GitLabAPIToken != "" {
+			logger.Info("gitlab commit-status reporting enabled")
+			if cfg.GitLabSecret == "" {
+				logger.Warn("gitlab-api-token is set but gitlab-secret is not; no GitLab webhooks are accepted, so no statuses will be reported")
+			}
+			if cfg.CloneURL == "ssh" && cfg.GitLabURL == "" {
+				logger.Warn("gitlab commit status with clone_url \"ssh\" needs gitlab_url set (an ssh clone URL has no derivable API base); statuses will be skipped")
+			}
 		}
-		if cfg.CloneURL == "ssh" && cfg.GitLabURL == "" {
-			logger.Warn("gitlab commit status with clone_url \"ssh\" needs gitlab_url set (an ssh clone URL has no derivable API base); statuses will be skipped")
+		if cfg.GitHubAPIToken != "" {
+			logger.Info("github commit-status reporting enabled")
+			if cfg.GitHubSecret == "" {
+				logger.Warn("github-api-token is set but github-secret is not; no GitHub webhooks are accepted, so no statuses will be reported")
+			}
+			if cfg.CloneURL == "ssh" && cfg.GitHubURL == "" {
+				logger.Warn("github commit status with clone_url \"ssh\" needs github_url set (an ssh clone URL has no derivable API base); statuses will be skipped")
+			}
 		}
 	}
 
@@ -302,12 +321,25 @@ func runServe(args []string) error {
 	}
 
 	opts := []server.Option{server.WithLogger(logger)}
+	ssh := cfg.CloneURL == "ssh"
 	if cfg.GitLabSecret != "" {
-		ssh := cfg.CloneURL == "ssh"
 		opts = append(opts, server.WithProvider(provider.GitLab{SSH: ssh}, cfg.GitLabSecret))
 		logger.Info("gitlab webhook enabled at /webhooks/gitlab", "clone_url", cfg.CloneURL)
-	} else {
-		logger.Warn("no gitlab-secret set; /webhooks/gitlab is disabled")
+	}
+	if cfg.GitHubSecret != "" {
+		opts = append(opts, server.WithProvider(provider.GitHub{SSH: ssh}, cfg.GitHubSecret))
+		logger.Info("github webhook enabled at /webhooks/github", "clone_url", cfg.CloneURL)
+	}
+	if cfg.GiteeSecret != "" {
+		opts = append(opts, server.WithProvider(provider.Gitee{SSH: ssh}, cfg.GiteeSecret))
+		logger.Info("gitee webhook enabled at /webhooks/gitee", "clone_url", cfg.CloneURL)
+	}
+	if cfg.GitCodeSecret != "" {
+		opts = append(opts, server.WithProvider(provider.GitCode{SSH: ssh}, cfg.GitCodeSecret))
+		logger.Info("gitcode webhook enabled at /webhooks/gitcode", "clone_url", cfg.CloneURL)
+	}
+	if cfg.GitLabSecret == "" && cfg.GitHubSecret == "" && cfg.GiteeSecret == "" && cfg.GitCodeSecret == "" {
+		logger.Warn("no webhook provider secret set; all /webhooks/* endpoints are disabled (set gitlab-secret / github-secret / gitee-secret / gitcode-secret)")
 	}
 	if cfg.APIToken != "" {
 		opts = append(opts, server.WithAPIToken(cfg.APIToken))
