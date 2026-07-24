@@ -59,6 +59,7 @@ type Runner struct {
 	allow        allowlist.Allowlist
 	logger       *slog.Logger
 	notifier     Notifier
+	reporter     StatusReporter
 
 	ctx    context.Context // root context for run execution and checkout; cancelled on Shutdown
 	cancel context.CancelFunc
@@ -99,6 +100,17 @@ type Notifier interface {
 	Notify(run *model.Run)
 }
 
+// StatusReporter announces a run's lifecycle state to the provider's
+// commit-status API (implemented by *status.Reporter), so pass/fail shows on the
+// triggering commit/MR. Defined here for the same decoupling reason as Notifier;
+// a nil reporter disables it. state is the run's current status — StatusRunning
+// for the pre-execution post, or the terminal status. The reporter maps it and
+// no-ops for states/events it does not report. Report must not block or fail the
+// run.
+type StatusReporter interface {
+	Report(run *model.Run, state model.Status)
+}
+
 // Options configures a Runner.
 type Options struct {
 	WSRoot       string              // where per-run workspaces are created
@@ -110,6 +122,7 @@ type Options struct {
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
 	Logger       *slog.Logger        // for background events (prune failures); defaults to slog.Default()
 	Notifier     Notifier            // announces finished runs; nil disables notifications
+	Reporter     StatusReporter      // reports commit status; nil disables it
 }
 
 // Result reports an accepted trigger: the recorded run's ID. The run is
@@ -141,6 +154,7 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		allow:        opts.Allowlist,
 		logger:       logger,
 		notifier:     opts.Notifier,
+		reporter:     opts.Reporter,
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
@@ -557,8 +571,13 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// cancelled. Every settle path sets terminalPersisted below.
 	terminalPersisted := false
 	defer func() {
-		if r.notifier != nil && run.Status.Terminal() && terminalPersisted {
-			r.notifier.Notify(run)
+		if run.Status.Terminal() && terminalPersisted {
+			if r.notifier != nil {
+				r.notifier.Notify(run)
+			}
+			if r.reporter != nil {
+				r.reporter.Report(run, run.Status)
+			}
 		}
 	}()
 	// Idempotent safety net for the pre-enter exits (workspace/checkout/parse
@@ -789,6 +808,13 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// From here Execute owns the run's terminal state (and reconciliation
 	// covers a crash), so the terminal-state net must stand down.
 	settled = true
+	// Report "running" to the commit-status API now, just before execution
+	// begins — the engine sets StatusRunning microseconds later but has no
+	// outbound seam. Best-effort; never blocks. Pre-execution outcomes returned
+	// earlier and so only ever post their single terminal state.
+	if r.reporter != nil {
+		r.reporter.Report(run, model.StatusRunning)
+	}
 	// The per-run context is cancelled on Shutdown too, so in-flight runs are
 	// stopped. Execute returns non-nil only when the terminal state could not be
 	// persisted (already logged and latched Degraded() by the engine); a nil error
