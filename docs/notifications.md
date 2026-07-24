@@ -95,6 +95,10 @@ Notes:
   delivery, put a queue in front of Janus.
 - **Per-delivery timeout.** Each POST is bounded (10s) so a hung endpoint cannot
   pin resources.
+- **Bounded per target.** Concurrent deliveries are capped per target; when a
+  single endpoint has too many in flight (e.g. it is slow or unreachable),
+  further deliveries to *that* target are dropped and logged. The cap is
+  per-target, so a slow endpoint never blocks or starves the others.
 - **Drained on shutdown.** On `SIGINT`/`SIGTERM`, after in-flight runs settle,
   Janus waits briefly for pending deliveries to flush before exiting, so a run
   that finishes just before shutdown still gets to notify.

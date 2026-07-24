@@ -343,6 +343,59 @@ func TestNotifyDropsWhenSaturated(t *testing.T) {
 	}
 }
 
+func TestValidationErrorsHideURLValues(t *testing.T) {
+	// A malformed URL is a startup error printed to stderr; its value may embed a
+	// secret (userinfo, or a token in the path/query), so the error must never
+	// echo it — only the key/index and reason.
+	tests := []struct {
+		name    string
+		targets []Target
+		base    string
+		secret  string // substring that must NOT appear in the error
+	}{
+		{"target scheme with userinfo", []Target{{URL: "ftp://user:pw@host/x"}}, "", "pw"},
+		{"target token in query", []Target{{URL: "ftp://host/x?token=sekret"}}, "", "sekret"},
+		{"base_url userinfo", nil, "https://user:sekret@host", "sekret"},
+		{"base_url token in query", nil, "https://host/?token=sekret", "sekret"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := []Option{WithLogger(discardLogger())}
+			if tc.base != "" {
+				opts = append(opts, WithBaseURL(tc.base))
+			}
+			_, err := New(tc.targets, opts...)
+			if err == nil {
+				t.Fatal("expected a validation error, got nil")
+			}
+			if strings.Contains(err.Error(), tc.secret) {
+				t.Errorf("error leaks the URL value %q: %v", tc.secret, err)
+			}
+		})
+	}
+}
+
+func TestNotifyPerTargetCapacityDeliversAllTargets(t *testing.T) {
+	// Per-target capacity: even with a cap of one, two distinct targets each get
+	// their own slot, so a single run delivers to both. (A shared/global cap of
+	// one could drop the second.)
+	reqsA := make(chan captured, 2)
+	reqsB := make(chan captured, 2)
+	tsA := recordingServer(t, reqsA)
+	tsB := recordingServer(t, reqsB)
+	n := newNotifier(t, []Target{
+		{URL: tsA.URL, On: []string{"failed"}},
+		{URL: tsB.URL, On: []string{"failed"}},
+	}, WithMaxInFlight(1))
+
+	n.Notify(failedRun())
+	n.Close(2 * time.Second)
+
+	if len(reqsA) != 1 || len(reqsB) != 1 {
+		t.Fatalf("deliveries A=%d B=%d, want 1 each (per-target capacity)", len(reqsA), len(reqsB))
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	tests := []struct {
 		name    string

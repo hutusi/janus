@@ -2,13 +2,14 @@
 // outbound webhook endpoints. It is Janus's only outbound HTTP client.
 //
 // Delivery is best-effort and must never fail or block a run: Notify builds the
-// payload synchronously, then hands each matching target off to a bounded pool
-// of delivery goroutines using the notifier's own (not the run's) context,
+// payload synchronously, then hands each matching target off to its own bounded
+// set of delivery goroutines using the notifier's own (not the run's) context,
 // logging failures rather than propagating them. A slow, failing, or hung
-// endpoint therefore cannot fail a run or stall the runner; when too many
-// deliveries are already in flight, further ones are dropped (and logged) rather
-// than queued unboundedly. Close drains in-flight deliveries at shutdown, so a
-// run that finishes just before SIGTERM still gets to notify.
+// endpoint therefore cannot fail a run, stall the runner, or starve the other
+// targets; when too many deliveries to one target are already in flight, further
+// ones to that target are dropped (and logged) rather than queued unboundedly.
+// Close drains in-flight deliveries at shutdown, so a run that finishes just
+// before SIGTERM still gets to notify.
 package notify
 
 import (
@@ -32,8 +33,9 @@ const (
 	// defaultTimeout bounds a single delivery so a slow endpoint cannot pin a
 	// goroutine (and, at shutdown, the drain) indefinitely.
 	defaultTimeout = 10 * time.Second
-	// defaultMaxInFlight caps concurrent deliveries so slow endpoints cannot
-	// accumulate goroutines/connections/file descriptors without bound.
+	// defaultMaxInFlight caps concurrent deliveries per target, so a slow
+	// endpoint cannot accumulate goroutines/connections/file descriptors without
+	// bound or starve other targets.
 	defaultMaxInFlight = 16
 )
 
@@ -49,12 +51,15 @@ type Target struct {
 
 // target is the validated internal form of a Target. label is a log-safe
 // identifier — origin plus index, never the full URL, whose path or query may
-// carry the endpoint's secret.
+// carry the endpoint's secret. sem bounds this target's own in-flight
+// deliveries, so a slow endpoint fills only its own slots and cannot starve the
+// others.
 type target struct {
 	url    string
 	secret string
 	on     map[model.Status]bool
 	label  string
+	sem    chan struct{}
 }
 
 // Notifier posts run summaries to its targets. Construct it with New; it is safe
@@ -68,12 +73,12 @@ type Notifier struct {
 	timeout     time.Duration
 	maxInFlight int
 
-	// sem bounds concurrent deliveries (mirrors runner.Runner.sem). ctx is the
-	// notifier's own lifetime, cancelled only by Close — never tied to a run or
-	// the runner, so a shutdown/cancel of the run being reported can never abort
-	// its own completion notification. wg tracks in-flight deliveries so Close
-	// can drain them.
-	sem    chan struct{}
+	// Concurrent deliveries are bounded per target (target.sem), so one slow
+	// endpoint can't starve the others. ctx is the notifier's own lifetime,
+	// cancelled only by Close — never tied to a run or the runner, so a
+	// shutdown/cancel of the run being reported can never abort its own
+	// completion notification. wg tracks every in-flight delivery (across all
+	// targets) so Close can drain them.
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -115,7 +120,8 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
-// WithMaxInFlight caps concurrent deliveries (defaults to defaultMaxInFlight).
+// WithMaxInFlight caps concurrent deliveries per target (defaults to
+// defaultMaxInFlight).
 func WithMaxInFlight(m int) Option {
 	return func(n *Notifier) {
 		if m > 0 {
@@ -148,12 +154,12 @@ func New(targets []Target, opts ...Option) (*Notifier, error) {
 		if err != nil {
 			return nil, fmt.Errorf("notifications[%d]: %w", i, err)
 		}
+		vt.sem = make(chan struct{}, n.maxInFlight) // per-target delivery bound
 		n.targets = append(n.targets, vt)
 	}
 	if n.client == nil {
 		n.client = &http.Client{Timeout: n.timeout}
 	}
-	n.sem = make(chan struct{}, n.maxInFlight)
 	n.ctx, n.cancel = context.WithCancel(context.Background())
 	return n, nil
 }
@@ -196,33 +202,38 @@ func notifiable(s model.Status) bool {
 
 // parseHTTPURL parses raw and requires an http/https URL with a host. Path,
 // query, and userinfo are allowed — a webhook target legitimately carries them.
+// Errors never echo the URL: the value may embed a secret and reaches the
+// startup log via main, so the caller's key/index (notifications[i], base_url)
+// is what locates the offending entry. url.Parse's own error text embeds the
+// URL, so it is deliberately not wrapped.
 func parseHTTPURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%q is not a valid URL: %w", raw, err)
+		return nil, errors.New("is not a valid URL")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("%q must be an http:// or https:// URL", raw)
+		return nil, errors.New("must be an http:// or https:// URL")
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("%q has no host", raw)
+		return nil, errors.New("must include a host")
 	}
 	return u, nil
 }
 
 // validateBaseURL is stricter than parseHTTPURL: the base URL is joined with a
 // path and copied into every payload, so userinfo (a credential leak), a query,
-// or a fragment (a broken link) are rejected.
+// or a fragment (a broken link) are rejected. Errors stay value-free for the
+// same reason as parseHTTPURL.
 func validateBaseURL(raw string) (*url.URL, error) {
 	u, err := parseHTTPURL(raw)
 	if err != nil {
 		return nil, err
 	}
 	if u.User != nil {
-		return nil, fmt.Errorf("%q must not contain userinfo (it would be copied into every notification link)", raw)
+		return nil, errors.New("must not contain userinfo (it would be copied into every notification link)")
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("%q must not contain a query or fragment", raw)
+		return nil, errors.New("must not contain a query or fragment")
 	}
 	return u, nil
 }
@@ -231,9 +242,9 @@ func validateBaseURL(raw string) (*url.URL, error) {
 // returns as soon as the deliveries are handed off — the POSTs happen in the
 // background — so it never blocks or fails the caller. run is read only
 // synchronously (the payload is built before any goroutine starts), so the
-// caller may reuse or mutate it afterward. When more than the in-flight cap of
-// deliveries are already running, further ones are dropped and logged rather
-// than queued.
+// caller may reuse or mutate it afterward. When a target already has its
+// per-target cap of deliveries in flight, further ones to that target are
+// dropped and logged rather than queued.
 func (n *Notifier) Notify(run *model.Run) {
 	var matched []target
 	for _, t := range n.targets {
@@ -252,20 +263,21 @@ func (n *Notifier) Notify(run *model.Run) {
 	}
 	runID := run.ID
 	for _, t := range matched {
-		// Non-blocking acquire bounds concurrent deliveries; on saturation drop
-		// rather than block the caller or accumulate goroutines. wg.Add is
-		// synchronous, before the goroutine spawns, so the hand-off
-		// happens-before the caller returns — the ordering Close relies on to
-		// drain.
+		// Non-blocking acquire on this target's own semaphore: it bounds
+		// concurrent deliveries per target, so a saturated (slow) endpoint drops
+		// only its own deliveries and never blocks the caller or starves the
+		// others. wg.Add is synchronous, before the goroutine spawns, so the
+		// hand-off happens-before the caller returns — the ordering Close relies
+		// on to drain.
 		select {
-		case n.sem <- struct{}{}:
+		case t.sem <- struct{}{}:
 			n.wg.Add(1)
 			go func(t target) {
-				defer func() { <-n.sem; n.wg.Done() }()
+				defer func() { <-t.sem; n.wg.Done() }()
 				n.deliver(t, runID, body)
 			}(t)
 		default:
-			n.logger.Warn("notification dropped: too many deliveries in flight", "run_id", runID, "target", t.label)
+			n.logger.Warn("notification dropped: too many deliveries in flight for this target", "run_id", runID, "target", t.label)
 		}
 	}
 }
