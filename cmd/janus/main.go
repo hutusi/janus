@@ -33,6 +33,7 @@ import (
 	"github.com/hutusi/janus/internal/provider"
 	"github.com/hutusi/janus/internal/runner"
 	"github.com/hutusi/janus/internal/server"
+	"github.com/hutusi/janus/internal/status"
 	"github.com/hutusi/janus/internal/store"
 	"github.com/hutusi/janus/internal/workspace"
 )
@@ -166,6 +167,7 @@ func runServe(args []string) error {
 	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run), "persistent" (one reusable dir per repo), or "mirror" (per-repo bare-mirror cache, fresh dir per run)`)
 	fs.String("clone-url", def.CloneURL, `which clone URL from the webhook payload to check out: "http" or "ssh"`)
 	fs.String("gitlab-secret", "", "GitLab webhook secret token (overrides config/env; enables /webhooks/gitlab)")
+	fs.String("gitlab-api-token", "", "GitLab API token (api scope) for commit-status reporting (overrides config/env)")
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
 	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
 	if err := fs.Parse(args); err != nil {
@@ -231,6 +233,28 @@ func runServe(args []string) error {
 		logger.Info("outbound notifications enabled", "targets", len(targets))
 	}
 
+	// GitLab commit-status reporting is optional; build the reporter only when a
+	// token is configured (nil, not a typed-nil interface, keeps the runner's
+	// guard honest).
+	var reporter *status.Reporter
+	if cfg.GitLabAPIToken != "" {
+		reporter, err = status.New(cfg.GitLabAPIToken,
+			status.WithBaseURL(cfg.BaseURL),
+			status.WithInstanceURL(cfg.GitLabURL),
+			status.WithLogger(logger),
+		)
+		if err != nil {
+			return fmt.Errorf("gitlab commit status: %w", err)
+		}
+		logger.Info("gitlab commit-status reporting enabled")
+		if cfg.GitLabSecret == "" {
+			logger.Warn("gitlab-api-token is set but gitlab-secret is not; no GitLab webhooks are accepted, so no statuses will be reported")
+		}
+		if cfg.CloneURL == "ssh" && cfg.GitLabURL == "" {
+			logger.Warn("gitlab commit status with clone_url \"ssh\" needs gitlab_url set (an ssh clone URL has no derivable API base); statuses will be skipped")
+		}
+	}
+
 	eng := engine.New(st,
 		engine.WithMaxParallelJobs(cfg.MaxParallelJobs),
 		engine.WithStepTimeout(time.Duration(cfg.StepTimeout)),
@@ -248,6 +272,9 @@ func runServe(args []string) error {
 	}
 	if notifier != nil {
 		runnerOpts.Notifier = notifier
+	}
+	if reporter != nil {
+		runnerOpts.Reporter = reporter
 	}
 	rn := runner.New(st, eng, runnerOpts)
 	if cfg.WorkspaceStrategy == runner.StrategyPersistent {
@@ -309,6 +336,20 @@ func runServe(args []string) error {
 		}
 	}()
 
+	// Drain in-flight work on *every* exit path — a signal or a ListenAndServe
+	// error: wait up to 30s for in-flight runs (killing overrunning process
+	// groups), then flush queued notifications and commit-status posts. Deferred
+	// so the server-error path (errCh) drains too, not just the signal path.
+	defer func() {
+		rn.Shutdown(30 * time.Second)
+		if notifier != nil {
+			notifier.Close(5 * time.Second)
+		}
+		if reporter != nil {
+			reporter.Close(5 * time.Second)
+		}
+	}()
+
 	select {
 	case err := <-errCh:
 		return err
@@ -318,17 +359,9 @@ func runServe(args []string) error {
 		defer cancel()
 		// The runner must shut down even when HTTP shutdown times out (a
 		// lingering log-follow connection is enough to exceed the deadline) —
-		// returning early here would exit the process with build process
-		// groups still alive.
-		err := srv.Shutdown(shutdownCtx)
-		// Wait up to 30s for in-flight runs; cancel (kill processes) if they overrun.
-		rn.Shutdown(30 * time.Second)
-		// The runner has drained, so every finished run has handed its
-		// notification off; flush the in-flight deliveries before exiting.
-		if notifier != nil {
-			notifier.Close(5 * time.Second)
-		}
-		return err
+		// returning early here would exit the process with build process groups
+		// still alive; the deferred drain above handles that.
+		return srv.Shutdown(shutdownCtx)
 	}
 }
 

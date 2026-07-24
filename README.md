@@ -175,6 +175,7 @@ Single Go binary, standard library throughout; the only third-party module is
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — full YAML grammar + what's rejected
 - [docs/configuration.md](docs/configuration.md) — config file, all settings, the allowlist
 - [docs/notifications.md](docs/notifications.md) — outbound webhook notifications on run completion
+- [docs/gitlab-commit-status.md](docs/gitlab-commit-status.md) — report run status back to GitLab commits/MRs
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 - [docs/deployment.md](docs/deployment.md) — run as a hardened systemd service on Linux
 - [examples/](examples/) — ready-to-copy sample pipelines (build, release)

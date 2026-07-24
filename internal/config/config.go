@@ -70,6 +70,15 @@ type Config struct {
 	// allow_repos it is a plain wire form here; notify.New validates it and turns
 	// it into the runtime notifier.
 	Notifications []NotifyTarget `yaml:"notifications"`
+	// GitLabAPIToken is an outbound GitLab token (personal/project access token,
+	// `api` scope) enabling commit-status reporting. Distinct from gitlab_secret
+	// (the inbound webhook token). Empty disables it. Validated in status.New.
+	GitLabAPIToken string `yaml:"gitlab_api_token"`
+	// GitLabURL is the GitLab instance base URL (e.g. https://gitlab.example.com)
+	// for commit-status posts. Optional: derived from the clone URL for
+	// clone_url "http"; required for "ssh" (no derivable HTTPS authority) and for
+	// self-hosted instances on a subpath. File-only, like base_url.
+	GitLabURL string `yaml:"gitlab_url"`
 }
 
 // NotifyTarget is one endpoint under `notifications:` — the decoded wire form of
@@ -176,6 +185,9 @@ func (c *Config) OverlayEnv() {
 	if v, ok := os.LookupEnv("JANUS_API_TOKEN"); ok {
 		c.APIToken = v
 	}
+	if v, ok := os.LookupEnv("JANUS_GITLAB_API_TOKEN"); ok {
+		c.GitLabAPIToken = v
+	}
 }
 
 // OverlayFlags applies the CLI flags that were explicitly set (per fs.Visit)
@@ -213,6 +225,8 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.CloneURL = g.Get().(string)
 		case "gitlab-secret":
 			c.GitLabSecret = g.Get().(string)
+		case "gitlab-api-token":
+			c.GitLabAPIToken = g.Get().(string)
 		case "api-token":
 			c.APIToken = g.Get().(string)
 		case "allow-repos":
