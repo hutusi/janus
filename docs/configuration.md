@@ -205,10 +205,11 @@ and caches only the git objects.
 How it behaves:
 
 - **The mirror is an accelerator, never a gate.** If another run of the same
-  repo is syncing the mirror (a per-repo try-lock, held only for the fetch),
-  or the sync or local clone fails for any reason, the run proceeds with a
-  plain direct-from-remote checkout — same-repo triggers never block, and a
-  broken mirror never fails a run the direct path could serve.
+  repo is syncing the mirror (a per-repo try-lock, held for the fetch and any
+  compaction it triggers), or the sync or local clone fails for any reason,
+  the run proceeds with a plain direct-from-remote checkout — same-repo
+  triggers never block, and a broken mirror never fails a run the direct path
+  could serve.
 - **Same-repo runs overlap freely.** Unlike `persistent`, materializing a
   workspace takes no lock: concurrent runs of one repo all clone from the
   same mirror.
@@ -218,12 +219,11 @@ How it behaves:
   away by force-pushes is pruned after git's standard grace period — a
   mirror's size tracks its repository's rather than growing forever. That
   grace period is fixed by Janus rather than read from your git config, so
-  compaction can never discard a commit a run is about to check out; other
-  gc tuning (how often it triggers, how aggressively it packs) still comes
-  from git config as usual. What is
-  *not* automatic is removal: a repository that stops building keeps its
-  mirror until you delete the `mirror-*` directory (which is also the way to
-  force a full reset — the next run rebuilds it). Structural corruption (a
+  compaction can never discard a commit a run is about to check out; other gc
+  tuning (how often it triggers, how aggressively it packs) still comes from
+  git config as usual. What is *not* automatic is removal: a repository that
+  stops building keeps its mirror until you delete the `mirror-*` directory
+  (which is also the way to force a full reset — the next run rebuilds it). Structural corruption (a
   half-created or damaged mirror) rebuilds automatically, while fetch
   failures deliberately don't — a transient network error must not throw away
   a large healthy cache.
