@@ -377,7 +377,7 @@ func (n *Notifier) buildPayload(run *model.Run) payload {
 		RunID:       run.ID,
 		Workflow:    run.WorkflowName,
 		Status:      string(run.Status),
-		Reason:      run.Reason,
+		Reason:      model.RedactURL(run.Reason), // defense-in-depth: the runner already redacts, but this is an external egress
 		Provider:    run.Event.Provider,
 		Event:       string(run.Event.Kind),
 		RepoURL:     model.RedactURL(run.Event.RepoURL), // may embed credentials

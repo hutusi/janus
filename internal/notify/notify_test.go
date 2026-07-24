@@ -149,6 +149,28 @@ func TestNotifyWithoutSecretHasNoAuthHeaderOrLink(t *testing.T) {
 	}
 }
 
+func TestNotifyRedactsReason(t *testing.T) {
+	// Defense-in-depth: even if a credential-bearing reason reaches the notifier,
+	// the outbound payload must not carry it.
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	n := newNotifier(t, []Target{{URL: ts.URL, On: []string{"failed"}}})
+
+	run := failedRun()
+	run.Reason = "checkout: fatal: unable to access https://user:s3cr3t@host/repo.git"
+	n.Notify(run)
+	n.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var p map[string]any
+	if err := json.Unmarshal(got.body, &p); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := p["reason"].(string); strings.Contains(r, "s3cr3t") || strings.Contains(r, "user:") {
+		t.Errorf("payload reason still carries credentials: %q", r)
+	}
+}
+
 func TestNotifyPreExecutionRunOmitsDuration(t *testing.T) {
 	reqs := make(chan captured, 1)
 	ts := recordingServer(t, reqs)

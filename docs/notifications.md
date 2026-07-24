@@ -73,8 +73,9 @@ Notes:
   it is the run's recorded reason; for an ordinary job failure it is derived as
   `failed jobs: <names>` (which the `jobs` array also details). It is omitted for
   a clean success.
-- **`repo_url`** has any embedded credentials (`https://user:token@host/…`)
-  stripped before it is sent.
+- **`repo_url`** and **`reason`** have any embedded credentials
+  (`https://user:token@host/…`) stripped before they are sent — a checkout
+  failure can otherwise echo a credential-bearing clone URL into `reason`.
 - **`started_at`** and **`duration_seconds`** are present only for runs that
   actually began executing. Pre-execution outcomes (checkout/parse failure, an
   event that didn't match `on:`) never started, so both are omitted — which, with

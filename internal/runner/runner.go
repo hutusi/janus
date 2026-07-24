@@ -786,7 +786,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// is single-owner again (writing Reason mid-flight would race runState).
 	if run.Status == model.StatusCancelled && run.Reason == "" {
 		if reason := cancelReason(runCtx, ""); reason != "" {
-			run.Reason = reason
+			run.Reason = model.RedactURL(reason) // keep the "stored reasons are redacted" invariant
 			if err := r.store.UpdateRun(run); err != nil {
 				r.logger.Warn("cancel reason could not be persisted", "run_id", run.ID, "err", err)
 			}
@@ -803,6 +803,12 @@ const maxReasonLen = 4 << 10
 // an error to anyone — log it and latch degraded for /healthz; startup
 // reconciliation is the backstop that eventually settles the stored record.
 func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) {
+	// A checkout/workspace failure echoes the git command — including a
+	// credential-bearing clone URL — into the reason, which then surfaces on the
+	// (unauthenticated) dashboard, the API, and notifications. Redact before the
+	// length cap so a truncation can't strand a partial credential. A no-op on
+	// non-URL reasons.
+	reason = model.RedactURL(reason)
 	if len(reason) > maxReasonLen {
 		reason = reason[:maxReasonLen]
 	}
