@@ -167,12 +167,14 @@ func New(token string, opts ...Option) (*Reporter, error) {
 		r.instanceURL = u
 	}
 	if r.client == nil {
-		r.client = &http.Client{
-			Timeout: r.timeout,
-			// Never follow redirects: the PRIVATE-TOKEN header must not be
-			// forwarded to a redirect target (e.g. an https->http downgrade).
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}
+		r.client = &http.Client{Timeout: r.timeout}
+	}
+	// Never follow redirects, regardless of client source: the PRIVATE-TOKEN
+	// header must not be forwarded to a redirect target (e.g. an https->http
+	// downgrade). Enforced even on a WithHTTPClient-supplied client so that knob
+	// can't silently drop the protection; a client that set its own policy keeps it.
+	if r.client.CheckRedirect == nil {
+		r.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	r.workers = make([]chan postJob, r.numWorkers)

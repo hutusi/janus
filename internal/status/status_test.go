@@ -301,6 +301,35 @@ func TestReportDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
+func TestReportSuppliedClientStillNoRedirect(t *testing.T) {
+	var followed int32
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&followed, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(secondary.Close)
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secondary.URL, http.StatusFound)
+	}))
+	t.Cleanup(primary.Close)
+	// A caller-supplied client that set no CheckRedirect must still not forward
+	// the PRIVATE-TOKEN across a redirect — New enforces the no-follow policy.
+	r, err := New("tok",
+		WithInstanceURL(primary.URL),
+		WithLogger(discardLogger()),
+		WithHTTPClient(&http.Client{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Report(gitlabRun(model.StatusFailed), model.StatusFailed)
+	r.Close(2 * time.Second)
+
+	if got := atomic.LoadInt32(&followed); got != 0 {
+		t.Errorf("supplied client followed a redirect (secondary hit %d times); protection must be enforced", got)
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	tests := []struct {
 		name     string

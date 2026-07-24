@@ -336,6 +336,20 @@ func runServe(args []string) error {
 		}
 	}()
 
+	// Drain in-flight work on *every* exit path — a signal or a ListenAndServe
+	// error: wait up to 30s for in-flight runs (killing overrunning process
+	// groups), then flush queued notifications and commit-status posts. Deferred
+	// so the server-error path (errCh) drains too, not just the signal path.
+	defer func() {
+		rn.Shutdown(30 * time.Second)
+		if notifier != nil {
+			notifier.Close(5 * time.Second)
+		}
+		if reporter != nil {
+			reporter.Close(5 * time.Second)
+		}
+	}()
+
 	select {
 	case err := <-errCh:
 		return err
@@ -345,20 +359,9 @@ func runServe(args []string) error {
 		defer cancel()
 		// The runner must shut down even when HTTP shutdown times out (a
 		// lingering log-follow connection is enough to exceed the deadline) —
-		// returning early here would exit the process with build process
-		// groups still alive.
-		err := srv.Shutdown(shutdownCtx)
-		// Wait up to 30s for in-flight runs; cancel (kill processes) if they overrun.
-		rn.Shutdown(30 * time.Second)
-		// The runner has drained, so every finished run has handed its
-		// notification and status posts off; flush the in-flight ones before exiting.
-		if notifier != nil {
-			notifier.Close(5 * time.Second)
-		}
-		if reporter != nil {
-			reporter.Close(5 * time.Second)
-		}
-		return err
+		// returning early here would exit the process with build process groups
+		// still alive; the deferred drain above handles that.
+		return srv.Shutdown(shutdownCtx)
 	}
 }
 
