@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hutusi/janus/internal/model"
 )
@@ -40,8 +41,9 @@ const (
 	// statusContext is the GitLab status "context" (its grouping key): one row
 	// per commit whose lifecycle updates running -> terminal.
 	statusContext = "janus"
-	// GitLab caps description, target_url, and ref at 255 characters; an
-	// over-limit field is rejected and the whole status is lost.
+	// GitLab caps description, target_url, and ref at 255 characters (Unicode code
+	// points, not bytes); an over-limit field is rejected and the whole status is
+	// lost.
 	maxDescLen      = 255
 	maxTargetURLLen = 255
 	maxRefLen       = 255
@@ -322,7 +324,7 @@ func (r *Reporter) targetURL(runID string) string {
 		return ""
 	}
 	u := r.baseURL.JoinPath("runs", runID).String()
-	if len(u) > maxTargetURLLen {
+	if utf8.RuneCountInString(u) > maxTargetURLLen { // characters, not bytes
 		return "" // GitLab rejects an over-length target_url; drop it rather than lose the status
 	}
 	return u
@@ -345,7 +347,7 @@ type statusBody struct {
 // and the status still posts keyed on the SHA.
 func refName(ref string) string {
 	r := strings.TrimPrefix(ref, "refs/heads/")
-	if len(r) > maxRefLen {
+	if utf8.RuneCountInString(r) > maxRefLen { // characters, not bytes
 		return ""
 	}
 	return r
@@ -401,11 +403,13 @@ func description(run *model.Run, state model.Status) string {
 	return wf
 }
 
+// clip limits s to max characters (code points), so it never over-clips a
+// multibyte string nor splits a rune into invalid UTF-8.
 func clip(s string, max int) string {
-	if len(s) > max {
-		return s[:max]
+	if utf8.RuneCountInString(s) <= max {
+		return s
 	}
-	return s
+	return string([]rune(s)[:max])
 }
 
 // deriveBase returns scheme://host of an http/https clone URL (dropping any

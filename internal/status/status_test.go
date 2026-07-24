@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hutusi/janus/internal/model"
 )
@@ -409,6 +410,48 @@ func TestReportOmitsOverlongRef(t *testing.T) {
 	}
 	if b.State != "success" {
 		t.Errorf("status should still post; state = %q", b.State)
+	}
+}
+
+func TestReportKeepsMultibyteRefUnder255Chars(t *testing.T) {
+	// GitLab's cap is 255 characters, not bytes: a 100-CJK-char branch is ~300
+	// bytes but only 100 chars, so it must NOT be omitted (byte-counting would).
+	branch := strings.Repeat("世", 100) // 100 runes, 300 bytes
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	r := newReporter(t, ts)
+
+	run := gitlabRun(model.StatusSuccess)
+	run.Event.Ref = "refs/heads/" + branch
+	r.Report(run, model.StatusSuccess)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var b statusBody
+	_ = json.Unmarshal(got.body, &b)
+	if b.Ref != branch {
+		t.Errorf("ref = %q, want the 100-char multibyte branch kept", b.Ref)
+	}
+}
+
+func TestReportClipsDescriptionByRunes(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	r := newReporter(t, ts)
+
+	run := gitlabRun(model.StatusFailed)
+	run.Reason = strings.Repeat("あ", 1000) // multibyte, well over 255 chars
+	r.Report(run, model.StatusFailed)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var b statusBody
+	_ = json.Unmarshal(got.body, &b)
+	if n := utf8.RuneCountInString(b.Description); n > 255 {
+		t.Errorf("description = %d chars, want <= 255", n)
+	}
+	if !utf8.ValidString(b.Description) {
+		t.Errorf("description is not valid UTF-8 (a rune was split): %q", b.Description)
 	}
 }
 
