@@ -37,14 +37,24 @@ func (GitLab) Verify(r *http.Request, _ []byte, secret string) error {
 }
 
 func (g GitLab) Parse(r *http.Request, body []byte) (*model.Event, error) {
+	f := gitlabFormat{provider: "gitlab", ssh: g.SSH}
 	switch r.Header.Get("X-Gitlab-Event") {
 	case "Push Hook":
-		return g.parseGitLabPush(body)
+		return f.parsePush(body)
 	case "Merge Request Hook":
-		return g.parseGitLabMR(body)
+		return f.parseMR(body)
 	default:
 		return nil, ErrIgnoredEvent
 	}
+}
+
+// gitlabFormat parses GitLab-shaped push and merge_request webhook bodies. It is
+// shared by the GitLab provider and by GitCode, whose webhooks use GitLab's exact
+// payload format (differing only in header names and verification); provider is
+// the name stamped on the resulting event, and ssh selects the clone transport.
+type gitlabFormat struct {
+	provider string
+	ssh      bool
 }
 
 type glProject struct {
@@ -58,15 +68,15 @@ type glProject struct {
 // GitLab-compatible platforms omit git_ssh_url, and silently cloning over the
 // transport the operator did not choose would surface downstream as a confusing
 // "repository not in allowlist" instead of naming the real problem.
-func (g GitLab) repoURL(p glProject) (string, error) {
-	if g.SSH {
+func (f gitlabFormat) repoURL(p glProject) (string, error) {
+	if f.ssh {
 		if p.GitSSHURL == "" {
-			return "", fmt.Errorf("gitlab: clone_url is \"ssh\" but the payload has no project.git_ssh_url")
+			return "", fmt.Errorf("%s: clone_url is \"ssh\" but the payload has no project.git_ssh_url", f.provider)
 		}
 		return p.GitSSHURL, nil
 	}
 	if p.GitHTTPURL == "" {
-		return "", fmt.Errorf("gitlab: the payload has no project.git_http_url")
+		return "", fmt.Errorf("%s: the payload has no project.git_http_url", f.provider)
 	}
 	return p.GitHTTPURL, nil
 }
@@ -76,7 +86,7 @@ type glCommit struct {
 	Title string `json:"title"`
 }
 
-func (g GitLab) parseGitLabPush(body []byte) (*model.Event, error) {
+func (f gitlabFormat) parsePush(body []byte) (*model.Event, error) {
 	var p struct {
 		Ref         string     `json:"ref"`
 		Before      string     `json:"before"`
@@ -86,7 +96,7 @@ func (g GitLab) parseGitLabPush(body []byte) (*model.Event, error) {
 		Commits     []glCommit `json:"commits"`
 	}
 	if err := json.Unmarshal(body, &p); err != nil {
-		return nil, fmt.Errorf("gitlab push: %w", err)
+		return nil, fmt.Errorf("%s push: %w", f.provider, err)
 	}
 	if isZeroSHA(p.After) {
 		return nil, ErrIgnoredEvent // branch deletion
@@ -95,12 +105,12 @@ func (g GitLab) parseGitLabPush(body []byte) (*model.Event, error) {
 	if sha == "" {
 		sha = p.CheckoutSHA
 	}
-	repo, err := g.repoURL(p.Project)
+	repo, err := f.repoURL(p.Project)
 	if err != nil {
 		return nil, err
 	}
 	ev := &model.Event{
-		Provider:  "gitlab",
+		Provider:  f.provider,
 		Kind:      model.EventPush,
 		RepoURL:   repo,
 		Ref:       p.Ref,
@@ -119,7 +129,7 @@ func (g GitLab) parseGitLabPush(body []byte) (*model.Event, error) {
 	return ev, nil
 }
 
-func (g GitLab) parseGitLabMR(body []byte) (*model.Event, error) {
+func (f gitlabFormat) parseMR(body []byte) (*model.Event, error) {
 	var m struct {
 		Attrs struct {
 			Action       string   `json:"action"`
@@ -131,7 +141,7 @@ func (g GitLab) parseGitLabMR(body []byte) (*model.Event, error) {
 		Project glProject `json:"project"`
 	}
 	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("gitlab merge_request: %w", err)
+		return nil, fmt.Errorf("%s merge_request: %w", f.provider, err)
 	}
 	switch m.Attrs.Action {
 	case "open", "reopen", "update":
@@ -139,7 +149,7 @@ func (g GitLab) parseGitLabMR(body []byte) (*model.Event, error) {
 	default:
 		return nil, ErrIgnoredEvent // merge, close, approval, ...
 	}
-	repo, err := g.repoURL(m.Project)
+	repo, err := f.repoURL(m.Project)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +157,7 @@ func (g GitLab) parseGitLabMR(body []byte) (*model.Event, error) {
 	// MR's head commit. Branch is the target so ${{ branch }} and on:
 	// merge_request.branches both refer to the destination.
 	return &model.Event{
-		Provider:  "gitlab",
+		Provider:  f.provider,
 		Kind:      model.EventMergeRequest,
 		RepoURL:   repo,
 		Ref:       "refs/heads/" + m.Attrs.SourceBranch,
