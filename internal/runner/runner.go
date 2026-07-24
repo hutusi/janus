@@ -58,6 +58,7 @@ type Runner struct {
 	historyLimit int
 	allow        allowlist.Allowlist
 	logger       *slog.Logger
+	notifier     Notifier
 
 	ctx    context.Context // root context for run execution and checkout; cancelled on Shutdown
 	cancel context.CancelFunc
@@ -90,6 +91,14 @@ const (
 	StrategyMirror     = "mirror"     // per-repo bare mirror cache; pristine per-run checkouts materialized locally
 )
 
+// Notifier announces a finished run to the outside world (implemented by
+// *notify.Notifier). It is defined here — rather than runner importing notify —
+// so the packages stay decoupled: runner depends only on model. A nil Notifier
+// disables notifications. Notify must not block or fail the run.
+type Notifier interface {
+	Notify(run *model.Run)
+}
+
 // Options configures a Runner.
 type Options struct {
 	WSRoot       string              // where per-run workspaces are created
@@ -100,6 +109,7 @@ type Options struct {
 	HistoryLimit int                 // max terminal runs to retain (<=0 = unlimited); pruned after each run
 	Allowlist    allowlist.Allowlist // repos permitted to run (empty denies all)
 	Logger       *slog.Logger        // for background events (prune failures); defaults to slog.Default()
+	Notifier     Notifier            // announces finished runs; nil disables notifications
 }
 
 // Result reports an accepted trigger: the recorded run's ID. The run is
@@ -130,6 +140,7 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		historyLimit: opts.HistoryLimit,
 		allow:        opts.Allowlist,
 		logger:       logger,
+		notifier:     opts.Notifier,
 		ctx:          ctx,
 		cancel:       cancel,
 		sem:          make(chan struct{}, maxRuns),
@@ -522,6 +533,29 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 // run would leak forever.
 func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCauseFunc, seq uint64, run *model.Run, ev model.Event, pipelinePath string, release func()) {
 	defer release()
+	// Announce the finished run, exactly once, on every terminal path. Placement
+	// is deliberate: registered right after release() so (LIFO) it runs just
+	// *before* it — after every other defer below has settled the run to a
+	// terminal state and persisted it (via the finish closure or Execute), but
+	// before release() calls wg.Done(). That ordering makes the notifier's
+	// synchronous hand-off happen-before Shutdown's wg.Wait() returns, which is
+	// what lets Notifier.Close drain in-flight deliveries at shutdown. By now
+	// run is single-owner (Execute's goroutines have joined), so reading it is
+	// race-free. A nil notifier — or the (never-reached) non-terminal case — is a
+	// no-op. Notify never blocks or fails the run.
+	//
+	// Gated on terminalPersisted: the terminal state must be durably recorded
+	// before it is announced to an external endpoint. The engine discards its
+	// terminal-persist error into run.Status, and finishRun swallows its store
+	// failure, so run.Status.Terminal() alone can be true for a state the store
+	// never accepted (a full/read-only disk) — which reconciliation later flips to
+	// cancelled. Every settle path sets terminalPersisted below.
+	terminalPersisted := false
+	defer func() {
+		if r.notifier != nil && run.Status.Terminal() && terminalPersisted {
+			r.notifier.Notify(run)
+		}
+	}()
 	// Idempotent safety net for the pre-enter exits (workspace/checkout/parse
 	// failures, non-matching events, panics): grouped triggers actually
 	// resolve inside enter, and ungrouped ones right after parse — a trigger
@@ -540,12 +574,12 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	settled := false
 	defer func() {
 		if !settled {
-			r.finishRun(run, model.StatusFailed, "internal error: trigger aborted before recording an outcome")
+			terminalPersisted = r.finishRun(run, model.StatusFailed, "internal error: trigger aborted before recording an outcome")
 		}
 	}()
 	finish := func(status model.Status, reason string) {
 		settled = true
-		r.finishRun(run, status, reason)
+		terminalPersisted = r.finishRun(run, status, reason)
 		r.pruneHistory()
 	}
 
@@ -751,16 +785,17 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	// covers a crash), so the terminal-state net must stand down.
 	settled = true
 	// The per-run context is cancelled on Shutdown too, so in-flight runs are
-	// stopped. A terminal-persist failure is already logged and latched
-	// (Degraded()) by the engine, so the returned error is intentionally
-	// discarded here.
-	_ = r.engine.Execute(runCtx, run, wf, ws.Dir)
+	// stopped. Execute returns non-nil only when the terminal state could not be
+	// persisted (already logged and latched Degraded() by the engine); a nil error
+	// means the outcome is durably recorded, which is what gates the notification.
+	execErr := r.engine.Execute(runCtx, run, wf, ws.Dir)
+	terminalPersisted = execErr == nil
 	// Execute classifies an externally-cancelled run but cannot know why; the
 	// cause is only attachable now that its goroutines have joined and the run
 	// is single-owner again (writing Reason mid-flight would race runState).
 	if run.Status == model.StatusCancelled && run.Reason == "" {
 		if reason := cancelReason(runCtx, ""); reason != "" {
-			run.Reason = reason
+			run.Reason = model.RedactURL(reason) // keep the "stored reasons are redacted" invariant
 			if err := r.store.UpdateRun(run); err != nil {
 				r.logger.Warn("cancel reason could not be persisted", "run_id", run.ID, "err", err)
 			}
@@ -772,11 +807,19 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 // maxReasonLen bounds Run.Reason at ingestion — git stderr flows into it.
 const maxReasonLen = 4 << 10
 
-// finishRun records a terminal pre-execution outcome on run. By now the
-// trigger's HTTP response is long gone, so a store failure cannot surface as
-// an error to anyone — log it and latch degraded for /healthz; startup
-// reconciliation is the backstop that eventually settles the stored record.
-func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) {
+// finishRun records a terminal pre-execution outcome on run and reports whether
+// the terminal state was durably persisted. By now the trigger's HTTP response
+// is long gone, so a store failure cannot surface as an error to anyone — log it
+// and latch degraded for /healthz; startup reconciliation is the backstop that
+// eventually settles the stored record. The bool gates notification: a result
+// that was never recorded must not be announced to an external endpoint.
+func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) bool {
+	// A checkout/workspace failure echoes the git command — including a
+	// credential-bearing clone URL — into the reason, which then surfaces on the
+	// (unauthenticated) dashboard, the API, and notifications. Redact before the
+	// length cap so a truncation can't strand a partial credential. A no-op on
+	// non-URL reasons.
+	reason = model.RedactURL(reason)
 	if len(reason) > maxReasonLen {
 		reason = reason[:maxReasonLen]
 	}
@@ -799,7 +842,9 @@ func (r *Runner) finishRun(run *model.Run, status model.Status, reason string) {
 	if err := r.store.UpdateRun(run); err != nil {
 		r.logger.Error("run outcome could not be persisted", "run_id", run.ID, "status", status, "err", err)
 		r.MarkDegraded()
+		return false
 	}
+	return true
 }
 
 // pipelineFile resolves the effective in-repo pipeline path for ev. Without an

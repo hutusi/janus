@@ -205,6 +205,50 @@ func TestValidateCloneURL(t *testing.T) {
 	}
 }
 
+func TestNotificationsDecode(t *testing.T) {
+	path := writeFile(t, `
+base_url: "https://ci.example.com"
+notifications:
+  - url: "https://example.com/hook"
+    on: [failed, success]
+    secret: "s3cr3t"
+  - url: "https://other.example.com/hook"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BaseURL != "https://ci.example.com" {
+		t.Errorf("base_url = %q, want https://ci.example.com", cfg.BaseURL)
+	}
+	if len(cfg.Notifications) != 2 {
+		t.Fatalf("got %d notification targets, want 2", len(cfg.Notifications))
+	}
+	first := cfg.Notifications[0]
+	if first.URL != "https://example.com/hook" {
+		t.Errorf("target[0].url = %q", first.URL)
+	}
+	if len(first.On) != 2 || first.On[0] != "failed" || first.On[1] != "success" {
+		t.Errorf("target[0].on = %v, want [failed success]", first.On)
+	}
+	if first.Secret != "s3cr3t" {
+		t.Errorf("target[0].secret = %q, want s3cr3t", first.Secret)
+	}
+	// Omitted keys decode to their zero values (notify.New fills the defaults).
+	if second := cfg.Notifications[1]; second.On != nil || second.Secret != "" {
+		t.Errorf("target[1] = %+v, want empty on/secret", second)
+	}
+}
+
+func TestNotificationsStrictDecoder(t *testing.T) {
+	// An unknown key inside a target must error — the yaml tags are the whole
+	// contract, exactly as at the top level.
+	path := writeFile(t, "notifications:\n  - url: \"https://x/y\"\n    onn: [failed]\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown target key, got nil")
+	}
+}
+
 func TestOverlayEnv(t *testing.T) {
 	t.Setenv("JANUS_GITLAB_SECRET", "from-env")
 	t.Setenv("JANUS_API_TOKEN", "tok-env")

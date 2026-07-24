@@ -459,6 +459,37 @@ func TestTriggerNonMatchingEventRecordsSkippedRun(t *testing.T) {
 	}
 }
 
+func TestFinishRunRedactsReason(t *testing.T) {
+	st := store.NewMemory()
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+	run := &model.Run{
+		ID:           "r1",
+		WorkflowName: "ci",
+		Status:       model.StatusPending,
+		Event:        model.Event{Kind: model.EventManual},
+		CreatedAt:    time.Now(),
+	}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	// A checkout failure echoes a credential-bearing clone URL into the reason.
+	if persisted := r.finishRun(run, model.StatusFailed, "checkout: git remote add origin https://user:s3cr3t@host/repo.git: exit status 128"); !persisted {
+		t.Fatal("finishRun reported the terminal state was not persisted")
+	}
+	// Assert on the persisted record, not the in-memory pointer finishRun mutated:
+	// the memory store snapshots via marshal/unmarshal, so this is a real round-trip.
+	stored, err := st.GetRun("r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored.Reason, "s3cr3t") || strings.Contains(stored.Reason, "user:") {
+		t.Errorf("stored reason still carries credentials: %q", stored.Reason)
+	}
+	if !strings.Contains(stored.Reason, "https://host/repo.git") {
+		t.Errorf("redaction should keep the host/path visible for debugging: %q", stored.Reason)
+	}
+}
+
 func TestRunnerMarkDegraded(t *testing.T) {
 	st := store.NewMemory()
 	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})

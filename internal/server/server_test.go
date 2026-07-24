@@ -1133,6 +1133,34 @@ func statusOf(t *testing.T, url string) int {
 	return resp.StatusCode
 }
 
+func TestGetRunRedactsRepoURLCredentials(t *testing.T) {
+	st := store.NewMemory()
+	ts := newTestServerStore(t, st)
+	run := &model.Run{
+		ID:     "leak1",
+		Status: model.StatusFailed,
+		Event: model.Event{
+			Kind:    model.EventManual,
+			RepoURL: "https://ci:sekret@gitlab.example.com/acme/app.git",
+			Branch:  "main",
+		},
+	}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+
+	detail := getText(t, ts.URL+"/api/runs/leak1")
+	if strings.Contains(detail, "sekret") {
+		t.Errorf("GET /api/runs/{id} leaks the credential: %s", detail)
+	}
+	if !strings.Contains(detail, "gitlab.example.com/acme/app.git") {
+		t.Errorf("redacted repo_url should still be present: %s", detail)
+	}
+	if list := getText(t, ts.URL+"/api/runs"); strings.Contains(list, "sekret") {
+		t.Errorf("GET /api/runs leaks the credential: %s", list)
+	}
+}
+
 // --- Run cancel endpoint ------------------------------------------------------
 
 // postCancel issues an authenticated POST /api/runs/{id}/cancel.

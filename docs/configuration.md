@@ -43,6 +43,8 @@ existing file without `--force`); see the
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
 | `allow_repos` | `--allow-repos` (comma-separated) | _(empty)_ | Repositories permitted to run. See "Repository allowlist" below. |
+| `base_url` | _(none)_ | _(empty)_ | Public base URL of this daemon (e.g. `https://ci.example.com`). When set, notifications include a link to the run page (`<base_url>/runs/<id>`). File-only. |
+| `notifications` | _(none)_ | _(empty)_ | Outbound webhook endpoints POSTed a JSON run summary when a run finishes. Empty disables them. See [Notifications](#notifications) below. File-only (a list). |
 
 In YAML, `step_timeout` is a string (`"10m"`, `"30s"`); on the flag it is a Go
 duration (`--step-timeout 10m`). `allow_repos` is a YAML list; the
@@ -102,6 +104,38 @@ allow_repos:
   - https://gitlab.example.com/acme
   - https://gitlab.example.com/platform
 ```
+
+### Notifications
+
+`notifications` is a list of outbound webhook endpoints. When a run reaches a
+terminal state, Janus POSTs each subscribed endpoint a JSON summary of the run.
+Delivery is **best-effort**: a slow, failing, or unreachable endpoint is logged
+and never fails or blocks a run. See [Notifications](notifications.md) for the
+full payload schema and behavior.
+
+```yaml
+base_url: "https://ci.example.com"   # optional; adds a run link to each payload
+notifications:
+  - url: "https://chat.example.com/hooks/janus"
+    on: [failed]                     # default when omitted: failures only
+    secret: "shared-token"           # optional Bearer token; keep this file chmod 600
+  - url: "https://example.com/ci-events"
+    on: [success, failed, cancelled, skipped]
+```
+
+- **`url`** (required) — an `http`/`https` endpoint. Invalid URLs are a startup error.
+- **`on`** — which terminal outcomes deliver to this target: any of `success`,
+  `failed`, `cancelled`, `skipped`. Omitted means **failures only**. An unknown
+  value is a startup error.
+- **`secret`** — optional; sent as an `Authorization: Bearer <secret>` header so
+  the receiver can authenticate the delivery. There is no `JANUS_*` env fallback
+  for a per-target secret (a list can't map to one variable), so keep the config
+  file `chmod 600` when it holds one.
+- **`base_url`** — when set, each payload carries `url = <base_url>/runs/<id>`
+  linking to the run page; omit it to leave the link out.
+
+Notifications are **daemon-only**: local `janus run` executes directly and never
+notifies.
 
 ### SSH clone URLs
 

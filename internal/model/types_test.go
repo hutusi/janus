@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestBranchFilterMatches(t *testing.T) {
 	tests := []struct {
@@ -25,5 +29,49 @@ func TestBranchFilterMatches(t *testing.T) {
 				t.Errorf("Matches(%q) = %v, want %v", tc.branch, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEventMarshalJSONRedactsRepoURL(t *testing.T) {
+	e := Event{
+		Provider: "gitlab",
+		Kind:     EventPush,
+		RepoURL:  "https://ci:sekret@gitlab.example.com/acme/app.git",
+		Branch:   "main",
+		Ref:      "refs/heads/main",
+	}
+	out, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "sekret") || strings.Contains(s, "ci:") {
+		t.Errorf("marshaled event leaks credentials: %s", s)
+	}
+	if !strings.Contains(s, "https://gitlab.example.com/acme/app.git") {
+		t.Errorf("host/path should survive redaction: %s", s)
+	}
+	// The in-memory value is untouched — the checkout still needs the credentials.
+	if e.RepoURL != "https://ci:sekret@gitlab.example.com/acme/app.git" {
+		t.Errorf("MarshalJSON mutated the in-memory RepoURL: %q", e.RepoURL)
+	}
+}
+
+func TestRunMarshalRedactsEmbeddedEvent(t *testing.T) {
+	// The value receiver must fire for Event embedded in Run and RunSummary, so
+	// both the detail and list API responses are covered.
+	run := &Run{
+		ID:     "r1",
+		Status: StatusFailed,
+		Event:  Event{Kind: EventManual, RepoURL: "https://u:p@host/repo.git"},
+	}
+	for name, v := range map[string]any{"run": run, "summary": run.Summary()} {
+		out, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(string(out), "u:p@") {
+			t.Errorf("%s JSON leaks event credentials: %s", name, out)
+		}
 	}
 }

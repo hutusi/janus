@@ -4,7 +4,10 @@
 // dependencies so every other package can import it without risking a cycle.
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Workflow is a parsed and validated pipeline specification (.janus/ci.yml).
 // It is immutable once produced by pipeline.Parse.
@@ -147,6 +150,19 @@ type Event struct {
 	// webhook URL's ?pipeline_path= query parameter; empty means the
 	// configured default).
 	PipelinePath string `json:"pipeline_path,omitempty"`
+}
+
+// MarshalJSON redacts credentials from RepoURL whenever an Event is serialized —
+// the JSON API responses and the flat-file store's run.json — so an embedded
+// token (https://user:token@host/…) never leaves the process or lands on disk.
+// RepoURL stays raw in memory, where the checkout needs it; the value receiver
+// makes this fire for Event embedded in Run/RunSummary too, and RedactURL is a
+// no-op on a credential-free URL.
+func (e Event) MarshalJSON() ([]byte, error) {
+	type alias Event // no MarshalJSON of its own → no recursion, same fields/tags
+	a := alias(e)
+	a.RepoURL = RedactURL(e.RepoURL)
+	return json.Marshal(a)
 }
 
 // Status is the lifecycle state of a run, job, or step.

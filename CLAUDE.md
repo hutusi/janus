@@ -33,6 +33,7 @@ Single binary (`cmd/janus`); all logic under `internal/`, depending inward on `i
 - [docs/architecture.md](docs/architecture.md) — package map, two-layer domain model, run lifecycle, concurrency/safety **invariants & gotchas** (strict `KnownFields`, `runState.update` as the single mutation path, process-group kill)
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — supported YAML grammar + what's rejected and why
 - [docs/configuration.md](docs/configuration.md) — config file, precedence (defaults < file < env < flags), the repo allowlist
+- [docs/notifications.md](docs/notifications.md) — outbound webhook notifications on run completion (config in `janus.yml`, dispatched from the runner, `internal/notify`)
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 - [docs/deployment.md](docs/deployment.md) — Linux systemd deployment (`deploy/janus.service`, dedicated user, balanced sandbox)
 - `README.md` — overview, quickstart, security model
