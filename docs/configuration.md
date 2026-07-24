@@ -216,7 +216,11 @@ How it behaves:
   automatically: syncs that fetch end with a `git gc --auto` pass using git's
   own heuristics, so fetch-created packs consolidate and history rewritten
   away by force-pushes is pruned after git's standard grace period — a
-  mirror's size tracks its repository's rather than growing forever. What is
+  mirror's size tracks its repository's rather than growing forever. That
+  grace period is fixed by Janus rather than read from your git config, so
+  compaction can never discard a commit a run is about to check out; other
+  gc tuning (how often it triggers, how aggressively it packs) still comes
+  from git config as usual. What is
   *not* automatic is removal: a repository that stops building keeps its
   mirror until you delete the `mirror-*` directory (which is also the way to
   force a full reset — the next run rebuilds it). Structural corruption (a

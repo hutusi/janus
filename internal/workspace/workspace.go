@@ -514,7 +514,9 @@ func (w *Workspace) mirrorTarget(ctx context.Context, sha, ref string) (string, 
 			return "", fmt.Errorf("workspace: mirror resolved %s, which the requested SHA %s does not identify", head, sha)
 		}
 		if fetched {
-			w.maintainMirror(ctx)
+			if err := w.compactAndVerify(ctx, head); err != nil {
+				return "", err
+			}
 		}
 		return head, nil
 	}
@@ -525,18 +527,31 @@ func (w *Workspace) mirrorTarget(ctx context.Context, sha, ref string) (string, 
 	if err != nil {
 		return "", err
 	}
-	w.maintainMirror(ctx)
+	if err := w.compactAndVerify(ctx, head); err != nil {
+		return "", err
+	}
 	return head, nil
 }
 
-// gcAutoOpts re-enables git's stock auto-gc heuristics for the one sanctioned
-// compaction run (the mirror's own config pins gc.auto=0, so the -c override
-// is required — it necessarily also shadows an operator's global gc.auto; all
-// other gc settings, gc.autoPackLimit and gc.pruneExpire included, are left
-// to normal git config). autoDetach=false keeps the work in-process so it can
-// never outlive the caller's lock. A var so tests can tighten the thresholds
-// to force a compaction.
-var gcAutoOpts = []string{"-c", "gc.auto=6700", "-c", "gc.autoDetach=false"}
+// gcAutoOpts configures the one sanctioned compaction run. Each pinned
+// setting is load-bearing for the mirror's safety argument, so none may be
+// inherited from host config:
+//
+//   - gc.auto re-enables git's stock heuristics, which the mirror's own
+//     config pins to 0 against implicit maintenance (this necessarily also
+//     shadows an operator's global gc.auto).
+//   - gc.autoDetach=false keeps the work in-process, so compaction can never
+//     outlive the caller's lock.
+//   - gc.pruneExpire fixes the grace period at git's own default. Prune only
+//     ever touches unreachable objects, but a commit fetched by bare SHA is
+//     exactly that, so a host `gc.pruneExpire=now` would let compaction
+//     delete the very commit the sync just resolved — the grace period is an
+//     invariant of this design, not an operator preference.
+//
+// Everything else (gc.autoPackLimit, aggressiveness) stays host-tunable
+// through normal git config. A var so tests can tighten the thresholds to
+// force a compaction.
+var gcAutoOpts = []string{"-c", "gc.auto=6700", "-c", "gc.autoDetach=false", "-c", "gc.pruneExpire=2.weeks.ago"}
 
 // maintainMirror lets git's own heuristics decide whether the mirror needs
 // compacting — roughly every gc.autoPackLimit fetch-created packs — and runs
@@ -549,6 +564,21 @@ var gcAutoOpts = []string{"-c", "gc.auto=6700", "-c", "gc.autoDetach=false"}
 func (w *Workspace) maintainMirror(ctx context.Context) {
 	args := append(append([]string{}, gcAutoOpts...), "gc", "--auto", "--quiet")
 	_ = w.git(ctx, args...)
+}
+
+// compactAndVerify runs the compaction pass and then enforces this package's
+// postcondition — the mirror still contains the commit just resolved — rather
+// than merely arguing it: gcAutoOpts pins a grace period that protects a
+// freshly fetched (and possibly ref-unreachable) commit, but a skewed clock
+// or an exotic host configuration should surface as a named error, not as an
+// opaque clone failure later. The caller treats the error as "mirror
+// unavailable" and falls back to a direct checkout.
+func (w *Workspace) compactAndVerify(ctx context.Context, head string) error {
+	w.maintainMirror(ctx)
+	if err := w.git(ctx, "cat-file", "-e", head+"^{commit}"); err != nil {
+		return fmt.Errorf("workspace: mirror no longer contains %s after compaction: %w", head, err)
+	}
+	return nil
 }
 
 // Cleanup removes the workspace directory unless Keep was set.
