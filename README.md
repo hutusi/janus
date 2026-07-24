@@ -135,17 +135,25 @@ with a secret for each provider you use (persistent storage optional but
 recommended), then point that provider's webhook at it:
 
 ```sh
-# Pass a secret only for the providers you use — any subset works.
-janus serve --data-dir /var/lib/janus \
-  --gitlab-secret "$(openssl rand -hex 24)" \
-  --github-secret "$(openssl rand -hex 24)" \
-  --gitee-secret "$(openssl rand -hex 24)" \
-  --gitcode-secret "$(openssl rand -hex 24)"
+# Generate a secret and print it — you paste this same value into the provider's
+# webhook settings. Pass secrets by environment, not flags: command-line
+# arguments are visible to any user on the host via `ps`.
+export JANUS_GITHUB_SECRET="$(openssl rand -hex 24)"
+echo "$JANUS_GITHUB_SECRET"
+
+janus serve --data-dir /var/lib/janus
 ```
 
-Setting a provider's secret enables its endpoint — `/webhooks/gitlab`,
-`/webhooks/github`, `/webhooks/gitee`, `/webhooks/gitcode` — so you can enable any
-mix. Push and merge/pull-request events trigger runs matched against each
+Set a secret only for the providers you use — `JANUS_GITLAB_SECRET`,
+`JANUS_GITHUB_SECRET`, `JANUS_GITEE_SECRET`, `JANUS_GITCODE_SECRET` (or the
+matching `--gitlab-secret` / `--github-secret` / `--gitee-secret` /
+`--gitcode-secret` flags) — and each one enables its endpoint, `/webhooks/gitlab`,
+`/webhooks/github`, `/webhooks/gitee`, `/webhooks/gitcode`, so you can run any mix.
+For a real deployment keep the secrets in the systemd unit's
+[`janus.env`](deploy/janus.env.example) — see the
+[deployment guide](docs/deployment.md).
+
+Push and merge/pull-request events trigger runs matched against each
 workflow's `on:` filters (a GitHub/Gitee/GitCode pull/merge request normalizes to
 the same `merge_request` event, so one `.janus/ci.yml` works everywhere). Any
 number of repositories can share one server — each runs its own committed

@@ -139,14 +139,26 @@ type Event struct {
 	Title    string    `json:"title,omitempty"` // commit/MR title, for display
 
 	// ProjectID is the provider's numeric project identifier (GitLab's
-	// project.id), used to address the commit-status API. Zero when the provider
-	// did not supply one (manual triggers, other providers). Not a secret.
+	// project.id), recorded so a run names its project the way the host does.
+	// Zero when the provider did not supply one (manual triggers, other
+	// providers). Not a secret.
+	//
+	// Like RepoSlug it is metadata only: it comes from the webhook payload and
+	// nothing binds it to RepoURL, so the commit-status reporter does not address
+	// a project by it — it derives the NAMESPACE/PROJECT path from RepoURL, the
+	// string the allowlist gated, and sends that URL-encoded (GitLab accepts a
+	// namespaced path wherever :id appears). See internal/status/gitlab.go.
 	ProjectID int64 `json:"project_id,omitempty"`
 
 	// RepoSlug is the provider's "owner/repo" identifier (GitHub's
-	// repository.full_name), used to address hosts whose commit-status API is
-	// keyed by name rather than a numeric id. Empty for providers that address by
-	// ProjectID (GitLab) and for manual triggers. Not a secret.
+	// repository.full_name), recorded so a run names its repository the way the
+	// host does. Empty for providers that identify by ProjectID (GitLab) and for
+	// manual triggers. Not a secret.
+	//
+	// It is metadata only: it comes from the webhook payload and nothing binds it
+	// to RepoURL, so the commit-status reporter deliberately does not address a
+	// repository by it — it derives owner/repo from RepoURL, the string the
+	// allowlist gated (see internal/status/github.go).
 	RepoSlug string `json:"repo_slug,omitempty"`
 
 	// Before is the commit the pushed ref pointed at before this push (the

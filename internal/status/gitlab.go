@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"strconv"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -52,18 +52,32 @@ func (d gitlabDialect) build(run *model.Run, state model.Status, targetURL strin
 		return postJob{}, false
 	}
 	ev := run.Event
-	if ev.ProjectID <= 0 || ev.SHA == "" {
-		return postJob{}, false
-	}
+	// The project is identified by the path derived from the clone URL, not by the
+	// payload's project id: the allowlist gates RepoURL, so addressing the status
+	// from that same string is what keeps a delivery from pairing an allowlisted
+	// clone URL with someone else's project and having the token write there.
+	// GitLab accepts a URL-encoded NAMESPACE/PROJECT path wherever :id appears.
+	// fullOID guards the SHA for the same reason.
 	base := d.instanceURL
 	if base == nil {
 		base = deriveBase(ev.RepoURL)
 	}
 	if base == nil {
-		d.logger.Debug("commit status skipped: no resolvable GitLab API base", "run_id", run.ID, "project", ev.ProjectID)
+		d.logger.Debug("commit status skipped: no resolvable GitLab API base", "run_id", run.ID)
 		return postJob{}, false
 	}
-	endpoint := base.JoinPath("api", "v4", "projects", strconv.FormatInt(ev.ProjectID, 10), "statuses", ev.SHA).String()
+	project, ok := d.projectPath(ev.RepoURL, base)
+	if !ok || !fullOID(ev.SHA) {
+		return postJob{}, false
+	}
+	// Built by hand rather than with JoinPath: the project path must reach GitLab
+	// as ONE segment with its separators percent-encoded, and JoinPath would treat
+	// them as real separators (it also resolves "../") — the very behaviour this
+	// addressing is defending against. base is validated (http/https, host, no
+	// userinfo/query/fragment) and ev.SHA is a full hex OID, so this is unambiguous.
+	endpoint := strings.TrimSuffix(base.String(), "/") +
+		"/api/v4/projects/" + url.PathEscape(project) +
+		"/statuses/" + ev.SHA
 
 	// GitLab rejects an over-length target_url; drop it rather than lose the status.
 	turl := targetURL
@@ -81,7 +95,7 @@ func (d gitlabDialect) build(run *model.Run, state model.Status, targetURL strin
 		d.logger.Warn("commit status payload could not be encoded", "run_id", run.ID, "err", err)
 		return postJob{}, false
 	}
-	label := "gitlab project " + strconv.FormatInt(ev.ProjectID, 10)
+	label := "gitlab " + project
 	return postJob{
 		key:      label + "|" + ev.SHA + "|" + statusContext,
 		endpoint: endpoint,
@@ -92,6 +106,31 @@ func (d gitlabDialect) build(run *model.Run, state model.Status, targetURL strin
 		overHTTP: base.Scheme == "http",
 		retry409: true,
 	}, true
+}
+
+// projectPath derives the NAMESPACE/PROJECT path GitLab addresses a project by
+// from the clone URL, requiring at least two segments — a project always lives
+// under a namespace, and unlike GitHub a nested group makes more than two legal.
+func (d gitlabDialect) projectPath(repoURL string, base *url.URL) (string, bool) {
+	segs := repoPathSegments(repoURL)
+	// An instance hosted under a path (gitlab_url = https://host/gitlab) puts that
+	// prefix on its web and API URLs, so it is not part of the project path — but
+	// only for http(s) clone URLs on that same host. GitLab builds an ssh/scp clone
+	// URL from the project's namespace path alone, so a leading segment there that
+	// merely collides with the subpath is a real group. deriveBase is nil for
+	// scp-style and ssh:// URLs, which is exactly that distinction. Erring this way
+	// is deliberate: failing to strip only 404s a best-effort post, while stripping
+	// wrongly would post to a different project than the one the allowlist gated.
+	if rb := deriveBase(repoURL); rb != nil && strings.EqualFold(rb.Host, base.Host) {
+		if prefix := repoPathSegments(base.Path); len(prefix) > 0 && len(segs) > len(prefix) &&
+			slices.Equal(segs[:len(prefix)], prefix) {
+			segs = segs[len(prefix):]
+		}
+	}
+	if len(segs) < 2 {
+		return "", false
+	}
+	return strings.Join(segs, "/"), true
 }
 
 // gitlabState maps a Janus status to a GitLab commit-status state, or "" for

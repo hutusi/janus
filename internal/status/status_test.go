@@ -41,7 +41,10 @@ func recordingServer(t *testing.T, reqs chan<- captured) *httptest.Server {
 	t.Helper()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		reqs <- captured{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: b}
+		// EscapedPath, not Path: GitLab addresses a project by its URL-encoded
+		// NAMESPACE/PROJECT path, and r.URL.Path would have already decoded the
+		// %2F back into a separator — hiding exactly what we mean to assert.
+		reqs <- captured{method: r.Method, path: r.URL.EscapedPath(), header: r.Header.Clone(), body: b}
 		w.WriteHeader(http.StatusCreated) // GitLab replies 201
 	}))
 	t.Cleanup(ts.Close)
@@ -103,7 +106,7 @@ func TestReportPostsStatus(t *testing.T) {
 	if got.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", got.method)
 	}
-	if got.path != "/api/v4/projects/15/statuses/"+testSHA {
+	if got.path != "/api/v4/projects/acme%2Fapp/statuses/"+testSHA {
 		t.Errorf("path = %q", got.path)
 	}
 	if tok := got.header.Get("PRIVATE-TOKEN"); tok != "tok-secret" {
@@ -177,8 +180,15 @@ func TestReportScoping(t *testing.T) {
 	}{
 		{"gitlab run posts", func(*model.Run) {}, true, true},
 		{"non-gitlab provider", func(r *model.Run) { r.Event.Provider = "manual" }, true, false},
-		{"zero project id", func(r *model.Run) { r.Event.ProjectID = 0 }, true, false},
+		// The project is derived from RepoURL, so an undecidable URL skips. A
+		// project always lives under a namespace, hence at least two segments.
+		{"repo url without namespace", func(r *model.Run) { r.Event.RepoURL = "https://gitlab.example.com/app.git" }, true, false},
+		{"repo url with traversal", func(r *model.Run) { r.Event.RepoURL = "https://gitlab.example.com/acme/../evil.git" }, true, false},
 		{"empty sha", func(r *model.Run) { r.Event.SHA = "" }, true, false},
+		// The SHA is a path segment and url.JoinPath resolves "../" rather than
+		// escaping it, so only a full object id may be posted.
+		{"traversal sha", func(r *model.Run) { r.Event.SHA = "../../../evil/statuses/x" }, true, false},
+		{"abbreviated sha", func(r *model.Run) { r.Event.SHA = "deadbee" }, true, false},
 		{"ssh repo, no instance url", func(r *model.Run) { r.Event.RepoURL = "git@gitlab.example.com:acme/app.git" }, false, false},
 	}
 	for _, tc := range tests {
@@ -221,8 +231,70 @@ func TestReportDerivesBaseFromRepoURL(t *testing.T) {
 	r.Close(2 * time.Second)
 
 	got := recv(t, reqs)
-	if got.path != "/api/v4/projects/15/statuses/"+testSHA {
+	if got.path != "/api/v4/projects/acme%2Fapp/statuses/"+testSHA {
 		t.Errorf("derived path = %q", got.path)
+	}
+}
+
+// TestReportIgnoresPayloadProjectID is the security invariant: the status is
+// addressed by the project path derived from RepoURL — the string the allowlist
+// gated — so a delivery pairing an allowlisted clone URL with another project's id
+// cannot steer the token-bearing POST at that project.
+func TestReportIgnoresPayloadProjectID(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	r := newReporter(t, ts)
+
+	run := gitlabRun(model.StatusSuccess)
+	run.Event.ProjectID = 9999 // forged; must be ignored
+	r.Report(run, model.StatusSuccess)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	if want := "/api/v4/projects/acme%2Fapp/statuses/" + testSHA; got.path != want {
+		t.Errorf("path = %q, want %q (derived from the allowlisted clone URL)", got.path, want)
+	}
+}
+
+// TestReportProjectPathForms covers the clone-URL shapes a GitLab webhook can
+// supply, including nested groups and an instance hosted under a subpath.
+func TestReportProjectPathForms(t *testing.T) {
+	tests := []struct {
+		name     string
+		repoURL  string // %s is replaced with the test server's URL
+		instance string
+		wantPath string
+	}{
+		{"simple", "%s/acme/app.git", "%s", "/api/v4/projects/acme%2Fapp/statuses/"},
+		{"nested group", "%s/group/sub/app.git", "%s", "/api/v4/projects/group%2Fsub%2Fapp/statuses/"},
+		{"instance on a subpath", "%s/gitlab/acme/app.git", "%s/gitlab", "/gitlab/api/v4/projects/acme%2Fapp/statuses/"},
+		{"scp-style ssh", "git@gitlab.example.com:acme/app.git", "%s", "/api/v4/projects/acme%2Fapp/statuses/"},
+		// An ssh clone URL is built from the project's namespace path alone — the
+		// instance's relative URL root is not part of it — so a leading segment that
+		// merely collides with that subpath is a real group and must be kept.
+		// Stripping it here would post to a different project than the allowlisted one.
+		{"scp-style colliding with the subpath", "git@gitlab.example.com:gitlab/acme/app.git", "%s/gitlab", "/gitlab/api/v4/projects/gitlab%2Facme%2Fapp/statuses/"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqs := make(chan captured, 1)
+			ts := recordingServer(t, reqs)
+			r, err := New(WithLogger(discardLogger()),
+				WithGitLab("tok", strings.ReplaceAll(tc.instance, "%s", ts.URL)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := gitlabRun(model.StatusSuccess)
+			run.Event.RepoURL = strings.ReplaceAll(tc.repoURL, "%s", ts.URL)
+
+			r.Report(run, model.StatusSuccess)
+			r.Close(2 * time.Second)
+
+			got := recv(t, reqs)
+			if want := tc.wantPath + testSHA; got.path != want {
+				t.Errorf("path = %q, want %q", got.path, want)
+			}
+		})
 	}
 }
 

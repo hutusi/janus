@@ -45,18 +45,20 @@ func (d githubDialect) build(run *model.Run, state model.Status, targetURL strin
 		return postJob{}, false
 	}
 	ev := run.Event
-	// GitHub addresses by "owner/repo": split into two path segments and require
-	// each to be clean. RepoSlug comes from GitHub's repository.full_name (always
-	// well-formed), but guard defensively — JoinPath cleans "."/".." and does not
-	// re-escape an embedded "/", so a malformed slug could otherwise redirect the
-	// token-bearing POST onto another path on the same host.
-	owner, repo, ok := strings.Cut(ev.RepoSlug, "/")
-	if !ok || !cleanSlugPart(owner) || !cleanSlugPart(repo) || ev.SHA == "" {
+	// GitHub addresses by "owner/repo", derived from the clone URL rather than the
+	// payload's RepoSlug: the allowlist gates RepoURL, so addressing the status
+	// from that same string is what binds the post to a repository the operator
+	// permitted. Trusting the payload would let a caller pair an allowlisted clone
+	// URL with someone else's status identity and have the outbound token write
+	// there. fullOID guards the SHA for the same reason — JoinPath resolves "../"
+	// in a path element instead of escaping it.
+	owner, repo, ok := ownerRepo(ev.RepoURL)
+	if !ok || !fullOID(ev.SHA) {
 		return postJob{}, false
 	}
 	apiBase := d.apiBase(ev.RepoURL)
 	if apiBase == nil {
-		d.logger.Debug("commit status skipped: no resolvable GitHub API base", "run_id", run.ID, "repo", ev.RepoSlug)
+		d.logger.Debug("commit status skipped: no resolvable GitHub API base", "run_id", run.ID, "repo", owner+"/"+repo)
 		return postJob{}, false
 	}
 	endpoint := apiBase.JoinPath("repos", owner, repo, "statuses", ev.SHA).String()
@@ -71,7 +73,7 @@ func (d githubDialect) build(run *model.Run, state model.Status, targetURL strin
 		d.logger.Warn("commit status payload could not be encoded", "run_id", run.ID, "err", err)
 		return postJob{}, false
 	}
-	label := "github " + ev.RepoSlug
+	label := "github " + owner + "/" + repo
 	return postJob{
 		key:      label + "|" + ev.SHA + "|" + statusContext,
 		endpoint: endpoint,
@@ -125,10 +127,17 @@ func githubState(s model.Status) string {
 	return ""
 }
 
-// cleanSlugPart reports whether s is a single safe path segment for a
-// statuses-API URL: non-empty, not a "."/".." traversal, and free of embedded
-// path separators (strings.Cut splits only the first "/", so a nested slash lands
-// here and is rejected).
-func cleanSlugPart(s string) bool {
-	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, `/\`)
+// ownerRepo parses a clone URL into the two path segments GitHub addresses a
+// repository by. It accepts the forms a webhook can supply — https://host/o/r.git,
+// ssh://git@host/o/r.git, and scp-style git@host:o/r.git — and requires exactly
+// two segments (GitHub has no nested groups, so anything else is malformed).
+//
+// The input is the run's RepoURL, the string the allowlist gated, which is what
+// makes the derived identity trustworthy; the payload's own RepoSlug is not used.
+func ownerRepo(repoURL string) (owner, repo string, ok bool) {
+	segs := repoPathSegments(repoURL)
+	if len(segs) != 2 {
+		return "", "", false
+	}
+	return segs[0], segs[1], true
 }

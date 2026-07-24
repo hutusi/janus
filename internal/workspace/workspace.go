@@ -46,7 +46,7 @@ var (
 // and the checkout/reset target is only ever such a SHA or the literal
 // "FETCH_HEAD".
 func validateTarget(sha, ref string) error {
-	if sha != "" && !shaRe.MatchString(sha) {
+	if sha != "" && !ValidSHA(sha) {
 		return fmt.Errorf("workspace: invalid SHA %q (want 7-64 hex characters)", sha)
 	}
 	if ref != "" && (!refRe.MatchString(ref) || hasBadRefSeq(ref)) {
@@ -54,6 +54,13 @@ func validateTarget(sha, ref string) error {
 	}
 	return nil
 }
+
+// ValidSHA reports whether s is a full or abbreviated hex commit id (7-64 hex
+// characters). It is the single definition of "looks like a git object id":
+// besides gating git arguments here, callers upstream use it to reject an
+// untrusted SHA at ingestion, before it reaches anything that embeds it in a
+// path (a URL path segment, an argument, an environment value).
+func ValidSHA(s string) bool { return shaRe.MatchString(s) }
 
 // hasBadRefSeq flags the multi-character sequences git check-ref-format
 // forbids that refRe's alphabet alone cannot exclude.

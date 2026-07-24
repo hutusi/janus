@@ -375,9 +375,12 @@ func TestTriggerInvalidTargetLeavesNoWorkspace(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
-	// Invalid SHA: workspace.Checkout rejects it before creating a
-	// cleanup-capable Workspace, so the runner must remove the run-* dir it made.
-	ev := model.Event{Kind: model.EventManual, RepoURL: "/some/repo", SHA: "not-hex", Ref: "refs/heads/main"}
+	// Invalid ref: refs are format-checked inside workspace.Checkout (not at
+	// ingestion, which only length-caps them), so Checkout rejects it before
+	// creating a cleanup-capable Workspace and the runner must remove the run-*
+	// dir it made. A malformed SHA no longer reaches here — validateEvent rejects
+	// it up front (see TestTriggerRejectsMalformedSHA).
+	ev := model.Event{Kind: model.EventManual, RepoURL: "/some/repo", Ref: "-oops"}
 
 	res, err := r.Trigger(ev)
 	if err != nil {
@@ -543,6 +546,43 @@ func TestTriggerRejectsOversizedEventFields(t *testing.T) {
 	}
 	if runs, _ := st.ListRuns(0, 0); len(runs) != 0 {
 		t.Errorf("an oversized-field trigger must not record a run, got %d", len(runs))
+	}
+}
+
+// TestTriggerRejectsMalformedSHA pins the ingestion guard: the SHA reaches path
+// contexts downstream (a commit-status URL segment, a git argument, JANUS_SHA), and
+// url.JoinPath resolves "../" in a path element rather than escaping it, so a
+// non-hex value must never be recorded in the first place.
+func TestTriggerRejectsMalformedSHA(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	for _, sha := range []string{
+		"not-hex",
+		"../../evil/repo/statuses/deadbeef", // path traversal
+		"0123456789abcdef0123456789abcdef01234567/../x", // traversal after a valid prefix
+		"abc",                   // too short to be unambiguous
+		strings.Repeat("a", 65), // longer than any object id
+		"--upload-pack=/bin/sh", // git option injection
+	} {
+		if _, err := r.Trigger(model.Event{
+			Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: "main", SHA: sha,
+		}); err == nil {
+			t.Errorf("Trigger accepted malformed sha %q, want an error", sha)
+		}
+	}
+	if runs, _ := st.ListRuns(0, 0); len(runs) != 0 {
+		t.Errorf("a malformed sha must not record a run, got %d", len(runs))
+	}
+
+	// A full 40-hex SHA and an empty SHA (ref-only trigger) stay valid.
+	for _, sha := range []string{"", "0123456789abcdef0123456789abcdef01234567"} {
+		if _, err := r.Trigger(model.Event{
+			Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: "main", SHA: sha,
+		}); err != nil {
+			t.Errorf("Trigger rejected valid sha %q: %v", sha, err)
+		}
 	}
 }
 

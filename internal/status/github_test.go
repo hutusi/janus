@@ -165,11 +165,15 @@ func TestGitHubReportSkips(t *testing.T) {
 		mutate func(*model.Run)
 		ghURL  string // WithGitHub base; "" derives from RepoURL
 	}{
-		{"empty slug", func(r *model.Run) { r.Event.RepoSlug = "" }, "x"},
-		{"malformed slug", func(r *model.Run) { r.Event.RepoSlug = "noslash" }, "x"},
-		{"nested slug", func(r *model.Run) { r.Event.RepoSlug = "acme/app/extra" }, "x"},
-		{"traversal slug", func(r *model.Run) { r.Event.RepoSlug = "../evil" }, "x"},
+		// The repository is derived from RepoURL, so an undecidable URL skips.
+		{"repo url without owner", func(r *model.Run) { r.Event.RepoURL = "https://github.example.com/app.git" }, "x"},
+		{"repo url with extra segment", func(r *model.Run) { r.Event.RepoURL = "https://github.example.com/acme/app/extra.git" }, "x"},
+		{"repo url with traversal", func(r *model.Run) { r.Event.RepoURL = "https://github.example.com/acme/../evil.git" }, "x"},
+		// The SHA becomes a path segment, so anything but a full object id skips.
 		{"empty sha", func(r *model.Run) { r.Event.SHA = "" }, "x"},
+		{"abbreviated sha", func(r *model.Run) { r.Event.SHA = "deadbee" }, "x"},
+		{"traversal sha", func(r *model.Run) { r.Event.SHA = "../../evil/repo/statuses/deadbeef" }, "x"},
+		{"non-hex sha", func(r *model.Run) { r.Event.SHA = strings.Repeat("z", 40) }, "x"},
 		{"ssh repo, no github_url", func(r *model.Run) { r.Event.RepoURL = "git@github.com:acme/app.git" }, ""},
 	}
 	for _, tc := range tests {
@@ -191,6 +195,51 @@ func TestGitHubReportSkips(t *testing.T) {
 				t.Errorf("%s: posted, want no post", tc.name)
 			}
 		})
+	}
+}
+
+// TestGitHubReportIgnoresPayloadSlug is the security invariant: the status target
+// is derived from RepoURL — the string the allowlist gated — so a payload that
+// pairs an allowed clone URL with someone else's repository identity cannot steer
+// the token-bearing POST at that other repository.
+func TestGitHubReportIgnoresPayloadSlug(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	r := newGitHubReporter(t, ts.URL)
+
+	run := githubRun(model.StatusSuccess)
+	run.Event.RepoSlug = "evil-org/evil-repo" // forged; must be ignored
+	r.Report(run, model.StatusSuccess)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	if want := "/api/v3/repos/acme/app/statuses/" + testSHA; got.path != want {
+		t.Errorf("path = %q, want %q (derived from the allowlisted clone URL)", got.path, want)
+	}
+}
+
+// TestGitHubOwnerRepo covers the clone-URL forms a webhook can supply.
+func TestGitHubOwnerRepo(t *testing.T) {
+	tests := []struct {
+		url, owner, repo string
+		ok               bool
+	}{
+		{"https://github.com/acme/app.git", "acme", "app", true},
+		{"https://github.example.com/acme/app", "acme", "app", true},
+		{"ssh://git@github.com/acme/app.git", "acme", "app", true},
+		{"git@github.com:acme/app.git", "acme", "app", true},
+		{"https://user:tok@github.com/acme/app.git", "acme", "app", true}, // userinfo dropped
+		{"https://github.com/acme/app/extra.git", "", "", false},
+		{"https://github.com/app.git", "", "", false},
+		{"https://github.com/acme/../evil.git", "", "", false},
+		{"", "", "", false},
+	}
+	for _, tc := range tests {
+		owner, repo, ok := ownerRepo(tc.url)
+		if ok != tc.ok || owner != tc.owner || repo != tc.repo {
+			t.Errorf("ownerRepo(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.url, owner, repo, ok, tc.owner, tc.repo, tc.ok)
+		}
 	}
 }
 

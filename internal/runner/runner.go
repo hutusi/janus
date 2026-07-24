@@ -478,6 +478,15 @@ func validateEvent(ev model.Event) error {
 			return fmt.Errorf("%s is too long: %d bytes (max %d)", f.name, len(f.value), f.max)
 		}
 	}
+	// SHA is format-checked, not just length-capped: it is the one event field
+	// that is interpolated into paths downstream — a commit-status URL segment, a
+	// git argument, JANUS_SHA, ${{ sha }} — and url.JoinPath resolves "../" in a
+	// path element rather than escaping it. Requiring hex here (which also bounds
+	// its length) keeps a crafted value from ever reaching those sinks. Empty is
+	// valid: a ref-only trigger resolves its SHA during checkout.
+	if ev.SHA != "" && !workspace.ValidSHA(ev.SHA) {
+		return fmt.Errorf("sha is not a hex commit id (want 7-64 hex characters)")
+	}
 	// ProjectID only ever becomes digits in a status-API URL path; an int64 is
 	// already bounded, so a negative is the only nonsensical value to reject.
 	if ev.ProjectID < 0 {

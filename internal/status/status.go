@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -380,6 +381,57 @@ func clip(s string, max int) string {
 		return s
 	}
 	return string([]rune(s)[:max])
+}
+
+// fullOID reports whether s is a complete hex object id — 40 characters for
+// SHA-1, 64 for SHA-256. A commit status must name the exact commit, so an
+// abbreviated id is wrong on its own terms; requiring the full form also keeps an
+// untrusted value out of the request path, since url.JoinPath resolves "../" in a
+// path element instead of escaping it. Stricter than workspace's 7-64 rule, and
+// kept local so this package still depends only on model.
+func fullOID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// repoPathSegments splits a clone URL's path into its clean segments — the
+// repository's identity exactly as the allowlist saw it, which is what makes a
+// derived status destination trustworthy. It accepts the forms a webhook can
+// supply: https://host/a/b(.git), ssh://git@host/a/b(.git), and scp-style
+// git@host:a/b(.git). It returns nil when any segment would be unsafe as a single
+// path element, so a caller can never build a request path out of one.
+func repoPathSegments(repoURL string) []string {
+	p := strings.TrimSpace(repoURL)
+	if u, err := url.Parse(p); err == nil && u.Scheme != "" && strings.Contains(p, "://") {
+		p = u.Path // drops scheme, userinfo, host, and any query/fragment
+	} else if _, after, found := strings.Cut(p, ":"); found {
+		p = after // scp-style git@host:owner/repo.git
+	}
+	p = strings.TrimSuffix(strings.Trim(p, "/"), ".git")
+	if p == "" {
+		return nil
+	}
+	segs := strings.Split(p, "/")
+	for _, s := range segs {
+		if !cleanSegment(s) {
+			return nil
+		}
+	}
+	return segs
+}
+
+// cleanSegment reports whether s is safe as one path element of an API URL:
+// non-empty, not a "."/".." traversal, and free of embedded separators.
+func cleanSegment(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, `/\`)
 }
 
 // shard maps a key to a worker index. Same key -> same worker -> FIFO order.

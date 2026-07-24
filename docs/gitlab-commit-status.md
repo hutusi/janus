@@ -32,6 +32,15 @@ inbound `X-Gitlab-Token` Janus checks on incoming webhooks; `gitlab_api_token` i
 the outbound credential Janus sends (as a `PRIVATE-TOKEN` header) to GitLab. It is
 never logged.
 
+The project a status is posted to is **derived from the clone URL that
+`allow_repos` gated**, not taken from the payload's `project.id`: Janus sends the
+URL-encoded `NAMESPACE/PROJECT` path (which GitLab accepts wherever `:id` appears,
+e.g. `/api/v4/projects/acme%2Fapp/statuses/…`), so a forged delivery cannot pair an
+allowlisted clone URL with another project and have this token write there. Nested
+groups and an instance hosted on a subpath are handled. Scoping the token to just
+the projects it must write to — a *project* access token rather than a personal
+one — is still good practice.
+
 ## Instance URL
 
 The API base (`<base>/api/v4/…`) is resolved as:

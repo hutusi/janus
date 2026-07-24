@@ -120,8 +120,12 @@ base_url: "https://ci.example.com" # optional; adds a link to the run page
 ```
 
 The token is **distinct from `github_secret`** (the inbound webhook secret),
-sent as an `Authorization: Bearer` header and never logged. One status row per
-commit (context `janus`) updates through the run's lifecycle:
+sent as an `Authorization: Bearer` header and never logged. The repository the
+status is posted to is **derived from the clone URL that `allow_repos` gated**, not
+from the payload's `repository.full_name`, so a forged delivery cannot pair an
+allowlisted clone URL with another repository and have this token write there. The
+commit is likewise required to be a full object id. One status row per commit
+(context `janus`) updates through the run's lifecycle:
 
 | Run state | GitHub status |
 |-----------|---------------|
