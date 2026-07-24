@@ -43,6 +43,9 @@ existing file without `--force`); see the
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
 | `gitlab_api_token` | `--gitlab-api-token` (`$JANUS_GITLAB_API_TOKEN`) | _(empty)_ | Outbound GitLab API token (`api` scope) enabling [commit-status reporting](gitlab-commit-status.md). Distinct from `gitlab_secret`. |
 | `gitlab_url` | _(none)_ | _(empty)_ | GitLab instance base URL for commit status; derived from the clone URL for `clone_url: http`, required for `ssh`/self-hosted subpaths. File-only. |
+| `github_secret` | `--github-secret` (`$JANUS_GITHUB_SECRET`) | _(empty)_ | GitHub webhook secret (HMAC-SHA256). Enables `POST /webhooks/github`. |
+| `github_api_token` | `--github-api-token` (`$JANUS_GITHUB_API_TOKEN`) | _(empty)_ | Outbound GitHub token (`repo:status` scope) enabling [commit-status reporting](github-webhook-setup.md#reporting-status-back-to-github). Distinct from `github_secret`. |
+| `github_url` | _(none)_ | _(empty)_ | GitHub Enterprise Server web base for commit status (the `/api/v3` prefix is added); leave empty for github.com, set for GHES or github.com over `clone_url: ssh`. File-only. |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
 | `allow_repos` | `--allow-repos` (comma-separated) | _(empty)_ | Repositories permitted to run. See "Repository allowlist" below. |
 | `base_url` | _(none)_ | _(empty)_ | Public base URL of this daemon (e.g. `https://ci.example.com`). When set, notifications include a link to the run page (`<base_url>/runs/<id>`). File-only. |

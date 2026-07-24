@@ -203,4 +203,11 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
 
 Implement `provider.Provider` (`Name`, `Verify`, `Parse → *model.Event`) and
 register it with `server.WithProvider`. The rest of the system — matching,
-checkout, scheduling — is provider-agnostic. GitHub/Gitea would slot in here.
+checkout, scheduling — is provider-agnostic. `provider.GitLab` and
+`provider.GitHub` are the worked examples; Gitea would slot in the same way.
+
+Outbound **commit status** is a separate seam: `internal/status` holds one
+`Reporter` whose per-host `dialect` (endpoint, auth, state vocabulary, body)
+is selected by the run's provider — GitLab and GitHub today. A host with no
+status API simply has no dialect and is never reported (run feedback there
+goes through [notifications](notifications.md) instead).

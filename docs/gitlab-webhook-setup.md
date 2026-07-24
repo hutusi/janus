@@ -160,5 +160,6 @@ See [configuration.md](configuration.md#repository-allowlist) for matching rules
   the platform's external SSH domain/port setting rather than Janus.
 - **Same-repo merge requests:** the fallback ref fetch assumes the MR source
   branch exists in the project. Fork MRs are out of scope for v1.
-- GitHub/Gitea are not implemented — the `provider.Provider` interface is the
-  seam to add them.
+- **GitHub** is also supported — see
+  [github-webhook-setup.md](github-webhook-setup.md). Gitea is not implemented;
+  the `provider.Provider` interface is the seam to add it.

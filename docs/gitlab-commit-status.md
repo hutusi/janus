@@ -1,5 +1,8 @@
 # GitLab commit status
 
+> For **GitHub**, the equivalent is `github_api_token` — see
+> [github-webhook-setup.md › Reporting status back to GitHub](github-webhook-setup.md#reporting-status-back-to-github).
+
 Janus can report a run's state back to GitLab's [Commit Status API](https://docs.gitlab.com/ee/api/commits.html#set-the-pipeline-status-of-a-commit),
 so a build's progress and result show natively on the commit and merge request
 (the ✓/✗ next to the commit, and the MR's pipeline widget) — without leaving

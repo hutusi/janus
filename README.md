@@ -2,9 +2,9 @@
 
 **Janus** is a minimal, self-hosted CI/CD service in a single dependency-free
 binary. It runs CI pipelines **directly as host processes** (no containers, no
-VMs), triggered by **git-server webhooks** (GitLab push & merge request) or a
-**manual trigger**. Pipelines are a small, GitHub-Actions-flavored YAML stored
-in the repository at `.janus/ci.yml`.
+VMs), triggered by **git-server webhooks** (GitLab and GitHub push & merge/pull
+request) or a **manual trigger**. Pipelines are a small, GitHub-Actions-flavored
+YAML stored in the repository at `.janus/ci.yml`.
 
 > **Guiding rule: minimal beats complete.** The pipeline YAML describes *what
 > runs and in what order* — it is not a programming language. Anything beyond
@@ -128,20 +128,26 @@ curl -XPOST localhost:8080/api/trigger \
   -d '{"repo_url":"https://gitlab.com/acme/app.git","ref":"refs/heads/main","branch":"main","pipeline_path":"release.yml"}'
 ```
 
-### GitLab webhooks
+### Webhooks
 
-Run with a secret and persistent storage, then point a GitLab webhook at it:
+Run with a secret and persistent storage, then point a GitLab or GitHub webhook
+at it:
 
 ```sh
-janus serve --data-dir /var/lib/janus --gitlab-secret "$(openssl rand -hex 24)"
+janus serve --data-dir /var/lib/janus \
+  --gitlab-secret "$(openssl rand -hex 24)" \
+  --github-secret "$(openssl rand -hex 24)"
 ```
 
-Push and merge-request events trigger runs that are matched against each
-workflow's `on:` filters. Any number of repositories can share one server —
-each runs its own committed pipeline, and a hook URL's `?pipeline_path=`
-query parameter picks a different committed file (register multiple hooks to
-route to multiple pipelines). With `--data-dir`, run history and logs survive
-restarts. See [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md).
+Push and merge/pull-request events trigger runs that are matched against each
+workflow's `on:` filters (a GitHub pull request normalizes to the same
+`merge_request` event). Set one or both secrets to enable `/webhooks/gitlab`
+and `/webhooks/github`. Any number of repositories can share one server — each
+runs its own committed pipeline, and a hook URL's `?pipeline_path=` query
+parameter picks a different committed file. With `--data-dir`, run history and
+logs survive restarts. See
+[docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) and
+[docs/github-webhook-setup.md](docs/github-webhook-setup.md).
 
 ## Pipeline format (target)
 
@@ -177,6 +183,7 @@ Single Go binary, standard library throughout; the only third-party module is
 - [docs/notifications.md](docs/notifications.md) — outbound webhook notifications on run completion
 - [docs/gitlab-commit-status.md](docs/gitlab-commit-status.md) — report run status back to GitLab commits/MRs
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
+- [docs/github-webhook-setup.md](docs/github-webhook-setup.md) — wiring a GitHub webhook + commit status
 - [docs/deployment.md](docs/deployment.md) — run as a hardened systemd service on Linux
 - [examples/](examples/) — ready-to-copy sample pipelines (build, release)
 - [CHANGELOG.md](CHANGELOG.md) — notable changes
