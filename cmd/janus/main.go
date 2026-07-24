@@ -171,6 +171,7 @@ func runServe(args []string) error {
 	fs.String("github-secret", "", "GitHub webhook secret (overrides config/env; enables /webhooks/github)")
 	fs.String("github-api-token", "", "GitHub API token (repo:status) for commit-status reporting (overrides config/env)")
 	fs.String("gitee-secret", "", "Gitee webhook secret (overrides config/env; enables /webhooks/gitee)")
+	fs.String("gitcode-secret", "", "GitCode webhook secret (overrides config/env; enables /webhooks/gitcode)")
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
 	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
 	if err := fs.Parse(args); err != nil {
@@ -334,6 +335,10 @@ func runServe(args []string) error {
 	if cfg.GiteeSecret != "" {
 		opts = append(opts, server.WithProvider(provider.Gitee{SSH: ssh}, cfg.GiteeSecret))
 		logger.Info("gitee webhook enabled at /webhooks/gitee", "clone_url", cfg.CloneURL)
+	}
+	if cfg.GitCodeSecret != "" {
+		opts = append(opts, server.WithProvider(provider.GitCode{SSH: ssh}, cfg.GitCodeSecret))
+		logger.Info("gitcode webhook enabled at /webhooks/gitcode", "clone_url", cfg.CloneURL)
 	}
 	if cfg.APIToken != "" {
 		opts = append(opts, server.WithAPIToken(cfg.APIToken))

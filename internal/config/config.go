@@ -95,6 +95,10 @@ type Config struct {
 	// when set, /webhooks/gitee is enabled. Gitee has no commit-status API, so
 	// there is no outbound token — run feedback there goes through notifications.
 	GiteeSecret string `yaml:"gitee_secret"`
+	// GitCodeSecret is the inbound GitCode webhook secret (token or HMAC signature
+	// key); when set, /webhooks/gitcode is enabled. GitCode has no commit-status
+	// API, so there is no outbound token — feedback goes through notifications.
+	GitCodeSecret string `yaml:"gitcode_secret"`
 }
 
 // NotifyTarget is one endpoint under `notifications:` — the decoded wire form of
@@ -213,6 +217,9 @@ func (c *Config) OverlayEnv() {
 	if v, ok := os.LookupEnv("JANUS_GITEE_SECRET"); ok {
 		c.GiteeSecret = v
 	}
+	if v, ok := os.LookupEnv("JANUS_GITCODE_SECRET"); ok {
+		c.GitCodeSecret = v
+	}
 }
 
 // OverlayFlags applies the CLI flags that were explicitly set (per fs.Visit)
@@ -258,6 +265,8 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.GitHubAPIToken = g.Get().(string)
 		case "gitee-secret":
 			c.GiteeSecret = g.Get().(string)
+		case "gitcode-secret":
+			c.GitCodeSecret = g.Get().(string)
 		case "api-token":
 			c.APIToken = g.Get().(string)
 		case "allow-repos":

@@ -256,6 +256,7 @@ func TestOverlayEnv(t *testing.T) {
 	t.Setenv("JANUS_GITHUB_SECRET", "gh-secret-env")
 	t.Setenv("JANUS_GITHUB_API_TOKEN", "gh-tok-env")
 	t.Setenv("JANUS_GITEE_SECRET", "gitee-secret-env")
+	t.Setenv("JANUS_GITCODE_SECRET", "gitcode-secret-env")
 	cfg := Defaults()
 	cfg.GitLabSecret = "from-file"
 	cfg.GitHubSecret = "gh-from-file"
@@ -277,6 +278,9 @@ func TestOverlayEnv(t *testing.T) {
 	}
 	if cfg.GiteeSecret != "gitee-secret-env" {
 		t.Errorf("gitee secret = %q, want from env", cfg.GiteeSecret)
+	}
+	if cfg.GitCodeSecret != "gitcode-secret-env" {
+		t.Errorf("gitcode secret = %q, want from env", cfg.GitCodeSecret)
 	}
 }
 
