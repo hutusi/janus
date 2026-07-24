@@ -2,7 +2,10 @@
 // per-run directory, using the host's git. It does a shallow fetch (depth 1) so
 // only the triggering commit is pulled, then a detached checkout. With Reuse it
 // instead updates an existing checkout in place (fetch + hard reset), keeping
-// untracked files such as dependency and build caches. Private-repo
+// untracked files such as dependency and build caches. A third mode splits the
+// two concerns: SyncMirror keeps a per-repo bare mirror current (the only step
+// that touches the network), and Checkout with MirrorDir materializes a
+// pristine per-run workspace from that mirror at disk speed. Private-repo
 // authentication is the host git configuration's responsibility (SSH agent,
 // credential helper, .netrc); Janus does not manage credentials in v1. Git runs
 // non-interactively (terminal prompts disabled, ssh in batch mode), so missing
@@ -64,12 +67,13 @@ func hasBadRefSeq(ref string) bool {
 
 // Options configures a checkout.
 type Options struct {
-	Dir     string // target directory; created if absent
-	RepoURL string // clone URL (or local path)
-	SHA     string // commit to check out (preferred)
-	Ref     string // ref to fetch as a fallback when fetch-by-SHA is refused
-	Keep    bool   // if true, Cleanup is a no-op (debugging)
-	Reuse   bool   // reuse an existing checkout in Dir: fetch + hard-reset, keep untracked files
+	Dir       string // target directory; created if absent
+	RepoURL   string // clone URL (or local path)
+	SHA       string // commit to check out (preferred)
+	Ref       string // ref to fetch as a fallback when fetch-by-SHA is refused
+	Keep      bool   // if true, Cleanup is a no-op (debugging)
+	Reuse     bool   // reuse an existing checkout in Dir: fetch + hard-reset, keep untracked files
+	MirrorDir string // materialize from this local bare mirror (see SyncMirror) instead of fetching RepoURL; requires SHA, excludes Reuse
 }
 
 // Workspace is a checked-out repository on disk.
@@ -96,6 +100,18 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 	}
 	if err := validateTarget(opt.SHA, opt.Ref); err != nil {
 		return nil, err
+	}
+	if opt.MirrorDir != "" {
+		// The mirror path never falls through to a remote fetch here: the
+		// caller (runner) owns the fallback so a broken mirror can be retried
+		// with a plain direct checkout under a fresh deadline.
+		if opt.Reuse {
+			return nil, fmt.Errorf("workspace: MirrorDir and Reuse are mutually exclusive")
+		}
+		if opt.SHA == "" {
+			return nil, fmt.Errorf("workspace: MirrorDir requires a SHA (resolve the ref via SyncMirror first)")
+		}
+		return mirrorCheckout(ctx, opt)
 	}
 	if opt.Reuse {
 		if ws, err := reuseCheckout(ctx, opt); err == nil {
@@ -285,6 +301,218 @@ func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 		return nil, err
 	}
 	return ws, nil
+}
+
+// mirrorCheckout materializes opt.Dir from the local bare mirror at
+// opt.MirrorDir: a --local clone hardlinks the mirror's object store (git
+// degrades to plain copies across filesystems or on Windows), so no network
+// is involved and worktree files are written fresh — runs can never mutate
+// the mirror through shared inodes. --no-checkout skips materializing the
+// mirror's HEAD branch just to replace it with the detached checkout (and
+// tolerates a mirror whose HEAD ref doesn't match the remote's default
+// branch). origin is then re-pointed at the real remote so on-demand fetches
+// after the checkout (ChangedFiles' before commit) reach the remote, not the
+// mirror.
+//
+// The clone may run concurrently with another run's fetch into the mirror —
+// git documents --local as racy against source modification in general, but
+// this specific pairing is safe: every mirror file becomes visible only via
+// atomic rename (packs, indexes, loose objects, refs), so a hardlink can
+// never capture partial content; the objects this run needs were verified
+// present while the sync held the repo lock; and auto-maintenance is
+// disabled in the mirror (gc.auto=0, maintenance.auto=false — see
+// configureMirror), ruling out the repack/prune rewrites the warning is
+// really about. What remains is a rare
+// clone *error* (e.g. a --prune'd loose ref unlinked between readdir and
+// link), which the caller handles by retrying with a direct checkout.
+// Serializing clones against fetches was considered and rejected: it would
+// deny or delay the cache for busy repos to defend against a benign race.
+func mirrorCheckout(ctx context.Context, opt Options) (*Workspace, error) {
+	if err := os.MkdirAll(opt.Dir, 0o700); err != nil {
+		return nil, err
+	}
+	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep, env: gitEnv(os.Environ(), false, false)}
+	if err := ws.git(ctx, "clone", "-q", "--local", "--no-checkout", opt.MirrorDir, "."); err != nil {
+		_ = ws.Cleanup()
+		return nil, err
+	}
+	ws.env = gitEnv(os.Environ(),
+		gitConfigSet(ctx, ws.Dir, "core.sshCommand"),
+		gitConfigSet(ctx, ws.Dir, "core.askpass"))
+	for _, args := range [][]string{
+		{"remote", "set-url", "origin", opt.RepoURL},
+		{"checkout", "-q", "--detach", opt.SHA},
+	} {
+		if err := ws.git(ctx, args...); err != nil {
+			_ = ws.Cleanup()
+			return nil, err
+		}
+	}
+	if err := ws.verifyHEAD(ctx, opt.SHA); err != nil {
+		_ = ws.Cleanup()
+		return nil, err
+	}
+	return ws, nil
+}
+
+// SyncMirror ensures the bare mirror of repoURL at dir contains the requested
+// commit and returns the full SHA to materialize, fetching from the remote
+// only when the commit isn't already cached — the network cost of a busy repo
+// converges to one fetch per new commit, shared by every run. The mirror is
+// only ever an accelerator: callers treat any error as "mirror unavailable"
+// and fall back to a direct checkout, so a broken mirror can never fail a run
+// the direct path would have served.
+func SyncMirror(ctx context.Context, dir, repoURL, sha, ref string) (string, error) {
+	if repoURL == "" {
+		return "", fmt.Errorf("workspace: RepoURL is required")
+	}
+	if sha == "" && ref == "" {
+		return "", fmt.Errorf("workspace: a SHA or Ref is required")
+	}
+	if err := validateTarget(sha, ref); err != nil {
+		return "", err
+	}
+	m, err := ensureMirror(ctx, dir, repoURL)
+	if err != nil {
+		return "", err
+	}
+	return m.mirrorTarget(ctx, sha, ref)
+}
+
+// ensureMirror opens the bare mirror at dir, creating it if absent. A dir
+// that exists but that git itself rejects as a bare repository — garbage, or
+// debris from an interrupted creation — is rebuilt from scratch once (the
+// same self-heal contract as persistent workspaces), and the mirror's
+// required configuration is re-asserted on every call (see configureMirror).
+// Only git's own verdict triggers the rebuild: a probe that fails because
+// the context was cancelled or git couldn't run at all (resource or
+// permission trouble) says nothing about the repository, so it propagates as
+// an error — the caller falls back to a direct checkout for this run and the
+// cache survives. Fetch failures likewise deliberately do NOT rebuild:
+// they're usually the network's fault, and deleting a large healthy mirror
+// on a transient error would force a full re-clone on the same bad network.
+func ensureMirror(ctx context.Context, dir, repoURL string) (*Workspace, error) {
+	m := &Workspace{Dir: dir, keep: true, env: gitEnv(os.Environ(), false, false)}
+	healthy := false
+	if _, err := os.Stat(dir); err == nil {
+		switch bare, err := m.gitOut(ctx, "rev-parse", "--is-bare-repository"); {
+		case err == nil && bare == "true":
+			healthy = true
+		case err == nil:
+			// git answered, and the answer is "not a bare repository" —
+			// rebuild below.
+		case ctx.Err() != nil:
+			// Cancellation/deadline — checked before the ExitError test,
+			// because a deadline killing git mid-run also surfaces as one.
+			return nil, err
+		default:
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				// git never ran to a verdict (spawn or resource failure):
+				// unknown health is not corruption.
+				return nil, err
+			}
+			// git ran and rejected the directory — rebuild below.
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if !healthy {
+		if err := os.RemoveAll(dir); err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := m.git(ctx, "init", "-q", "--bare"); err != nil {
+			return nil, err
+		}
+	}
+	// Re-probe now that the repository exists, mirroring Checkout: local
+	// config and includeIf "gitdir:" rules resolve correctly.
+	m.env = gitEnv(os.Environ(),
+		gitConfigSet(ctx, dir, "core.sshCommand"),
+		gitConfigSet(ctx, dir, "core.askpass"))
+	if err := configureMirror(ctx, m, repoURL); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// configureMirror (re)asserts every setting the mirror's correctness rests
+// on, idempotently, on every sync:
+//
+//   - remote.origin.url — the configured clone_url may change over time;
+//     written as a config key (not `remote add`/`set-url`, which each fail
+//     depending on whether origin already exists), so a creation interrupted
+//     right after `init --bare` heals here instead of wedging every sync.
+//   - explicit heads+tags refspecs — deliberately not `clone --mirror`'s
+//     +refs/*:refs/*, which would also drag in hosting-side namespaces
+//     (GitLab's refs/merge-requests/*, refs/keep-around/*, ...) with
+//     unbounded growth. --replace-all then --add leaves exactly these two
+//     entries no matter what was there before.
+//   - gc.auto=0 AND maintenance.auto=false — git must never repack or prune
+//     behind a concurrent --local clone: existing packs staying immutable is
+//     what makes materializing without the repo lock safe (and keeps commits
+//     fetched by bare SHA alive despite being unreachable from any ref).
+//     Both knobs are needed: gc.auto=0 covers the default post-fetch gc task
+//     (and older gits that run `gc --auto` directly), but host config can
+//     route auto-maintenance to tasks that ignore gc.auto and rewrite object
+//     files (maintenance.strategy=incremental, loose-objects,
+//     incremental-repack — e.g. set globally by scalar), and modern git
+//     detaches maintenance into the background, outliving the repo lock.
+//     maintenance.auto=false stops the post-fetch hook entirely; scheduled
+//     `git maintenance start` jobs touch only registered repos, which the
+//     mirror never is. Repo-local config rather than fetch flags — flag
+//     spellings vary by git version and unknown flags error, while config
+//     keys are always accepted and cover every git invocation in the mirror.
+func configureMirror(ctx context.Context, m *Workspace, repoURL string) error {
+	for _, args := range [][]string{
+		{"config", "remote.origin.url", repoURL},
+		{"config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"},
+		{"config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"},
+		{"config", "gc.auto", "0"},
+		{"config", "maintenance.auto", "false"},
+	} {
+		if err := m.git(ctx, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mirrorTarget resolves the requested commit in the mirror, fetching only on
+// a cache miss, and returns its full SHA. A requested SHA must resolve to a
+// commit it prefixes (the verifyHEAD contract); it is fetched by refreshing
+// all branches and tags first — the way a new commit normally arrives, and
+// the only way when the server refuses fetch-by-SHA — then by bare SHA for
+// commits no longer reachable from any ref. Ref-only requests always fetch:
+// the tip is whatever the remote has now.
+func (w *Workspace) mirrorTarget(ctx context.Context, sha, ref string) (string, error) {
+	if sha != "" {
+		if w.git(ctx, "cat-file", "-e", sha+"^{commit}") != nil {
+			if err := w.git(ctx, "fetch", "-q", "--prune", "origin"); err != nil {
+				return "", err
+			}
+			if w.git(ctx, "cat-file", "-e", sha+"^{commit}") != nil {
+				if err := w.git(ctx, "fetch", "-q", "origin", sha); err != nil {
+					return "", err
+				}
+			}
+		}
+		head, err := w.gitOut(ctx, "rev-parse", "--verify", sha+"^{commit}")
+		if err != nil {
+			return "", err
+		}
+		if !strings.HasPrefix(head, strings.ToLower(sha)) {
+			return "", fmt.Errorf("workspace: mirror resolved %s, which the requested SHA %s does not identify", head, sha)
+		}
+		return head, nil
+	}
+	if err := w.git(ctx, "fetch", "-q", "--prune", "origin"); err != nil {
+		return "", err
+	}
+	return w.gitOut(ctx, "rev-parse", "--verify", ref+"^{commit}")
 }
 
 // Cleanup removes the workspace directory unless Keep was set.

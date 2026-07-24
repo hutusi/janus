@@ -86,9 +86,9 @@ func Defaults() Config {
 // instead of silently reverting to a default downstream.
 func (c Config) Validate() error {
 	switch c.WorkspaceStrategy {
-	case "", "fresh", "persistent": // "" = fresh
+	case "", "fresh", "persistent", "mirror": // "" = fresh
 	default:
-		return fmt.Errorf("workspace_strategy: %q is not valid (use \"fresh\" or \"persistent\")", c.WorkspaceStrategy)
+		return fmt.Errorf("workspace_strategy: %q is not valid (use \"fresh\", \"persistent\", or \"mirror\")", c.WorkspaceStrategy)
 	}
 	switch c.CloneURL {
 	case "", "http", "ssh": // "" = http

@@ -211,10 +211,13 @@ pipeline `cache:` key) · secrets beyond host env · a Windows service installer
 are provided). Node/Go/Python are assumed to be installed on the host.
 
 Repo checkouts, by contrast, *are* cached: every checkout is a shallow depth-1
-fetch (never a full clone), and `workspace_strategy: persistent` reuses one
+fetch (never a full clone); `workspace_strategy: persistent` reuses one
 workspace per repository with incremental fetches, keeping untracked build
-caches such as `node_modules` — see
-[persistent workspaces](docs/configuration.md#persistent-workspaces).
+caches such as `node_modules`; and `workspace_strategy: mirror` caches a bare
+mirror per repository and materializes a pristine workspace per run from it —
+incremental fetches *and* hermetic builds. See
+[persistent workspaces](docs/configuration.md#persistent-workspaces) and
+[mirror workspaces](docs/configuration.md#mirror-workspaces).
 
 ## Development
 

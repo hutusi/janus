@@ -38,7 +38,7 @@ existing file without `--force`); see the
 | `history_limit` | `--history-limit` | `1000` | Max terminal runs to retain. When exceeded, the oldest terminal runs — and their logs — are deleted after each run finishes and at startup; running/pending runs are never pruned. **The default is nonzero, so the first startup after upgrading prunes terminal runs beyond 1000 (and their logs).** Set `0` for unlimited retention; negatives are a startup error. This bounds the retained **run count** and the flat-file store's per-list scan (which reads every run directory) — it is **not** a disk-usage cap: a single runaway step log can still grow without limit, so bound total disk with OS quotas. |
 | `step_timeout` | `--step-timeout` | `0s` | Fail any step running longer than this (e.g. `"10m"`). `0` disables; negatives are a startup error. |
 | `keep_workspaces` | `--keep-workspaces` | `false` | Don't delete workspaces after runs (debugging). |
-| `workspace_strategy` | `--workspace-strategy` | `"fresh"` | `"fresh"`: a new directory per run, removed afterward. `"persistent"`: one reusable directory per repo — see [Persistent workspaces](#persistent-workspaces). Any other value is a startup error. |
+| `workspace_strategy` | `--workspace-strategy` | `"fresh"` | `"fresh"`: a new directory per run, removed afterward. `"persistent"`: one reusable directory per repo — see [Persistent workspaces](#persistent-workspaces). `"mirror"`: a per-repo bare-mirror cache plus a fresh directory per run — see [Mirror workspaces](#mirror-workspaces). Any other value is a startup error. |
 | `clone_url` | `--clone-url` | `"http"` | Which clone URL from the webhook payload to check out: `"http"` (the payload's `git_http_url`) or `"ssh"` (`git_ssh_url`). The chosen URL *is* the run's repo URL — it is what the allowlist gates, what the workspace clones, and what the run record shows — so switching to `"ssh"` means `allow_repos` entries must be written in SSH form too. See [SSH clone URLs](#ssh-clone-urls). Any other value is a startup error. |
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
@@ -188,6 +188,39 @@ What you trade and how it behaves:
 - `keep_workspaces` still governs only the fresh/fallback `run-*` directories.
 - A finished run's recorded `workspace_dir` points at a directory that later
   runs of the same repo will mutate.
+
+### Mirror workspaces
+
+`workspace_strategy: "mirror"` keeps a **bare mirror** of each repository at
+`<workspace_root>/mirror-<hash-of-repo-URL>` and gives every run a fresh
+`run-*` directory materialized from it — a local hardlink clone plus a
+detached checkout, no network involved. Only the mirror talks to the remote,
+and only when the triggering commit isn't already cached, so the network cost
+of a busy repo converges to one incremental fetch per new commit. Choosing
+between the caching strategies: `persistent` keeps untracked build caches warm
+(`node_modules`, incremental-compiler state) at the price of hermeticity;
+`mirror` keeps runs hermetic — every build starts from a pristine checkout —
+and caches only the git objects.
+
+How it behaves:
+
+- **The mirror is an accelerator, never a gate.** If another run of the same
+  repo is syncing the mirror (a per-repo try-lock, held only for the fetch),
+  or the sync or local clone fails for any reason, the run proceeds with a
+  plain direct-from-remote checkout — same-repo triggers never block, and a
+  broken mirror never fails a run the direct path could serve.
+- **Same-repo runs overlap freely.** Unlike `persistent`, materializing a
+  workspace takes no lock: concurrent runs of one repo all clone from the
+  same mirror.
+- **Dirs survive restarts** and the startup sweep, and grow over time —
+  mirrors accumulate every branch and tag ever fetched and are never
+  garbage-collected (`gc.auto` is off). Delete a repo's `mirror-*` directory
+  any time to reset it; the next run rebuilds it. Structural corruption (a
+  half-created or damaged mirror) also rebuilds automatically, while fetch
+  failures deliberately don't — a transient network error must not throw away
+  a large healthy cache.
+- `keep_workspaces` governs the materialized `run-*` checkouts as usual; it
+  never keeps or removes the mirror.
 
 ## `janus run [flags] <dir>` / `janus run --repo ...`
 

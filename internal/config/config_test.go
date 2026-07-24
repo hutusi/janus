@@ -163,6 +163,7 @@ func TestValidateWorkspaceStrategy(t *testing.T) {
 		{"", false},
 		{"fresh", false},
 		{"persistent", false},
+		{"mirror", false},
 		{"Persistent", true}, // case-sensitive, like every other enum value
 		{"incremental", true},
 	}

@@ -162,7 +162,7 @@ func runServe(args []string) error {
 	fs.Int("history-limit", def.HistoryLimit, "maximum terminal runs to retain; oldest (and their logs) are pruned (0 = unlimited)")
 	fs.Duration("step-timeout", time.Duration(def.StepTimeout), "fail any step that runs longer than this (0 = no timeout)")
 	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
-	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run) or "persistent" (one reusable dir per repo)`)
+	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run), "persistent" (one reusable dir per repo), or "mirror" (per-repo bare-mirror cache, fresh dir per run)`)
 	fs.String("clone-url", def.CloneURL, `which clone URL from the webhook payload to check out: "http" or "ssh"`)
 	fs.String("gitlab-secret", "", "GitLab webhook secret token (overrides config/env; enables /webhooks/gitlab)")
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
@@ -226,11 +226,14 @@ func runServe(args []string) error {
 		MaxRuns:      cfg.MaxParallelRuns,
 		HistoryLimit: cfg.HistoryLimit,
 		Allowlist:    allow,
-		Persistent:   cfg.WorkspaceStrategy == "persistent",
+		Strategy:     cfg.WorkspaceStrategy,
 		Logger:       logger,
 	})
-	if cfg.WorkspaceStrategy == "persistent" {
+	if cfg.WorkspaceStrategy == runner.StrategyPersistent {
 		logger.Info("persistent workspaces enabled; builds reuse per-repo directories (not hermetic)")
+	}
+	if cfg.WorkspaceStrategy == runner.StrategyMirror {
+		logger.Info("mirror workspaces enabled; per-repo bare mirrors cached under workspace_root, runs stay hermetic")
 	}
 	if err := rn.Sweep(); err != nil {
 		logger.Warn("workspace sweep failed", "err", err)

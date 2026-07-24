@@ -608,3 +608,400 @@ func TestChangedFilesBounds(t *testing.T) {
 		t.Error("an over-budget diff must error so the caller fails open")
 	}
 }
+
+func TestSyncMirrorCreatesAndResolves(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	mirror := filepath.Join(t.TempDir(), "mirror")
+
+	head, err := SyncMirror(context.Background(), mirror, src, sha[:12], "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror: %v", err)
+	}
+	if head != sha {
+		t.Errorf("resolved head = %s, want %s (abbreviation expanded)", head, sha)
+	}
+	for key, want := range map[string]string{"core.bare": "true", "gc.auto": "0", "maintenance.auto": "false"} {
+		out, err := exec.Command("git", "-C", mirror, "config", "--get", key).CombinedOutput()
+		if err != nil {
+			t.Fatalf("config %s: %v\n%s", key, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("mirror %s = %q, want %q", key, got, want)
+		}
+	}
+
+	// A cached commit resolves with zero network: remove the source repo and
+	// sync the same SHA again — any fetch attempt would fail loudly.
+	if err := os.RemoveAll(src); err != nil {
+		t.Fatal(err)
+	}
+	head2, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror with the source gone (cache hit): %v", err)
+	}
+	if head2 != sha {
+		t.Errorf("cached resolve = %s, want %s", head2, sha)
+	}
+}
+
+func TestSyncMirrorRefOnly(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	mirror := filepath.Join(t.TempDir(), "mirror")
+
+	head, err := SyncMirror(context.Background(), mirror, src, "", "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror: %v", err)
+	}
+	if head != sha {
+		t.Errorf("ref tip = %s, want %s", head, sha)
+	}
+
+	sha2 := commitFile(t, src, "a.txt", "one")
+	head2, err := SyncMirror(context.Background(), mirror, src, "", "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror after new commit: %v", err)
+	}
+	if head2 != sha2 {
+		t.Errorf("ref tip after incremental fetch = %s, want %s", head2, sha2)
+	}
+}
+
+func TestSyncMirrorForcePush(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha1 := initGitRepo(t)
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	if _, err := SyncMirror(context.Background(), mirror, src, sha1, "refs/heads/main"); err != nil {
+		t.Fatalf("first SyncMirror: %v", err)
+	}
+
+	// Rewrite history in the source (as a force-push would).
+	amend := exec.Command("git", "-C", src, "commit", "-q", "--amend", "-m", "rewritten")
+	if out, err := amend.CombinedOutput(); err != nil {
+		t.Fatalf("amend: %v\n%s", err, out)
+	}
+	out, err := exec.Command("git", "-C", src, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha2 := strings.TrimSpace(string(out))
+
+	head, err := SyncMirror(context.Background(), mirror, src, sha2, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror after rewrite: %v", err)
+	}
+	if head != sha2 {
+		t.Errorf("resolved head after rewrite = %s, want %s", head, sha2)
+	}
+}
+
+func TestSyncMirrorSelfHeals(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+
+	t.Run("garbage file at the mirror path", func(t *testing.T) {
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if err := os.WriteFile(mirror, []byte("junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		head, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror over garbage: %v", err)
+		}
+		if head != sha {
+			t.Errorf("head = %s, want %s", head, sha)
+		}
+	})
+
+	t.Run("directory that is not a repository", func(t *testing.T) {
+		mirror := t.TempDir()
+		head, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror over an empty dir: %v", err)
+		}
+		if head != sha {
+			t.Errorf("head = %s, want %s", head, sha)
+		}
+	})
+
+	t.Run("repository with HEAD removed", func(t *testing.T) {
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if _, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main"); err != nil {
+			t.Fatalf("first SyncMirror: %v", err)
+		}
+		if err := os.Remove(filepath.Join(mirror, "HEAD")); err != nil {
+			t.Fatal(err)
+		}
+		head, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror after corruption: %v", err)
+		}
+		if head != sha {
+			t.Errorf("head after rebuild = %s, want %s", head, sha)
+		}
+	})
+
+	t.Run("bare repo without origin", func(t *testing.T) {
+		// A creation interrupted right after `git init --bare` leaves a valid
+		// bare repo with no remote and no config — the bare-ness probe alone
+		// would accept it and then every sync would fail on the missing
+		// origin. The idempotent configuration must repair it in place.
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if err := os.MkdirAll(mirror, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("git", "-C", mirror, "init", "-q", "--bare").CombinedOutput(); err != nil {
+			t.Fatalf("init --bare: %v\n%s", err, out)
+		}
+		head, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror over half-initialized mirror: %v", err)
+		}
+		if head != sha {
+			t.Errorf("head = %s, want %s", head, sha)
+		}
+		out, err := exec.Command("git", "-C", mirror, "config", "--get", "gc.auto").CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "0" {
+			t.Errorf("gc.auto = %q (%v), want 0 — configuration not repaired", strings.TrimSpace(string(out)), err)
+		}
+	})
+
+	t.Run("bare repo missing refspecs", func(t *testing.T) {
+		// Partial config (url only, no refspecs, gc left enabled) must also
+		// converge to exactly the intended settings — including on repeated
+		// syncs, which must not duplicate refspec entries.
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if err := os.MkdirAll(mirror, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{
+			{"init", "-q", "--bare"},
+			{"config", "remote.origin.url", src},
+		} {
+			if out, err := exec.Command("git", append([]string{"-C", mirror}, args...)...).CombinedOutput(); err != nil {
+				t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+			}
+		}
+		for i := 0; i < 2; i++ {
+			if _, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main"); err != nil {
+				t.Fatalf("SyncMirror #%d: %v", i+1, err)
+			}
+		}
+		out, err := exec.Command("git", "-C", mirror, "config", "--get-all", "remote.origin.fetch").CombinedOutput()
+		if err != nil {
+			t.Fatalf("get-all remote.origin.fetch: %v\n%s", err, out)
+		}
+		want := "+refs/heads/*:refs/heads/*\n+refs/tags/*:refs/tags/*"
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("refspecs after two syncs = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("transient probe failure keeps the mirror", func(t *testing.T) {
+		// A cancelled context (shutdown, checkout deadline) failing the
+		// health probe says nothing about the repository — it must error
+		// without deleting the cache, unlike git's own corruption verdicts
+		// above.
+		mirror := filepath.Join(t.TempDir(), "mirror")
+		if _, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main"); err != nil {
+			t.Fatalf("first SyncMirror: %v", err)
+		}
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := SyncMirror(cancelled, mirror, src, sha, "refs/heads/main"); err == nil {
+			t.Error("SyncMirror with a cancelled context should fail")
+		}
+		out, err := exec.Command("git", "-C", mirror, "rev-parse", "--is-bare-repository").CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "true" {
+			t.Fatalf("mirror damaged by a transient probe failure: %q (%v)", strings.TrimSpace(string(out)), err)
+		}
+		head, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+		if err != nil {
+			t.Fatalf("SyncMirror after transient failure: %v", err)
+		}
+		if head != sha {
+			t.Errorf("head = %s, want %s", head, sha)
+		}
+	})
+}
+
+func TestSyncMirrorRejectsUnknownSHAAndInjection(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, _ := initGitRepo(t)
+
+	// An unknown SHA must error — never silently resolve the ref tip instead:
+	// the run's recorded SHA would not identify the executed commit.
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	if _, err := SyncMirror(context.Background(), mirror, src, strings.Repeat("a", 40), "refs/heads/main"); err == nil {
+		t.Error("SyncMirror resolved an unknown SHA")
+	}
+
+	// Option-shaped input is rejected before any git process runs: no mirror
+	// directory may appear.
+	dir := filepath.Join(t.TempDir(), "mirror")
+	if _, err := SyncMirror(context.Background(), dir, src, "", "--upload-pack=/bin/echo"); err == nil {
+		t.Error("SyncMirror accepted an option-shaped ref")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("mirror dir exists after a rejected target (stat err = %v)", err)
+	}
+}
+
+func TestCheckoutFromMirror(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	resolved, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror: %v", err)
+	}
+
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: resolved, MirrorDir: mirror,
+	})
+	if err != nil {
+		t.Fatalf("Checkout from mirror: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+
+	got, err := os.ReadFile(filepath.Join(ws.Dir, ".janus", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read checked-out pipeline: %v", err)
+	}
+	if string(got) != "name: ci\n" {
+		t.Errorf("checked-out file = %q, want \"name: ci\\n\"", got)
+	}
+	if ws.Head != resolved {
+		t.Errorf("ws.Head = %s, want %s", ws.Head, resolved)
+	}
+	out, err := exec.Command("git", "-C", ws.Dir, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse: %v\n%s", err, out)
+	}
+	if head := strings.TrimSpace(string(out)); head != resolved {
+		t.Errorf("HEAD = %s, want %s", head, resolved)
+	}
+	// origin points at the real remote, not the mirror, so on-demand fetches
+	// (ChangedFiles' before) bypass the cache.
+	out, err = exec.Command("git", "-C", ws.Dir, "remote", "get-url", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("get-url: %v\n%s", err, out)
+	}
+	if url := strings.TrimSpace(string(out)); url != src {
+		t.Errorf("origin URL = %q, want the real remote %q", url, src)
+	}
+}
+
+func TestCheckoutMirrorGuards(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ws")
+	if _, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: "r", SHA: "aaaaaaa", MirrorDir: "m", Reuse: true}); err == nil {
+		t.Error("Checkout accepted MirrorDir together with Reuse")
+	}
+	if _, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: "r", Ref: "main", MirrorDir: "m"}); err == nil {
+		t.Error("Checkout accepted MirrorDir without a SHA")
+	}
+}
+
+func TestCheckoutFromMirrorHermetic(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	resolved, err := SyncMirror(context.Background(), mirror, src, sha, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror: %v", err)
+	}
+
+	ws1, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws1"), RepoURL: src, SHA: resolved, MirrorDir: mirror,
+	})
+	if err != nil {
+		t.Fatalf("first Checkout: %v", err)
+	}
+	// A build dirties its workspace: mutate a tracked file, drop a cache dir.
+	if err := os.WriteFile(filepath.Join(ws1.Dir, ".janus", "ci.yml"), []byte("mutated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws1.Dir, "node_modules_marker"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ws2, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws2"), RepoURL: src, SHA: resolved, MirrorDir: mirror,
+	})
+	if err != nil {
+		t.Fatalf("second Checkout: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(ws2.Dir, ".janus", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "name: ci\n" {
+		t.Errorf("second workspace sees %q, want the pristine \"name: ci\\n\"", got)
+	}
+	if _, err := os.Stat(filepath.Join(ws2.Dir, "node_modules_marker")); !os.IsNotExist(err) {
+		t.Errorf("first run's untracked file leaked into the second workspace (stat err = %v)", err)
+	}
+	out, err := exec.Command("git", "-C", ws2.Dir, "status", "--porcelain").CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if s := strings.TrimSpace(string(out)); s != "" {
+		t.Errorf("second workspace is not clean:\n%s", s)
+	}
+	// The mirror survived the first run's mutations (packs shared via hard
+	// links are never written through; worktree files are fresh copies).
+	if _, err := SyncMirror(context.Background(), mirror, src, resolved, "refs/heads/main"); err != nil {
+		t.Errorf("mirror unhealthy after dirty run: %v", err)
+	}
+}
+
+func TestChangedFilesFromMirror(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha1 := initGitRepo(t)
+	sha2 := commitFile(t, src, "a.txt", "one")
+	mirror := filepath.Join(t.TempDir(), "mirror")
+	resolved, err := SyncMirror(context.Background(), mirror, src, sha2, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("SyncMirror: %v", err)
+	}
+	ws, err := Checkout(context.Background(), Options{
+		Dir: filepath.Join(t.TempDir(), "ws"), RepoURL: src, SHA: resolved, MirrorDir: mirror,
+	})
+	if err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	defer func() { _ = ws.Cleanup() }()
+
+	// The clone carries the mirror's history, so before is already present —
+	// note the source repo does NOT allow fetch-by-SHA (no
+	// uploadpack.allowReachableSHA1InWant), proving no fetch happened.
+	files, err := ws.ChangedFiles(context.Background(), sha1)
+	if err != nil {
+		t.Fatalf("ChangedFiles: %v", err)
+	}
+	if len(files) != 1 || files[0] != "a.txt" {
+		t.Errorf("changed files = %v, want [a.txt]", files)
+	}
+
+	// The fail-open contract is untouched: an unknown before still errors.
+	if _, err := ws.ChangedFiles(context.Background(), strings.Repeat("b", 40)); err == nil {
+		t.Error("ChangedFiles resolved an unknown before commit")
+	}
+}
