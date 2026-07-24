@@ -68,6 +68,7 @@ type Reporter struct {
 	// resolved into dialects by New. A provider with no dialect is simply not
 	// reported (Report no-ops for it).
 	glToken, glURLRaw string
+	ghToken, ghURLRaw string
 	dialects          map[string]dialect
 
 	// workers is a fixed pool of ordered FIFO channels; a post is routed to
@@ -119,6 +120,15 @@ func WithBaseURL(u string) Option { return func(r *Reporter) { r.baseRaw = u } }
 // instances on a subpath. Both validated by New.
 func WithGitLab(token, instanceURL string) Option {
 	return func(r *Reporter) { r.glToken, r.glURLRaw = token, instanceURL }
+}
+
+// WithGitHub enables GitHub commit-status reporting with an outbound API token
+// (a token with `repo:status`) and an optional GitHub Enterprise Server base URL
+// (e.g. https://github.example.com; leave empty for github.com). The base is the
+// GHES *web* host — the /api/v3 prefix is added by the dialect — symmetric with
+// WithGitLab. Both validated by New.
+func WithGitHub(token, instanceURL string) Option {
+	return func(r *Reporter) { r.ghToken, r.ghURLRaw = token, instanceURL }
 }
 
 // WithHTTPClient overrides the HTTP client (mainly for tests). Its own Timeout
@@ -175,6 +185,13 @@ func New(opts ...Option) (*Reporter, error) {
 			return nil, err
 		}
 		r.dialects["gitlab"] = d
+	}
+	if r.ghToken != "" || r.ghURLRaw != "" {
+		d, err := newGitHubDialect(r.ghToken, r.ghURLRaw, r.logger)
+		if err != nil {
+			return nil, err
+		}
+		r.dialects["github"] = d
 	}
 	if len(r.dialects) == 0 {
 		return nil, errors.New("no commit-status provider configured")
