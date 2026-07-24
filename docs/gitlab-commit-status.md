@@ -1,0 +1,84 @@
+# GitLab commit status
+
+Janus can report a run's state back to GitLab's [Commit Status API](https://docs.gitlab.com/ee/api/commits.html#set-the-pipeline-status-of-a-commit),
+so a build's progress and result show natively on the commit and merge request
+(the ✓/✗ next to the commit, and the MR's pipeline widget) — without leaving
+GitLab. It complements the generic [notifications](notifications.md) webhook:
+notifications push a summary *out* to chat/automation; commit status closes the
+loop *back* to GitLab.
+
+It is **GitLab-only** (it uses GitLab's API) and **daemon-only** (a webhook or
+manual trigger against the running server; local `janus run` never reports).
+
+## Enabling
+
+Set an outbound token — a [personal or project access token](https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html)
+with the **`api`** scope, from an account that can post statuses on the project:
+
+```yaml
+gitlab_secret: "…"                       # inbound webhook token (already required to accept GitLab webhooks)
+gitlab_api_token: "glpat-…"              # outbound API token; enables commit status
+base_url: "https://ci.example.com"       # optional; adds a link from the status to the run page
+# gitlab_url: "https://gitlab.example.com"  # see "Instance URL" below
+```
+
+Prefer the **`JANUS_GITLAB_API_TOKEN`** env var (or `--gitlab-api-token`) over the
+file. The API token is **distinct from `gitlab_secret`**: `gitlab_secret` is the
+inbound `X-Gitlab-Token` Janus checks on incoming webhooks; `gitlab_api_token` is
+the outbound credential Janus sends (as a `PRIVATE-TOKEN` header) to GitLab. It is
+never logged.
+
+## Instance URL
+
+The API base (`<base>/api/v4/…`) is resolved as:
+
+- **`clone_url: "http"` (default):** derived from the webhook's clone URL
+  (`https://gitlab.example.com/acme/app.git` → `https://gitlab.example.com`). No
+  extra config needed.
+- **`clone_url: "ssh"`, a self-hosted instance on a subpath, or to override:**
+  set **`gitlab_url`** to the instance base (e.g. `https://gitlab.example.com`).
+  An scp-style ssh clone URL (`git@host:acme/app.git`) has no derivable HTTPS
+  authority, so `gitlab_url` is **required** in ssh mode — without it, statuses
+  are skipped (with a startup warning).
+
+## What is reported
+
+One status row per commit (context **`janus`**), updated across the run:
+
+| Run state | GitLab state | Posted? |
+|-----------|--------------|---------|
+| running (execution starts) | `running` | yes |
+| success | `success` | yes |
+| failed | `failed` | yes |
+| cancelled | `canceled` | yes |
+| skipped (no `on:` match, path/branch filter, all jobs skipped) | — | **no** |
+| pending / queued | — | no |
+
+`running` is posted just before execution begins, then one terminal state when
+the run settles. **`skipped` is deliberately not reported** — a skipped run means
+the workflow didn't apply to this commit, so a green check (which would say CI
+*passed*) or a red one would both be wrong; the honest signal is no status. The
+status carries a `target_url` to the run page when `base_url` is set, and a
+`description` naming the workflow and outcome.
+
+> If you gate merges on a **required** "janus" status check, note that a
+> path/branch-skipped push posts nothing, so that check stays unfilled and the MR
+> can't merge. (Reporting `success` for skipped runs is a possible future opt-in;
+> today the default is not to post.)
+
+## Semantics
+
+- **Best-effort — never fails or blocks a run.** Each post runs on its own bounded
+  goroutine with a timeout; a slow, failing (`>= 300`), or unreachable GitLab is
+  logged and dropped. Posts are drained on shutdown.
+- **Single attempt, no retry.** A dropped post is not retried. Because `running`
+  is posted before the build and the terminal after it, a crash between them (or a
+  dropped terminal post) can leave the commit showing `running`; re-running or
+  re-pushing refreshes it.
+- **Only after durable persistence.** The terminal status is posted only once the
+  run's terminal state is recorded in the store, so GitLab never shows a result
+  the daemon didn't keep.
+- **Security.** The token travels as a `PRIVATE-TOKEN` header (never in a URL or a
+  log); redirects are not followed (so the token can't be forwarded across an
+  `https`→`http` downgrade); a clone URL's userinfo is dropped when deriving the
+  API base.

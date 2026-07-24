@@ -252,6 +252,7 @@ func TestNotificationsStrictDecoder(t *testing.T) {
 func TestOverlayEnv(t *testing.T) {
 	t.Setenv("JANUS_GITLAB_SECRET", "from-env")
 	t.Setenv("JANUS_API_TOKEN", "tok-env")
+	t.Setenv("JANUS_GITLAB_API_TOKEN", "api-tok-env")
 	cfg := Defaults()
 	cfg.GitLabSecret = "from-file"
 	cfg.OverlayEnv()
@@ -260,6 +261,23 @@ func TestOverlayEnv(t *testing.T) {
 	}
 	if cfg.APIToken != "tok-env" {
 		t.Errorf("api token = %q, want from env", cfg.APIToken)
+	}
+	if cfg.GitLabAPIToken != "api-tok-env" {
+		t.Errorf("gitlab api token = %q, want from env", cfg.GitLabAPIToken)
+	}
+}
+
+func TestGitLabStatusConfigDecode(t *testing.T) {
+	path := writeFile(t, "gitlab_api_token: \"glpat-xxx\"\ngitlab_url: \"https://gitlab.example.com\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GitLabAPIToken != "glpat-xxx" {
+		t.Errorf("gitlab_api_token = %q", cfg.GitLabAPIToken)
+	}
+	if cfg.GitLabURL != "https://gitlab.example.com" {
+		t.Errorf("gitlab_url = %q", cfg.GitLabURL)
 	}
 }
 

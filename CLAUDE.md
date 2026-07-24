@@ -34,6 +34,7 @@ Single binary (`cmd/janus`); all logic under `internal/`, depending inward on `i
 - [docs/pipeline-reference.md](docs/pipeline-reference.md) — supported YAML grammar + what's rejected and why
 - [docs/configuration.md](docs/configuration.md) — config file, precedence (defaults < file < env < flags), the repo allowlist
 - [docs/notifications.md](docs/notifications.md) — outbound webhook notifications on run completion (config in `janus.yml`, dispatched from the runner, `internal/notify`)
+- [docs/gitlab-commit-status.md](docs/gitlab-commit-status.md) — report run state to GitLab's commit-status API (config in `janus.yml`, `internal/status`, running+terminal posts from the runner)
 - [docs/gitlab-webhook-setup.md](docs/gitlab-webhook-setup.md) — wiring a GitLab webhook
 - [docs/deployment.md](docs/deployment.md) — Linux systemd deployment (`deploy/janus.service`, dedicated user, balanced sandbox)
 - `README.md` — overview, quickstart, security model

@@ -41,6 +41,8 @@ existing file without `--force`); see the
 | `workspace_strategy` | `--workspace-strategy` | `"fresh"` | `"fresh"`: a new directory per run, removed afterward. `"persistent"`: one reusable directory per repo — see [Persistent workspaces](#persistent-workspaces). `"mirror"`: a per-repo bare-mirror cache plus a fresh directory per run — see [Mirror workspaces](#mirror-workspaces). Any other value is a startup error. |
 | `clone_url` | `--clone-url` | `"http"` | Which clone URL from the webhook payload to check out: `"http"` (the payload's `git_http_url`) or `"ssh"` (`git_ssh_url`). The chosen URL *is* the run's repo URL — it is what the allowlist gates, what the workspace clones, and what the run record shows — so switching to `"ssh"` means `allow_repos` entries must be written in SSH form too. See [SSH clone URLs](#ssh-clone-urls). Any other value is a startup error. |
 | `gitlab_secret` | `--gitlab-secret` (`$JANUS_GITLAB_SECRET`) | _(empty)_ | GitLab webhook token. Enables `POST /webhooks/gitlab`. |
+| `gitlab_api_token` | `--gitlab-api-token` (`$JANUS_GITLAB_API_TOKEN`) | _(empty)_ | Outbound GitLab API token (`api` scope) enabling [commit-status reporting](gitlab-commit-status.md). Distinct from `gitlab_secret`. |
+| `gitlab_url` | _(none)_ | _(empty)_ | GitLab instance base URL for commit status; derived from the clone URL for `clone_url: http`, required for `ssh`/self-hosted subpaths. File-only. |
 | `api_token` | `--api-token` (`$JANUS_API_TOKEN`) | _(empty)_ | Bearer token for the API (see auth rules below). |
 | `allow_repos` | `--allow-repos` (comma-separated) | _(empty)_ | Repositories permitted to run. See "Repository allowlist" below. |
 | `base_url` | _(none)_ | _(empty)_ | Public base URL of this daemon (e.g. `https://ci.example.com`). When set, notifications include a link to the run page (`<base_url>/runs/<id>`). File-only. |
@@ -136,6 +138,17 @@ notifications:
 
 Notifications are **daemon-only**: local `janus run` executes directly and never
 notifies.
+
+### GitLab commit status
+
+Set `gitlab_api_token` (a GitLab access token, `api` scope) to report a run's
+state back to GitLab's commit-status API, so pass/fail shows on the commit/MR.
+`running` and the terminal state are posted (per-commit, context `janus`);
+`skipped`/`pending` are not. The API base is derived from the clone URL for
+`clone_url: http`; ssh mode and self-hosted subpaths need `gitlab_url`. Reuses
+`base_url` for a link back to the run page. Best-effort — never fails or blocks a
+run, and the token is sent as a `PRIVATE-TOKEN` header, never logged. See
+[GitLab commit status](gitlab-commit-status.md).
 
 ### SSH clone URLs
 

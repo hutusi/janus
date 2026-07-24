@@ -27,6 +27,13 @@ clone_url: "http"                   # which clone URL from the webhook payload t
 gitlab_secret: ""                   # enables POST /webhooks/gitlab when set
 api_token: ""                       # bearer token for /api/* ; POST /api/trigger requires it
 
+# GitLab commit-status reporting: report a run's state back to the commit/MR.
+# Set an API token (personal/project access token, "api" scope) to enable it.
+# Prefer the JANUS_GITLAB_API_TOKEN env var over the file.
+# gitlab_api_token: ""              # outbound token; distinct from gitlab_secret (the inbound webhook token)
+# gitlab_url: ""                    # GitLab base URL; derived from the clone URL for clone_url "http",
+                                    # required for "ssh" or a self-hosted subpath, e.g. "https://gitlab.example.com"
+
 # Repositories allowed to run. DENY BY DEFAULT: an empty/omitted list rejects
 # every webhook and manual trigger (403). Use a single "*" to allow all.
 # Entries are scheme-aware URL prefixes with a path boundary, so a host- or
