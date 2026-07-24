@@ -1,0 +1,33 @@
+{
+  "hook_name": "merge_request_hooks",
+  "action": "open",
+  "number": 1,
+  "title": "Add login form",
+  "state": "open",
+  "source_branch": "feature/login",
+  "target_branch": "main",
+  "pull_request": {
+    "number": 1,
+    "state": "open",
+    "merged": false,
+    "head": {
+      "ref": "feature/login",
+      "sha": "9b5f7c3a2e1d4b6a8c0f2e4d6b8a0c2e4f6a8b0c",
+      "repo": {
+        "full_name": "acme/app",
+        "path_with_namespace": "acme/app",
+        "clone_url": "https://gitee.com/acme/app.git",
+        "ssh_url": "git@gitee.com:acme/app.git"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "repo": { "full_name": "acme/app" }
+    }
+  },
+  "repository": {
+    "full_name": "acme/app",
+    "clone_url": "https://gitee.com/acme/app.git",
+    "ssh_url": "git@gitee.com:acme/app.git"
+  }
+}
