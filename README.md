@@ -135,10 +135,12 @@ with a secret for each provider you use (persistent storage optional but
 recommended), then point that provider's webhook at it:
 
 ```sh
+# Pass a secret only for the providers you use — any subset works.
 janus serve --data-dir /var/lib/janus \
   --gitlab-secret "$(openssl rand -hex 24)" \
-  --github-secret "$(openssl rand -hex 24)"
-  # and/or --gitee-secret / --gitcode-secret
+  --github-secret "$(openssl rand -hex 24)" \
+  --gitee-secret "$(openssl rand -hex 24)" \
+  --gitcode-secret "$(openssl rand -hex 24)"
 ```
 
 Setting a provider's secret enables its endpoint — `/webhooks/gitlab`,
