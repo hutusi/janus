@@ -25,6 +25,7 @@ type Engine struct {
 	store       store.Store
 	maxJobs     int
 	stepTimeout time.Duration // 0 = no per-step timeout
+	logLimit    int64         // max bytes one step may write to its log (0 = unlimited)
 	tee         io.Writer     // optional: mirror all step output here (the CLI uses os.Stdout)
 	logger      *slog.Logger
 
@@ -67,6 +68,18 @@ func WithStepTimeout(d time.Duration) Option {
 	}
 }
 
+// WithLogLimit caps how many bytes a single step may write to its log; past it
+// the log is truncated with a marker and the step runs on unaffected. 0 means
+// unlimited, so — unlike the other options — a zero value is honored rather
+// than ignored.
+func WithLogLimit(n int64) Option {
+	return func(e *Engine) {
+		if n >= 0 {
+			e.logLimit = n
+		}
+	}
+}
+
 // WithLogger sets the logger used for non-fatal diagnostics (e.g. persistence
 // errors during a run).
 func WithLogger(l *slog.Logger) Option {
@@ -79,7 +92,10 @@ func WithLogger(l *slog.Logger) Option {
 
 // New creates an Engine backed by st.
 func New(st store.Store, opts ...Option) *Engine {
-	e := &Engine{store: st, maxJobs: 4, logger: slog.Default()}
+	// A generous default cap: far above any real step's output, but it means an
+	// unattended daemon (and `janus run`, which buffers logs in memory) is bounded
+	// out of the box rather than only when an operator thinks to configure it.
+	e := &Engine{store: st, maxJobs: 4, logLimit: defaultLogLimit, logger: slog.Default()}
 	e.runJob = e.executeJob
 	for _, o := range opts {
 		o(e)
@@ -97,6 +113,8 @@ type runState struct {
 	event   model.Event
 	workDir string
 	store   store.Store
+
+	logLimit int64 // max bytes per step log (0 = unlimited)
 
 	tee    io.Writer
 	teeMu  *sync.Mutex // guards tee across parallel jobs
@@ -255,7 +273,7 @@ func (e *Engine) Run(ctx context.Context, wf *model.Workflow, ev model.Event, wo
 // fails on its own merits (failing steps) returns nil. Such a persist failure
 // also latches the engine Degraded().
 func (e *Engine) Execute(ctx context.Context, run *model.Run, wf *model.Workflow, workDir string) error {
-	rs := &runState{run: run, wf: wf, event: run.Event, workDir: workDir, store: e.store, tee: e.tee, logger: e.logger}
+	rs := &runState{run: run, wf: wf, event: run.Event, workDir: workDir, store: e.store, logLimit: e.logLimit, tee: e.tee, logger: e.logger}
 	if rs.tee != nil {
 		rs.teeMu = &sync.Mutex{}
 	}

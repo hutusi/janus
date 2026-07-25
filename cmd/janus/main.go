@@ -162,6 +162,7 @@ func runServe(args []string) error {
 	fs.Int("max-parallel-jobs", def.MaxParallelJobs, "maximum jobs to run concurrently within a run")
 	fs.Int("max-parallel-runs", def.MaxParallelRuns, "maximum runs to execute concurrently")
 	fs.Int("history-limit", def.HistoryLimit, "maximum terminal runs to retain; oldest (and their logs) are pruned (0 = unlimited)")
+	fs.Int64("log-limit", def.LogLimit, "maximum bytes a single step may write to its log; beyond it the log is truncated with a marker (0 = unlimited)")
 	fs.Duration("step-timeout", time.Duration(def.StepTimeout), "fail any step that runs longer than this (0 = no timeout)")
 	fs.Bool("keep-workspaces", def.KeepWorkspaces, "do not delete workspaces after runs (debugging)")
 	fs.String("workspace-strategy", def.WorkspaceStrategy, `workspace strategy: "fresh" (new dir per run), "persistent" (one reusable dir per repo), or "mirror" (per-repo bare-mirror cache, fresh dir per run)`)
@@ -277,6 +278,7 @@ func runServe(args []string) error {
 	eng := engine.New(st,
 		engine.WithMaxParallelJobs(cfg.MaxParallelJobs),
 		engine.WithStepTimeout(time.Duration(cfg.StepTimeout)),
+		engine.WithLogLimit(cfg.LogLimit),
 		engine.WithLogger(logger),
 	)
 	runnerOpts := runner.Options{

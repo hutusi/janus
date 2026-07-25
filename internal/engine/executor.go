@@ -315,7 +315,14 @@ func (rs *runState) stepWriter(job string, stepIndex int) (io.Writer, func() err
 	if err != nil {
 		return nil, nil, err
 	}
-	writers := []io.Writer{sink}
+	// Cap only what reaches the store — the tee (`janus run`'s terminal) keeps
+	// showing everything, since it is bounded by the operator's scrollback, not
+	// by disk or heap.
+	var stored io.Writer = sink
+	if rs.logLimit > 0 {
+		stored = newCappedWriter(sink, rs.logLimit, logTruncatedMarker)
+	}
+	writers := []io.Writer{stored}
 	closers := []io.Closer{sink}
 	if rs.tee != nil {
 		lp := newLinePrefixer(&lockedWriter{mu: rs.teeMu, w: rs.tee}, "["+job+"] ")
