@@ -418,6 +418,65 @@ func TestFileUnreadableRunDirIsListedAndPruned(t *testing.T) {
 	}
 }
 
+// A run that is merely unreadable *right now* — a permission change, a flaky
+// disk, the process out of descriptors — must never be treated as debris. The
+// placeholder is terminal, so Prune would delete the run and its logs; one
+// transient errno would silently destroy real history.
+func TestFileTransientlyUnreadableRunSurvives(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveRun(sampleRun("newer", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	// A perfectly good, finished run whose files just cannot be read at the
+	// moment — and old enough that the age gate alone would not save it.
+	victim := sampleRun("victim", time.Now().Add(-time.Hour))
+	victim.Status = model.StatusSuccess
+	if err := st.SaveRun(victim); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "runs", "victim")
+	for _, name := range []string{"run.json", "summary.json"} {
+		if err := os.Chmod(filepath.Join(dir, name), 0o000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, name := range []string{"run.json", "summary.json"} {
+			_ = os.Chmod(filepath.Join(dir, name), 0o600)
+		}
+	})
+	old := time.Now().Add(-2 * unreadableGrace)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// It is skipped (not listed as a placeholder)...
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sums {
+		if s.ID == "victim" {
+			t.Fatalf("a transiently unreadable run must not be listed as debris: %+v", s)
+		}
+	}
+	// ...and, crucially, retention must not delete it.
+	if _, err := st.Prune(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("a transiently unreadable run was destroyed by Prune: %v", err)
+	}
+}
+
 // writeRun creates a run's directory before it writes run.json, so a run being
 // recorded right now looks briefly unreadable. Treating that as debris would
 // let a concurrent Prune delete a live run out from under itself.
