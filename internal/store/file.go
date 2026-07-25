@@ -213,6 +213,10 @@ func (f *File) GetRun(id string) (*model.Run, error) {
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("run %q: %w", id, err)
 	}
+	// Identity comes from the path, never from the record — see readSummary.
+	// checkRunID above has already vetted id, so this also guarantees every
+	// caller gets an id that is safe to build a path from.
+	run.ID = id
 	return &run, nil
 }
 
@@ -247,6 +251,12 @@ func (f *File) readSummary(id string) (*model.RunSummary, error) {
 	if data, tooBig, err := readCapped(filepath.Join(f.runDir(id), "summary.json"), maxSummaryFileBytes); err == nil && !tooBig {
 		var s model.RunSummary
 		if err := json.Unmarshal(data, &s); err == nil {
+			// The directory a record was found in IS its identity — runDir(id)
+			// is what defines where a run lives — so the id field is only ever
+			// a copy, and a copy that disagrees is wrong by construction.
+			// Taking it from the file instead would hand a caller an id that
+			// does not resolve, and Prune builds a delete path out of this.
+			s.ID = id
 			return &s, nil
 		}
 	}
@@ -256,6 +266,7 @@ func (f *File) readSummary(id string) (*model.RunSummary, error) {
 		return nil, err
 	}
 	s := run.Summary()
+	s.ID = id
 	_ = writeSummary(f.runDir(id), s)
 	return s, nil
 }
@@ -399,6 +410,18 @@ func (f *File) Prune(keep int) (int, error) {
 		}
 		if kept < keep {
 			kept++
+			continue
+		}
+		// Never build a recursive delete out of an id that has not been vetted.
+		// readSummary now takes identity from the directory name, which
+		// allSummaries already validated, so this cannot fire — which is
+		// exactly why it belongs here. An empty id would make runDir resolve
+		// to the runs/ directory itself and take every run with it, and one
+		// containing "../" would climb out of the data directory entirely.
+		if err := checkRunID(s.ID); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		if err := os.RemoveAll(f.runDir(s.ID)); err != nil {

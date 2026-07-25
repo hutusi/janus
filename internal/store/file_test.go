@@ -95,6 +95,85 @@ func TestFilePruneKeepsNewestTerminal(t *testing.T) {
 	}
 }
 
+// A run's identity is its directory, never what its record claims. A sidecar
+// whose id disagrees used to steer Prune's recursive delete: an empty id makes
+// runDir resolve to runs/ itself and takes the whole store with it, and a "../"
+// id climbs out of the data directory. An operator copying a run directory to
+// poke at a build is enough to produce the mismatch.
+func TestFilePruneIgnoresRecordClaimedIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+	}{
+		{"empty id would delete the whole store", ""},
+		{"traversing id would escape the data dir", "../../escape"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			st, err := NewFile(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A healthy run that retention must keep, plus a canary outside
+			// runs/ that a traversing delete would reach.
+			if err := st.SaveRun(sampleRun("keeper", time.Now())); err != nil {
+				t.Fatal(err)
+			}
+			canary := filepath.Join(root, "canary")
+			if err := os.WriteFile(canary, []byte("keep me"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// An older run whose sidecar lies about which run it is.
+			victim := sampleRun("victim", time.Now().Add(-time.Hour))
+			if err := st.SaveRun(victim); err != nil {
+				t.Fatal(err)
+			}
+			lying, _ := json.Marshal(&model.RunSummary{
+				ID: tc.id, Status: model.StatusSuccess, CreatedAt: victim.CreatedAt,
+			})
+			if err := os.WriteFile(filepath.Join(root, "runs", "victim", "summary.json"), lying, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Listing reports it under the directory it actually lives in.
+			sums, err := st.ListRuns(0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, s := range sums {
+				ids = append(ids, s.ID)
+			}
+			if len(ids) != 2 || (ids[0] != "keeper" && ids[1] != "keeper") {
+				t.Fatalf("ListRuns ids = %v, want keeper and victim", ids)
+			}
+			for _, s := range sums {
+				if s.ID == "" || strings.Contains(s.ID, "..") {
+					t.Errorf("listing surfaced a record-claimed id %q", s.ID)
+				}
+			}
+
+			// Pruning removes exactly the victim's directory.
+			if _, err := st.Prune(1); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "runs")); err != nil {
+				t.Fatalf("the runs directory itself must survive: %v", err)
+			}
+			if _, err := st.GetRun("keeper"); err != nil {
+				t.Errorf("the healthy run must survive pruning: %v", err)
+			}
+			if _, err := os.Stat(canary); err != nil {
+				t.Errorf("pruning escaped the runs directory: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "runs", "victim")); !os.IsNotExist(err) {
+				t.Errorf("the victim should have been pruned, stat err = %v", err)
+			}
+		})
+	}
+}
+
 func TestFileStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	st, err := NewFile(dir)
