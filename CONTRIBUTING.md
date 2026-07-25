@@ -10,14 +10,19 @@
 ## Layout
 
 ```
-cmd/janus/        # CLI entrypoint (serve | run | validate)
+cmd/janus/        # CLI entrypoint (serve | init | run | validate)
 internal/         # all implementation packages (not importable externally)
   pipeline/       # YAML parse + strict validation + interpolation  (pure, no I/O)
   model/          # shared spec + runtime types
+  config/         # janus.yml + env + flag overlay and precedence
   engine/         # DAG, scheduler, executor
-  workspace/      # per-run git checkout
-  provider/       # webhook providers (GitLab) + normalized Event
+  workspace/      # per-run git checkout (fresh, persistent, or mirror)
+  provider/       # webhook providers (GitLab, GitHub, Gitee, GitCode) + normalized Event
+  allowlist/      # repo URL normalization + deny-by-default policy gate
+  runner/         # checkout -> parse -> match -> execute coordinator
   store/          # run/log persistence (memory + file)
+  notify/         # outbound run-completion webhooks
+  status/         # commit-status reporting (GitLab + GitHub dialects)
   server/         # HTTP API + read-only dashboard
 docs/             # deep-dive documentation
 testdata/         # YAML fixtures + captured webhook payloads

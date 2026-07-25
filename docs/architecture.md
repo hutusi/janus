@@ -7,19 +7,23 @@ module (`gopkg.in/yaml.v3`). It compiles to a static binary
 ## Package map
 
 ```
-cmd/janus            CLI: serve | run | validate; flag parsing, wiring, shutdown
+cmd/janus            CLI: serve | init | run | validate; flag parsing, wiring, shutdown
 internal/
   model              domain types: spec (Workflow/Trigger/Job/Step + Branch/PathFilter),
                      Event, ChangedFiles, runtime (Run/JobRun/StepRun)
+  config             janus.yml + env + flag overlay, precedence and validation
   pipeline           YAML parse + strict validation + interpolation   (pure, no I/O)
   engine             DAG build, scheduler, host-process executor
   workspace          per-run shallow git checkout + cleanup, in-place reuse, or
                      per-repo bare mirror + local per-run materialization;
                      ChangedFiles (fetch the push base at depth 1 + bounded tree diff)
-  provider           webhook providers (GitLab) -> normalized Event
+  provider           webhook providers (GitLab, GitHub, Gitee, GitCode) -> normalized Event
+  allowlist          repo URL normalization + deny-by-default policy gate
   runner             checkout -> parse -> match -> path-filter -> execute coordinator
   store              run/log persistence: Memory and File
-  server             HTTP API, webhook endpoint, read-only dashboard
+  notify             outbound run-completion webhooks            (best-effort, daemon-only)
+  status             commit-status reporting, per-provider dialect (best-effort, daemon-only)
+  server             HTTP API, webhook endpoints, read-only dashboard
 ```
 
 Dependencies point inward: everything may import `model`; `pipeline` and the DAG

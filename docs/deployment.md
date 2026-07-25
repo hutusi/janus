@@ -6,8 +6,10 @@ unprivileged user. It uses the ready-made unit in
 [`deploy/janus.env.example`](../deploy/janus.env.example).
 
 For *what* each setting does, see [configuration.md](configuration.md); for
-wiring a webhook, see [gitlab-webhook-setup.md](gitlab-webhook-setup.md). This
-page only covers turning those into a running service.
+wiring a webhook, see the setup guide for your provider — [GitLab](gitlab-webhook-setup.md),
+[GitHub](github-webhook-setup.md), [Gitee](gitee-webhook-setup.md), or
+[GitCode](gitcode-webhook-setup.md). This page only covers turning those into a
+running service.
 
 ## Prerequisites
 
@@ -44,7 +46,7 @@ is kept, never overwritten — so it is safe to re-run. Useful flags:
   restart, leaving the user, config and secrets untouched (see [step 8](#8-upgrading)).
 
 Run `./deploy/install.sh --help` for the full list. The script stops at a running
-service; **TLS (step 6) and the GitLab webhook (step 7) remain manual**. Prefer to
+service; **TLS (step 6) and the webhook (step 7) remain manual**. Prefer to
 understand or customise each step? Follow the manual walkthrough below instead.
 
 ### Offline / air-gapped install
@@ -110,12 +112,14 @@ data_dir: "/var/lib/janus"            # persistent run history
 workspace_root: "/var/lib/janus/workspaces"
 step_timeout: "30m"                   # fail a step that runs longer than this
 
-# Secrets come from /etc/janus/janus.env (JANUS_API_TOKEN, JANUS_GITLAB_SECRET).
+# Secrets come from /etc/janus/janus.env (JANUS_API_TOKEN, plus a JANUS_<PROVIDER>_SECRET
+# for each provider you use — see deploy/janus.env.example for the full list).
 
 # DENY BY DEFAULT: an empty list rejects every trigger (403). List the repos or
 # groups you trust, or "*" to allow all. See docs/configuration.md#repository-allowlist
 allow_repos:
-  - "https://gitlab.example.com/your-group"
+  - "https://gitlab.example.com/your-group"   # one entry per host/group you trust,
+  - "https://github.com/your-org"             # across whichever providers you enable
 ```
 
 The config holds no secrets, so make it readable by the janus user but not the
@@ -132,7 +136,7 @@ Then install the secrets file from the template, fill it in, and lock it down
 
 ```sh
 sudo install -m600 deploy/janus.env.example /etc/janus/janus.env
-sudo $EDITOR /etc/janus/janus.env          # set JANUS_API_TOKEN / JANUS_GITLAB_SECRET
+sudo $EDITOR /etc/janus/janus.env          # set JANUS_API_TOKEN + each provider secret
 ```
 
 Generate strong values with `openssl rand -hex 32` (API token) and
@@ -203,12 +207,23 @@ travel as plain HTTP. Note that re-running `install.sh --addr …` does **not**
 change an existing install — the installer never overwrites an existing config;
 edit the file.
 
-## 7. Connect a GitLab webhook
+## 7. Connect a webhook
 
-With the service reachable over HTTPS and `JANUS_GITLAB_SECRET` set, point a
-GitLab webhook at `https://ci.example.com/webhooks/gitlab`. Full steps —
-including which events to enable and the response codes — are in
-[gitlab-webhook-setup.md](gitlab-webhook-setup.md).
+Each provider gets its own endpoint, enabled only when its secret is set — an
+unconfigured provider answers `404`. With the service reachable over HTTPS,
+point the webhook at the matching path:
+
+| Provider | Secret | Endpoint | Setup guide |
+|---|---|---|---|
+| GitLab | `JANUS_GITLAB_SECRET` | `/webhooks/gitlab` | [gitlab-webhook-setup.md](gitlab-webhook-setup.md) |
+| GitHub | `JANUS_GITHUB_SECRET` | `/webhooks/github` | [github-webhook-setup.md](github-webhook-setup.md) |
+| Gitee | `JANUS_GITEE_SECRET` | `/webhooks/gitee` | [gitee-webhook-setup.md](gitee-webhook-setup.md) |
+| GitCode | `JANUS_GITCODE_SECRET` | `/webhooks/gitcode` | [gitcode-webhook-setup.md](gitcode-webhook-setup.md) |
+
+Each guide covers which events to enable and the response codes. Remember that
+`allow_repos` is deny-by-default: until it lists the repos or groups you trust,
+an otherwise-valid delivery is still rejected with `403`, whichever provider
+sent it.
 
 ## 8. Upgrading
 
