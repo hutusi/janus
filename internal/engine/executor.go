@@ -176,6 +176,17 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, job *model.Job, jr *
 
 // classify maps a command's run error to an exit code and status. A run-level
 // cancellation is Cancelled; a per-step timeout is a Failed step.
+//
+// The runCtx check must stay ahead of the ExitError check, and the order is not
+// an oversight: killing a step's process group makes its shell exit non-zero
+// too, so a cancelled step also arrives here carrying an *exec.ExitError.
+// Testing that first would label every step killed by a shutdown or a
+// cancel-in-progress supersede as Failed, painting a red build for work nobody
+// asked to finish. Distinguishing them by ProcessState.Exited() does not help
+// either: a killed process reports Exited() == true on Windows, so the
+// refinement would be wrong exactly where it could not be tested on Linux.
+// The cost is narrow and accepted — a step that genuinely exited non-zero in
+// the instant before the cancellation landed is recorded Cancelled.
 func classify(runCtx context.Context, timedOut bool, runErr error) (int, model.Status) {
 	if runErr == nil {
 		return 0, model.StatusSuccess

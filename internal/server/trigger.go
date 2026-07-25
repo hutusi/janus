@@ -78,6 +78,11 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		ev.Branch = strings.TrimPrefix(req.Ref, "refs/heads/")
 	}
 
+	if s.runner == nil {
+		s.logger.Error("trigger rejected: no runner configured")
+		writeError(w, http.StatusServiceUnavailable, "no runner configured")
+		return
+	}
 	res, err := s.runner.Trigger(ev)
 	if errors.Is(err, runner.ErrRepoNotAllowed) {
 		s.logger.Warn("trigger rejected: repo not allowed", "repo", model.RedactURL(ev.RepoURL))

@@ -157,9 +157,9 @@ func TestTriggerPersistentContentionFallsBackToFresh(t *testing.T) {
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyPersistent})
 
 	// Simulate a run of the same repo holding the persistent workspace.
-	mu := r.repoLock(repo)
+	mu, put := r.repoLock(repo)
 	mu.Lock()
-	defer mu.Unlock()
+	defer func() { mu.Unlock(); put() }()
 
 	res, err := r.Trigger(model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
 	if err != nil {
@@ -334,6 +334,49 @@ func TestReconcileSettlesUnreadableRecord(t *testing.T) {
 	// And the pass must converge: a second startup has nothing left to do.
 	if n, err := r.ReconcileInterrupted(); err != nil || n != 0 {
 		t.Errorf("second ReconcileInterrupted = %d, %v; want 0, nil", n, err)
+	}
+}
+
+// The repo-lock map used to keep every key it ever saw, so a long-lived daemon
+// accumulated one entry per distinct repo URL string forever.
+func TestRepoLockReleasedWhenIdle(t *testing.T) {
+	st := store.NewMemory()
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	for i := 0; i < 3; i++ {
+		// Same shape as the mirror path: try-lock, do the work, unlock, release.
+		mu, put := r.repoLock("https://git.example.com/g/p.git")
+		if !mu.TryLock() {
+			t.Fatalf("iteration %d: an idle repo lock should be free", i)
+		}
+		mu.Unlock()
+		put()
+	}
+	r.locksMu.Lock()
+	n := len(r.locks)
+	r.locksMu.Unlock()
+	if n != 0 {
+		t.Errorf("locks map holds %d idle entries, want 0", n)
+	}
+
+	// A second holder must keep the entry alive while it is still in use.
+	mu1, put1 := r.repoLock("repo")
+	_, put2 := r.repoLock("repo")
+	mu1.Lock()
+	put2()
+	r.locksMu.Lock()
+	n = len(r.locks)
+	r.locksMu.Unlock()
+	if n != 1 {
+		t.Errorf("entry dropped while still held: len(locks) = %d, want 1", n)
+	}
+	mu1.Unlock()
+	put1()
+	r.locksMu.Lock()
+	n = len(r.locks)
+	r.locksMu.Unlock()
+	if n != 0 {
+		t.Errorf("entry survived its last release: len(locks) = %d, want 0", n)
 	}
 }
 
@@ -1437,9 +1480,9 @@ func TestTriggerMirrorContentionFallsBackToFresh(t *testing.T) {
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyMirror})
 
 	// Simulate a sync of the same repo holding the mirror lock.
-	mu := r.repoLock(repo)
+	mu, put := r.repoLock(repo)
 	mu.Lock()
-	defer mu.Unlock()
+	defer func() { mu.Unlock(); put() }()
 
 	res, err := r.Trigger(model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
 	if err != nil {

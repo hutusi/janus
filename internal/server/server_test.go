@@ -96,6 +96,52 @@ func newTestServerAllow(t *testing.T, entries ...string) *httptest.Server {
 	return ts
 }
 
+// A Server can legitimately be built without a runner (several tests do), and
+// the cancel and health handlers already guard for it. The two trigger paths
+// dereferenced it, so a webhook or an API trigger panicked — recovered by
+// net/http per connection, leaving the client with a dropped connection and no
+// usable status instead of an answer.
+func TestNoRunnerConfiguredIsNotAPanic(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithProvider(provider.GitLab{}, testGitLabSecret),
+		WithAPIToken(testAPIToken),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	t.Run("webhook", func(t *testing.T) {
+		resp := gitlabPush(t, ts, "https://git.example.com/g/p.git", strings.Repeat("a", 40), "main", testGitLabSecret)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", resp.StatusCode)
+		}
+	})
+
+	t.Run("api trigger", func(t *testing.T) {
+		body := `{"repo_url":"https://git.example.com/g/p.git","ref":"refs/heads/main"}`
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/trigger", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testAPIToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", resp.StatusCode)
+		}
+		// A panic would yield no parseable body at all.
+		var got map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Errorf("response should be well-formed JSON: %v", err)
+		}
+	})
+}
+
 // saveFailStore rejects SaveRun, as a full/read-only data dir would.
 type saveFailStore struct {
 	store.Store
