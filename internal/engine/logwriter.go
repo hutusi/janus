@@ -89,6 +89,9 @@ const maxPrefixedLineBytes = 64 << 10
 // past maxPrefixedLineBytes is emitted in bounded chunks, each carrying the
 // prefix. Repeating the prefix mid-line is the deliberate trade: interleaved
 // output from parallel jobs stays attributable, and memory stays bounded.
+//
+// The buffer never exceeds maxPrefixedLineBytes, including part-way through a
+// single Write, however much that Write carries.
 type linePrefixer struct {
 	w      io.Writer
 	prefix []byte
@@ -99,35 +102,53 @@ func newLinePrefixer(w io.Writer, prefix string) *linePrefixer {
 	return &linePrefixer{w: w, prefix: []byte(prefix)}
 }
 
+// Write buffers b a bounded slice at a time. Consuming the input incrementally
+// — rather than appending all of it and trimming afterwards — is what makes the
+// bound a property of this writer instead of a property of how the caller
+// happens to chunk its writes: os/exec currently hands over at most a pipe
+// buffer at a time, but nothing here should depend on that.
+//
+// It always reports a full write with no error on success. os/exec fails a
+// command whose output copy short-writes, and bounding a log must never change
+// a step's exit code.
 func (p *linePrefixer) Write(b []byte) (int, error) {
-	p.buf = append(p.buf, b...)
-	for {
-		i := bytes.IndexByte(p.buf, '\n')
-		if i < 0 {
-			break
+	total := len(b)
+	for len(b) > 0 {
+		// Never take more than keeps the buffer inside its bound.
+		n := min(maxPrefixedLineBytes-len(p.buf), len(b))
+		p.buf = append(p.buf, b[:n]...)
+		b = b[n:]
+
+		for {
+			i := bytes.IndexByte(p.buf, '\n')
+			if i < 0 {
+				break
+			}
+			if err := p.emit(p.buf[:i+1]); err != nil {
+				return 0, err
+			}
+			p.buf = p.buf[i+1:]
 		}
-		line := make([]byte, 0, len(p.prefix)+i+1)
-		line = append(line, p.prefix...)
-		line = append(line, p.buf[:i+1]...)
-		if _, err := p.w.Write(line); err != nil {
-			return 0, err
+		// Full, with no newline to break it: emit a chunk rather than grow.
+		// This also guarantees room on the next pass, so the loop advances.
+		if len(p.buf) >= maxPrefixedLineBytes {
+			if err := p.emit(p.buf); err != nil {
+				return 0, err
+			}
+			p.buf = p.buf[:0]
 		}
-		p.buf = p.buf[i+1:]
 	}
-	// No newline in sight and the buffer has grown past its bound: emit what we
-	// have as a prefixed chunk rather than hold it. Write still reports a full
-	// write with no error — os/exec fails a command whose output copy
-	// short-writes, and bounding a log must never change a step's exit code.
-	for len(p.buf) >= maxPrefixedLineBytes {
-		chunk := make([]byte, 0, len(p.prefix)+maxPrefixedLineBytes)
-		chunk = append(chunk, p.prefix...)
-		chunk = append(chunk, p.buf[:maxPrefixedLineBytes]...)
-		if _, err := p.w.Write(chunk); err != nil {
-			return 0, err // matches the newline path above
-		}
-		p.buf = p.buf[maxPrefixedLineBytes:]
-	}
-	return len(b), nil
+	return total, nil
+}
+
+// emit writes one prefixed piece as a single Write, so a parallel job cannot
+// slip output between a prefix and its content.
+func (p *linePrefixer) emit(piece []byte) error {
+	out := make([]byte, 0, len(p.prefix)+len(piece))
+	out = append(out, p.prefix...)
+	out = append(out, piece...)
+	_, err := p.w.Write(out)
+	return err
 }
 
 // Close flushes any buffered final line (one without a trailing newline).

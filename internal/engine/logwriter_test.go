@@ -115,6 +115,53 @@ func TestLinePrefixerBoundsUnterminatedLines(t *testing.T) {
 	}
 }
 
+// bufProbe observes the prefixer's buffer at the moment it emits — i.e. at its
+// peak, just before it is drained — so the bound can be asserted from the
+// inside rather than inferred from the output.
+type bufProbe struct {
+	p       *linePrefixer
+	peak    int
+	written int
+}
+
+func (w *bufProbe) Write(b []byte) (int, error) {
+	if l := len(w.p.buf); l > w.peak {
+		w.peak = l
+	}
+	w.written += len(b)
+	return len(b), nil
+}
+
+// The bound must hold within a single Write, not merely across several. If the
+// input is appended wholesale and trimmed afterwards, one huge newline-free
+// write transiently allocates all of it — the bound would then be a property of
+// how the caller chunks its writes rather than of this writer.
+func TestLinePrefixerBoundsOneOversizedWrite(t *testing.T) {
+	probe := &bufProbe{}
+	p := newLinePrefixer(probe, "[build] ")
+	probe.p = p
+
+	// A single Write far larger than the bound, with no newline anywhere.
+	payload := bytes.Repeat([]byte("x"), 40*maxPrefixedLineBytes)
+	n, err := p.Write(payload)
+	if err != nil {
+		t.Fatalf("Write errored: %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("Write = %d, want %d (a short write would fail the step)", n, len(payload))
+	}
+	if probe.peak > maxPrefixedLineBytes {
+		t.Errorf("buffer peaked at %d bytes during one Write, want at most %d", probe.peak, maxPrefixedLineBytes)
+	}
+	if len(p.buf) > maxPrefixedLineBytes {
+		t.Errorf("buffer left at %d bytes, want at most %d", len(p.buf), maxPrefixedLineBytes)
+	}
+	// Everything was emitted, prefixes included, rather than hoarded.
+	if probe.written < len(payload) {
+		t.Errorf("emitted %d bytes, want at least the %d written", probe.written, len(payload))
+	}
+}
+
 // A newline-terminated stream must be unaffected by the bound.
 func TestLinePrefixerNormalLinesUnchanged(t *testing.T) {
 	var buf bytes.Buffer
