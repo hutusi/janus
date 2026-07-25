@@ -152,6 +152,33 @@ Run "janus <command> -h" for command-specific flags.
 // until interrupted. Settings come from defaults, an optional --config YAML
 // file, environment variables, and flags — in increasing order of precedence.
 func runServe(args []string) error {
+	c, err := buildServe(args, os.Stderr)
+	if err != nil {
+		return err
+	}
+	return serve(c)
+}
+
+// serveComponents is everything `janus serve` wires up, built but not yet
+// serving. Split out so the wiring — config precedence, which providers and
+// status reporters get registered, the startup warnings, and the startup
+// sweep/reconcile/prune — can be exercised without binding a listener or
+// installing signal handlers.
+type serveComponents struct {
+	cfg      config.Config
+	logger   *slog.Logger
+	store    store.Store
+	runner   *runner.Runner
+	notifier *notify.Notifier
+	reporter *status.Reporter
+	srv      *http.Server // handler and timeouts set; not listening
+}
+
+// buildServe parses args, resolves configuration, and constructs every
+// component `janus serve` needs. Diagnostics go to logw. It performs the
+// startup sweep, reconciliation, and prune, so the returned components are
+// ready to serve.
+func buildServe(args []string, logw io.Writer) (*serveComponents, error) {
 	def := config.Defaults()
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	configPath := fs.String("config", os.Getenv("JANUS_CONFIG"), "path to a YAML config file (default: ./janus.yml if present)")
@@ -176,7 +203,7 @@ func runServe(args []string) error {
 	fs.String("api-token", "", "bearer token for /api/* (overrides config/env)")
 	fs.String("allow-repos", "", "comma-separated allowed repo URL prefixes; '*' allows all (overrides config)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Precedence: defaults < config file < env < flags. With no --config, fall
@@ -184,22 +211,22 @@ func runServe(args []string) error {
 	cfgPath := config.Resolve(*configPath)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cfg.OverlayEnv()
 	cfg.OverlayFlags(fs)
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := slog.New(slog.NewTextHandler(logw, nil))
 	if cfgPath != "" {
 		logger.Info("loaded config", "path", cfgPath)
 	}
 
 	allow, err := allowlist.New(cfg.AllowRepos)
 	if err != nil {
-		return fmt.Errorf("allow_repos: %w", err)
+		return nil, fmt.Errorf("allow_repos: %w", err)
 	}
 	switch {
 	case len(allow) == 0:
@@ -214,7 +241,7 @@ func runServe(args []string) error {
 	if cfg.DataDir != "" {
 		fst, err := store.NewFile(cfg.DataDir)
 		if err != nil {
-			return fmt.Errorf("data-dir: %w", err)
+			return nil, fmt.Errorf("data-dir: %w", err)
 		}
 		st = fst
 	} else {
@@ -233,7 +260,7 @@ func runServe(args []string) error {
 		}
 		notifier, err = notify.New(targets, notify.WithBaseURL(cfg.BaseURL), notify.WithLogger(logger))
 		if err != nil {
-			return fmt.Errorf("notifications: %w", err)
+			return nil, fmt.Errorf("notifications: %w", err)
 		}
 		logger.Info("outbound notifications enabled", "targets", len(targets))
 	}
@@ -253,7 +280,7 @@ func runServe(args []string) error {
 		stOpts = append(stOpts, status.WithBaseURL(cfg.BaseURL), status.WithLogger(logger))
 		reporter, err = status.New(stOpts...)
 		if err != nil {
-			return fmt.Errorf("commit status: %w", err)
+			return nil, fmt.Errorf("commit status: %w", err)
 		}
 		if cfg.GitLabAPIToken != "" {
 			logger.Info("gitlab commit-status reporting enabled")
@@ -358,6 +385,23 @@ func runServe(args []string) error {
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+
+	return &serveComponents{
+		cfg:      cfg,
+		logger:   logger,
+		store:    st,
+		runner:   rn,
+		notifier: notifier,
+		reporter: reporter,
+		srv:      srv,
+	}, nil
+}
+
+// serve runs the built components until a signal arrives or the listener
+// fails, then drains in-flight work.
+func serve(c *serveComponents) error {
+	cfg, logger, rn, srv := c.cfg, c.logger, c.runner, c.srv
+	notifier, reporter := c.notifier, c.reporter
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
