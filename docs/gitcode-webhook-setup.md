@@ -57,7 +57,25 @@ and `clone_url: "http" | "ssh"` selects `git_http_url` vs `git_ssh_url`. The sam
 > source branch lives in a *fork* is not fetchable and the run fails checkout.
 > Same-repository merge requests — the common case — work.
 
-## 4. Response codes
+## 4. Restricting which repos can run
+
+Janus runs the triggered repo's pipeline as **host processes with no isolation**.
+Configure `allow_repos` so a leaked webhook secret can't be used to run an
+arbitrary repository:
+
+```yaml
+# janus.yml
+allow_repos:
+  - https://gitcode.com/acme        # only repos under the acme org
+```
+
+`allow_repos` is **deny-by-default**: with none set, every delivery is rejected
+with **403** — so a Janus that is otherwise configured correctly will still
+turn away every push until you set this. Use `"*"` to allow all. See
+[configuration.md](configuration.md#repository-allowlist) for matching rules,
+and note that `clone_url: ssh` requires the entries in SSH form.
+
+## 5. Response codes
 
 Identical to the other providers: `202` accepted, `200` ignored event, `403`
 repo not in the [allowlist](configuration.md#repository-allowlist), `503`

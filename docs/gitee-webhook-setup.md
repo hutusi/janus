@@ -55,7 +55,26 @@ branch. Gitee sends both GitHub-style (`clone_url`/`ssh_url`) and GitLab-style
 (`git_http_url`/`git_ssh_url`) clone URLs; Janus uses whichever the selected
 [`clone_url`](configuration.md#ssh-clone-urls) transport provides.
 
-## 4. Response codes
+## 4. Restricting which repos can run
+
+Janus runs the triggered repo's pipeline as **host processes with no isolation**.
+Configure `allow_repos` so a leaked webhook secret can't be used to run an
+arbitrary repository:
+
+```yaml
+# janus.yml
+allow_repos:
+  - https://gitee.com/acme          # only repos under the acme org
+```
+
+`allow_repos` is **deny-by-default**: with none set, every delivery is rejected
+with **403** — so a Janus that is otherwise configured correctly will still
+turn away every push until you set this. Use `"*"` to allow all. Confirm with
+Gitee's **Test** button after changing it. See
+[configuration.md](configuration.md#repository-allowlist) for matching rules,
+and note that `clone_url: ssh` requires the entries in SSH form.
+
+## 5. Response codes
 
 Identical to the other providers: `202` accepted, `200` ignored event, `403`
 repo not in the [allowlist](configuration.md#repository-allowlist), `503`
