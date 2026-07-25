@@ -70,7 +70,7 @@ func (f *File) writeRun(run *model.Run) error {
 	// sidecar. That ordering keeps a stale sidecar's lifecycle status <= the
 	// record's (pending->running->terminal is monotonic, terminal is final), so
 	// a lagging sidecar can never claim "terminal" for a still-running run.
-	if err := writeAtomic(dir, "run.json", data); err != nil {
+	if err := writeAtomic(dir, "run.json", data, run.Status.Terminal()); err != nil {
 		return err
 	}
 	// The sidecar is a listing cache; a write hiccup must not fail a valid
@@ -80,17 +80,29 @@ func (f *File) writeRun(run *model.Run) error {
 	return nil
 }
 
-// writeSummary writes the compact summary sidecar used by ListRuns/Prune.
+// writeSummary writes the compact summary sidecar used by ListRuns/Prune. It
+// is never synced: it is a listing cache, and readSummary rebuilds it from
+// run.json (the source of truth) whenever it is missing or unreadable.
 func writeSummary(dir string, s *model.RunSummary) error {
 	data, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, "summary.json", data)
+	return writeAtomic(dir, "summary.json", data, false)
 }
 
-// writeAtomic writes data to dir/name via a temp file + rename.
-func writeAtomic(dir, name string, data []byte) error {
+// writeAtomic writes data to dir/name via a temp file + rename. The rename
+// gives readers atomicity: they see the old file or the new one, never a
+// half-written mix.
+//
+// With sync, the write is additionally made durable — the data is flushed
+// before the rename and the parent directory afterwards, so the record
+// survives a power loss and not merely a process crash. Durability is not free
+// (each flush waits on the disk), and writeRun is called on every step and job
+// transition, so only terminal writes ask for it: those are the ones startup
+// reconciliation reads back, and a lost intermediate "running" state is
+// repaired by that same reconciliation.
+func writeAtomic(dir, name string, data []byte, sync bool) error {
 	tmp, err := os.CreateTemp(dir, "."+name+"-*")
 	if err != nil {
 		return err
@@ -101,11 +113,40 @@ func writeAtomic(dir, name string, data []byte) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	if sync {
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return err
+		}
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, filepath.Join(dir, name))
+	if err := os.Rename(tmpName, filepath.Join(dir, name)); err != nil {
+		// Every other failure path clears the temp file; this one used to leak
+		// it, leaving .run.json-* debris behind on a full or read-only mount.
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if sync {
+		syncDir(dir)
+	}
+	return nil
+}
+
+// syncDir flushes a directory entry so a completed rename survives a power
+// loss. Best-effort: opening or syncing a directory is not portable (Windows
+// refuses it), and the file's own contents are already durable by here, so a
+// failure must not fail an otherwise-complete write.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // maxRunFileBytes bounds both a run.json write and read symmetrically. Records

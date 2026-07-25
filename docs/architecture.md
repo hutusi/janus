@@ -115,6 +115,14 @@ trigger (webhook / manual API; the CLI has its own synchronous path)
   single trigger goroutine (`runner.runTrigger` populates it and records
   pre-execution outcomes directly), and stores snapshot on write, so no other
   goroutine can observe a partial mutation. Tests run under `-race`.
+- **The flat-file store is atomic always, durable at the end.** Every record is
+  written to a temp file and renamed into place, so a reader sees the old file
+  or the new one and never a half-written mix. **Terminal** writes additionally
+  flush the data and the parent directory before returning, because those are
+  what startup reconciliation reads back — an intermediate `running` state lost
+  to a power cut is repaired by that same reconciliation, so paying a disk flush
+  on every step transition would buy nothing. `summary.json` is never flushed at
+  all: it is a listing cache that `readSummary` rebuilds from `run.json`.
 - **Path filters fail open.** A `paths`/`paths-ignore` filter only ever skips
   work on a *successfully computed* changed-file set (`ChangedFiles.Known`).
   Every failure path — a new branch with no base, a base the server no longer

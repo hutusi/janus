@@ -340,6 +340,31 @@ func TestFileWriteRunRejectsOversized(t *testing.T) {
 	}
 }
 
+// A failed rename must not leave its temp file behind: every other error path
+// in writeAtomic clears it, and the debris accumulates in the run directory.
+func TestFileWriteAtomicCleansUpAfterFailedRename(t *testing.T) {
+	dir := t.TempDir()
+	// Renaming onto a non-empty directory fails on every supported platform.
+	blocker := filepath.Join(dir, "run.json")
+	if err := os.MkdirAll(filepath.Join(blocker, "occupied"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAtomic(dir, "run.json", []byte(`{}`), true); err == nil {
+		t.Fatal("writeAtomic onto a non-empty directory should fail")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".run.json-") {
+			t.Errorf("temp file %q leaked after a failed rename", e.Name())
+		}
+	}
+}
+
 func TestFileStoreMissingRun(t *testing.T) {
 	st, _ := NewFile(t.TempDir())
 	if _, err := st.GetRun("nope"); err == nil {
