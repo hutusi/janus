@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -133,10 +134,17 @@ func (s *Server) copyStep(w io.Writer, runID, job string, step int) {
 var (
 	maxFollowers      = 32
 	maxFollowDuration = 15 * time.Minute
+	// followWriteTimeout bounds a single write to a follower. Without it the
+	// other two bounds are unenforceable: a client that opens the stream and
+	// stops reading blocks the write on TCP backpressure, and since it never
+	// closes the connection the request context never cancels either — so the
+	// loop below (where both other bounds are checked) is never reached again
+	// and the slot is held forever.
+	followWriteTimeout = 30 * time.Second
 )
 
 // streamStep tails a single step's output until the step is terminal, the
-// client disconnects, or the follow duration is reached, polling the store.
+// client disconnects or stalls, or the follow duration is reached.
 func (s *Server) streamStep(w http.ResponseWriter, r *http.Request, runID, job string, step int) {
 	select {
 	case s.followers <- struct{}{}:
@@ -149,39 +157,62 @@ func (s *Server) streamStep(w http.ResponseWriter, r *http.Request, runID, job s
 		return
 	}
 
-	flusher, _ := w.(http.Flusher)
+	rc := http.NewResponseController(w)
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
-	// A disconnect cancels the request context, but a client that connects and
-	// then simply stops reading does not — it would hold its slot forever.
 	deadline := time.NewTimer(maxFollowDuration)
 	defer deadline.Stop()
+
+	// armWrite bounds the next write so a stalled reader cannot park this
+	// goroutine indefinitely. A ResponseWriter that cannot take a deadline
+	// (ErrNotSupported) leaves the stream exactly as it behaved before — the
+	// cap and duration bound still apply between writes.
+	armWrite := func() {
+		if err := rc.SetWriteDeadline(time.Now().Add(followWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			s.logger.Warn("setting log-stream write deadline failed", "run", runID, "err", err)
+		}
+	}
 
 	// Each tick reads only what appended since the last one — re-reading the
 	// whole log every 300ms would make following an O(n²) disk workload.
 	var offset int64
-	flush := func() {
-		rc, err := s.store.ReadLogs(runID, job, step, offset)
+	flush := func() error {
+		src, err := s.store.ReadLogs(runID, job, step, offset)
 		if err != nil {
 			s.logger.Warn("read logs failed", "run", runID, "job", job, "step", step, "err", err)
-			return
+			return nil // a read failure is not the client's fault; keep following
 		}
-		n, _ := io.Copy(w, rc)
-		_ = rc.Close()
+		armWrite()
+		n, copyErr := io.Copy(w, src)
+		_ = src.Close()
+		offset += n
+		if copyErr != nil {
+			return copyErr
+		}
 		if n > 0 {
-			offset += n
-			if flusher != nil {
-				flusher.Flush()
+			// Flush blocks on a stalled reader too, so it stays inside the
+			// deadline armed above.
+			if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				return err
 			}
 		}
+		return nil
+	}
+	stop := func(err error) {
+		s.logger.Warn("stopping log stream; writing to the client failed", "run", runID, "job", job, "step", step, "err", err)
 	}
 	lookupErrs := 0
 	for {
-		flush()
+		if err := flush(); err != nil {
+			stop(err)
+			return
+		}
 		run, err := s.store.GetRun(runID)
 		switch {
 		case err == nil && stepTerminal(run, job, step):
-			flush()
+			if err := flush(); err != nil {
+				stop(err)
+			}
 			return
 		case err != nil:
 			if lookupErrs++; lookupErrs >= 3 {
@@ -195,10 +226,11 @@ func (s *Server) streamStep(w http.ResponseWriter, r *http.Request, runID, job s
 		case <-r.Context().Done():
 			return
 		case <-deadline.C:
-			_, _ = fmt.Fprintf(w, "\njanus: log follow ended after %s; reconnect to continue\n", maxFollowDuration)
-			if flusher != nil {
-				flusher.Flush()
+			armWrite()
+			if _, err := fmt.Fprintf(w, "\njanus: log follow ended after %s; reconnect to continue\n", maxFollowDuration); err != nil {
+				return
 			}
+			_ = rc.Flush()
 			return
 		case <-ticker.C:
 		}

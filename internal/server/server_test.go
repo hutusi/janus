@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -151,6 +152,13 @@ func TestNoRunnerConfiguredIsNotAPanic(t *testing.T) {
 // followTestServer serves one run with a still-running step, so a ?follow=1
 // request stays inside streamStep instead of returning immediately.
 func followTestServer(t *testing.T) *httptest.Server {
+	return followTestServerLog(t, "hello\n")
+}
+
+// followTestServerLog is followTestServer with the step's log seeded to an
+// arbitrary body — used to make the log far larger than any socket buffer, so a
+// client that stops reading actually blocks the server's write.
+func followTestServerLog(t *testing.T, logBody string) *httptest.Server {
 	t.Helper()
 	st := store.NewMemory()
 	run := &model.Run{ID: "r1", Status: model.StatusRunning,
@@ -163,7 +171,7 @@ func followTestServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.WriteString(w, "hello\n"); err != nil {
+	if _, err := io.WriteString(w, logBody); err != nil {
 		t.Fatal(err)
 	}
 	_ = w.Close()
@@ -213,6 +221,55 @@ func TestLogFollowCapRejectsExcess(t *testing.T) {
 	}
 	if got := second.Header.Get("Retry-After"); got == "" {
 		t.Error("a 503 for saturation should carry Retry-After")
+	}
+}
+
+// A client that opens a stream and stops reading blocks the server's write on
+// TCP backpressure. It never closes the connection, so the request context
+// never cancels — and because the follower cap and the duration bound are both
+// only checked *between* writes, neither can reclaim the slot. Only a write
+// deadline can. Without one this test hangs until the package timeout.
+func TestLogFollowStalledClientReleasesSlot(t *testing.T) {
+	origW, origN := followWriteTimeout, maxFollowers
+	followWriteTimeout = 200 * time.Millisecond
+	maxFollowers = 1
+	t.Cleanup(func() { followWriteTimeout, maxFollowers = origW, origN })
+
+	// Far larger than any socket buffer, so the server cannot finish the write
+	// into the kernel and genuinely blocks on the stalled reader.
+	ts := followTestServerLog(t, strings.Repeat("x", 8<<20))
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	// Send the request and then never read the response.
+	if _, err := fmt.Fprintf(conn, "GET /api/runs/r1/logs?job=build&step=0&follow=1 HTTP/1.1\r\nHost: %s\r\n\r\n", addr); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stalled follower must give its slot back once its write deadline
+	// expires, so a well-behaved client can get in.
+	url := ts.URL + "/api/runs/r1/logs?job=build&step=0&follow=1"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		// The step never finishes, so a successful follow streams forever —
+		// check the status and hang up rather than draining the body.
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := resp.StatusCode
+		_ = resp.Body.Close()
+		if code != http.StatusServiceUnavailable {
+			return // the slot was released
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a stalled follower never released its slot; the write deadline is not bounding it")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
