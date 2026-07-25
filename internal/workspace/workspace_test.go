@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1238,4 +1239,90 @@ func TestMaintainMirrorKeepsResolvedSHA(t *testing.T) {
 		t.Fatalf("Checkout of the unreachable commit from the mirror: %v", err)
 	}
 	defer func() { _ = ws.Cleanup() }()
+}
+
+// Every git command this package spawns must carry a WaitDelay. Stdout/Stderr
+// are io.Writers, so os/exec hands the command a pipe and a copying goroutine,
+// and Wait blocks until every write end closes — including one held by a
+// descendant that outlived git: a third-party credential.helper, an askpass
+// helper, or an ssh wrapper that backgrounds something (see gitWaitDelay for
+// why git's own credential-cache daemon is not such a case). Without the bound
+// that blocks forever, which strands the run's admission slot and stops the
+// daemon from ever shutting down.
+//
+// Pinned as an invariant rather than exercised behaviourally: reproducing a
+// pipe-holding grandchild needs a PATH-shimmed fake git, which is a convention
+// this repo does not otherwise use. What actually prevents the regression is
+// that the field stays set.
+func TestGitCommandsCarryWaitDelay(t *testing.T) {
+	if gitWaitDelay <= 0 {
+		t.Fatalf("gitWaitDelay = %v, want a positive bound", gitWaitDelay)
+	}
+
+	t.Run("gitCmd", func(t *testing.T) {
+		w := &Workspace{Dir: t.TempDir()}
+		if got := w.gitCmd(context.Background(), "version").WaitDelay; got != gitWaitDelay {
+			t.Errorf("WaitDelay = %v, want %v", got, gitWaitDelay)
+		}
+	})
+
+	// gitConfigSet builds its command by hand instead of going through gitCmd,
+	// so it is the one that silently misses a fix applied only to the builder.
+	t.Run("gitConfigSet", func(t *testing.T) {
+		if got := gitConfigCmd(context.Background(), t.TempDir(), "core.sshCommand").WaitDelay; got != gitWaitDelay {
+			t.Errorf("WaitDelay = %v, want %v", got, gitWaitDelay)
+		}
+	})
+}
+
+// budgetWriter is what keeps ChangedFiles' diff read bounded and kills git when
+// it overflows, so its contract is worth pinning directly rather than only
+// through a git-backed test: accept up to max, refuse the write that would
+// cross it, never write partially, and cancel exactly once.
+func TestBudgetWriter(t *testing.T) {
+	t.Run("accepts up to max", func(t *testing.T) {
+		b := &budgetWriter{max: 8}
+		n, err := b.Write([]byte("12345678"))
+		if err != nil || n != 8 {
+			t.Fatalf("Write = %d, %v; want 8, nil", n, err)
+		}
+		if b.exceeded {
+			t.Error("exceeded set on an exactly-at-budget write")
+		}
+	})
+
+	t.Run("refuses the crossing write whole", func(t *testing.T) {
+		stops := 0
+		b := &budgetWriter{max: 4, stop: func() { stops++ }}
+		if _, err := b.Write([]byte("1234")); err != nil {
+			t.Fatal(err)
+		}
+		n, err := b.Write([]byte("5"))
+		if !errors.Is(err, errOverBudget) {
+			t.Errorf("err = %v, want errOverBudget", err)
+		}
+		if n != 0 {
+			t.Errorf("n = %d, want 0 — a partial write would truncate a filename", n)
+		}
+		if got := b.buf.String(); got != "1234" {
+			t.Errorf("buffered %q, want the pre-overflow bytes only", got)
+		}
+		if !b.exceeded {
+			t.Error("exceeded not set")
+		}
+		// Further writes keep refusing, and git is cancelled only once.
+		if _, err := b.Write([]byte("6")); !errors.Is(err, errOverBudget) {
+			t.Errorf("post-overflow err = %v, want errOverBudget", err)
+		}
+		if stops != 1 {
+			t.Errorf("stop called %d times, want exactly 1", stops)
+		}
+	})
+
+	t.Run("a zero budget refuses everything", func(t *testing.T) {
+		b := &budgetWriter{max: 0}
+		if _, err := b.Write([]byte("x")); !errors.Is(err, errOverBudget) {
+			t.Errorf("err = %v, want errOverBudget", err)
+		}
+	})
 }

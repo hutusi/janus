@@ -18,13 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 var (
@@ -256,36 +256,34 @@ func (w *Workspace) ChangedFiles(ctx context.Context, before string) ([]string, 
 	}
 	// -z: NUL separators and no quoting of unusual names; --no-renames: a
 	// rename is a change to both paths, and rename detection would cost time
-	// just to hide one of them from the filter. The output is read raw off a
-	// pipe under a byte budget — not through gitOut, whose whole-output
-	// buffering would be unbounded and whose TrimSpace would corrupt a
-	// filename that legitimately starts with whitespace.
+	// just to hide one of them from the filter. Collected under a byte budget
+	// and never through gitOut, whose whole-output buffering would be unbounded
+	// and whose TrimSpace would corrupt a filename that legitimately starts
+	// with whitespace.
+	//
+	// Deliberately cmd.Run with a bounded writer rather than StdoutPipe +
+	// ReadAll: a read off the pipe blocks *before* Wait is ever reached, so
+	// gitWaitDelay — which only applies during Wait — could not bound it, and a
+	// descendant holding the pipe open would hang the whole checkout. Letting
+	// os/exec own the copy puts that read back under the delay.
 	dctx, cancel := context.WithCancel(ctx)
-	defer cancel() // over-budget: kill git rather than drain an oversized diff
+	defer cancel()
 	cmd := w.gitCmd(dctx, "diff", "--name-only", "--no-renames", "-z", before, "HEAD")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	raw, err := io.ReadAll(io.LimitReader(stdout, maxChangedBytes+1))
-	if err != nil || int64(len(raw)) > maxChangedBytes {
-		cancel()
-		_ = cmd.Wait()
-		if err != nil {
-			return nil, fmt.Errorf("workspace: read diff %s..HEAD: %w", before, err)
-		}
+	out := &budgetWriter{max: maxChangedBytes, stop: cancel}
+	cmd.Stdout, cmd.Stderr = out, &stderr
+	err := cmd.Run()
+	// Checked before err, and deliberately not via errors.Is: Wait prefers the
+	// process's own error, and git dies of the broken pipe the refusal causes,
+	// so errOverBudget never reaches the caller. The flag is what carries it.
+	if out.exceeded {
 		return nil, fmt.Errorf("workspace: diff %s..HEAD exceeds %d bytes (max for path filtering)", before, maxChangedBytes)
 	}
-	if err := cmd.Wait(); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("git diff: %w\n%s", err, bytes.TrimSpace(stderr.Bytes()))
 	}
 	var files []string
-	for _, f := range bytes.Split(raw, []byte{0}) {
+	for _, f := range bytes.Split(out.buf.Bytes(), []byte{0}) {
 		if len(f) == 0 {
 			continue
 		}
@@ -397,6 +395,32 @@ func mirrorCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 		return nil, err
 	}
 	return ws, nil
+}
+
+// budgetWriter accumulates output up to max bytes and then refuses. Refusing
+// (rather than silently discarding) is load-bearing: os/exec stops its copy on
+// a writer error and closes the pipe, so git is killed by the broken pipe
+// instead of being drained — which is what the byte budget is for. It also
+// keeps the caller able to tell "too big" from "git failed", since a partial
+// list would let a path filter wrongly skip CI.
+type budgetWriter struct {
+	buf      bytes.Buffer
+	max      int64
+	stop     func() // cancels the command's context on the first refusal
+	exceeded bool
+}
+
+var errOverBudget = errors.New("workspace: diff exceeds the path-filter byte budget")
+
+func (b *budgetWriter) Write(p []byte) (int, error) {
+	if int64(b.buf.Len())+int64(len(p)) > b.max {
+		if !b.exceeded && b.stop != nil {
+			b.stop()
+		}
+		b.exceeded = true
+		return 0, errOverBudget
+	}
+	return b.buf.Write(p)
 }
 
 // SyncMirror ensures the bare mirror of repoURL at dir contains the requested
@@ -694,9 +718,45 @@ func envHasFold(base []string, name string, fold bool) bool {
 // also means an unrelated repository containing the daemon's working directory
 // can never suppress hardening.
 func gitConfigSet(ctx context.Context, dir, key string) bool {
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "config", "--get", key).Output()
+	out, err := gitConfigCmd(ctx, dir, key).Output()
 	return err == nil && len(strings.TrimSpace(string(out))) > 0
 }
+
+// gitConfigCmd builds the probe gitConfigSet runs. Split out because it is the
+// one git invocation in this package that does not go through gitCmd (there is
+// no Workspace to hang it off), so it has to repeat the WaitDelay explicitly —
+// and having it as a builder lets a test assert that it does.
+func gitConfigCmd(ctx context.Context, dir, key string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", "--get", key)
+	cmd.WaitDelay = gitWaitDelay
+	return cmd
+}
+
+// gitWaitDelay bounds how long Wait blocks draining git's output after the
+// process itself is done. Stdout/Stderr here are io.Writers, so os/exec gives
+// the command a pipe and a copying goroutine, and Wait joins that goroutine —
+// which does not finish until *every* write end of the pipe is closed, not just
+// git's. A descendant that inherits the pipe and outlives git therefore blocks
+// Wait indefinitely, and cancelling the context does not help: exec's default
+// cancel kills only the direct child.
+//
+// Who leaks such a descendant is an operator question, not a git one. Git's own
+// credential-cache daemon is *not* an example — it fcloses stdout and reopens
+// stderr on /dev/null before serving. The exposure is the configurations Janus
+// deliberately declines to override (see gitEnv): a third-party
+// credential.helper, a core.askpass/GIT_ASKPASS helper, or a
+// core.sshCommand/GIT_SSH_COMMAND wrapper that backgrounds something. None of
+// those are obliged to redirect their descriptors.
+//
+// Unlikely, then, but unbounded when it happens, and the cost is not a slow
+// checkout: a blocked Wait means the trigger never releases its admission slot,
+// so Shutdown's wait for in-flight work never returns and the service manager
+// eventually SIGKILLs, losing the notification drain and terminal-state
+// persistence.
+//
+// Matches the engine's bound for step processes (see executor.go), deliberately
+// the same number so there is one value to reason about.
+const gitWaitDelay = 2 * time.Second
 
 // gitCmd builds the git invocation for this workspace with the hardened env.
 func (w *Workspace) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
@@ -705,6 +765,7 @@ func (w *Workspace) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	if cmd.Env == nil {
 		cmd.Env = gitEnv(os.Environ(), false, false)
 	}
+	cmd.WaitDelay = gitWaitDelay
 	return cmd
 }
 
