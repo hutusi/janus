@@ -155,6 +155,39 @@ func TestCheckoutReuseUpdatesInPlace(t *testing.T) {
 	}
 }
 
+// A cancelled reuse checkout must leave the persistent workspace alone: the
+// self-heal rebuild would delete exactly the untracked caches the strategy
+// exists to keep, and a cancelled fetch is no evidence the directory is broken.
+func TestCheckoutReuseCancelledKeepsDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	dir := filepath.Join(t.TempDir(), "ws")
+
+	ws, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: src, SHA: sha, Ref: "refs/heads/main", Keep: true, Reuse: true})
+	if err != nil {
+		t.Fatalf("first Checkout: %v", err)
+	}
+	marker := filepath.Join(ws.Dir, "node_modules_marker")
+	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Checkout(ctx, Options{Dir: dir, RepoURL: src, SHA: sha, Ref: "refs/heads/main", Keep: true, Reuse: true}); err == nil {
+		t.Fatal("Checkout with a cancelled context should fail")
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("cancelled reuse must not wipe the workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Errorf("cancelled reuse must not remove the git dir: %v", err)
+	}
+}
+
 func TestCheckoutReuseForcePush(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

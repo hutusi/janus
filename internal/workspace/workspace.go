@@ -121,10 +121,19 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 		return mirrorCheckout(ctx, opt)
 	}
 	if opt.Reuse {
-		if ws, err := reuseCheckout(ctx, opt); err == nil {
+		ws, err := reuseCheckout(ctx, opt)
+		if err == nil {
 			return ws, nil
 		}
-		// Self-heal: any reuse failure (missing/corrupt .git, stale lock
+		// A reuse failure caused by cancellation or a deadline says nothing
+		// about the directory's health — the same reasoning ensureMirror
+		// applies to its own probe. Rebuilding here would delete the untracked
+		// build caches this strategy exists to keep, and every git command
+		// below would fail against the same dead context anyway.
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// Self-heal: any other reuse failure (missing/corrupt .git, stale lock
 		// files, unreachable commit) rebuilds the directory from scratch.
 		if err := os.RemoveAll(opt.Dir); err != nil {
 			return nil, err
