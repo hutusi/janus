@@ -146,6 +146,92 @@ func TestTriggerPersistentUsesRepoDir(t *testing.T) {
 	}
 }
 
+// A persistent workspace that cannot be updated for a reason that is not the
+// directory's fault must never fail the run: the cache is an accelerator, not a
+// gate. The run falls back to a fresh per-run clone, the persistent directory
+// and its untracked caches survive, and it is reused again once it works.
+func TestTriggerPersistentCheckoutFailureFallsBackToFresh(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyPersistent})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// Prime the persistent workspace, then leave an untracked cache in it.
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("priming Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("priming run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	persist := filepath.Join(root, persistDirName(repo))
+	if run.WorkspaceDir != persist {
+		t.Fatalf("priming run dir = %q, want the persistent dir %q", run.WorkspaceDir, persist)
+	}
+	marker := filepath.Join(persist, "node_modules_marker")
+	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The repo unlock runs in the trigger's defers, which finish just before
+	// the admission slot is released — so waiting for a free slot keeps the
+	// next trigger off the *contention* fallback rather than the one under test.
+	waitSlotsFree(t, r, 5*time.Second)
+
+	// Break the in-place update without touching the repository's structure. A
+	// stale index.lock is what a killed git leaves behind: `remote set-url` and
+	// the fetch still succeed, but `reset --hard` fails — so Checkout reports a
+	// non-structural error and must not rebuild the directory.
+	lock := filepath.Join(persist, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res2, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	run2 := waitRun(t, st, res2.RunID, 15*time.Second)
+	if run2.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success via a fresh per-run clone", run2.Status, run2.Reason)
+	}
+	if base := filepath.Base(run2.WorkspaceDir); !strings.HasPrefix(base, "run-") {
+		t.Errorf("workspace dir = %q, want a fresh run-* dir", run2.WorkspaceDir)
+	}
+	// The fallback dir is an ordinary per-run workspace, so it is cleaned up.
+	waitGone(t, run2.WorkspaceDir, 5*time.Second)
+	if _, err := os.Stat(filepath.Join(persist, ".git")); err != nil {
+		t.Errorf("persistent workspace must survive a non-structural failure: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("untracked cache must survive a non-structural failure: %v", err)
+	}
+
+	// The repo lock was released, not leaked: once the directory works again
+	// the next run reuses it. (A leak would wedge the repo onto the fresh path
+	// forever; a double release would have panicked the daemon.)
+	waitSlotsFree(t, r, 5*time.Second)
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	res3, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("third Trigger: %v", err)
+	}
+	run3 := waitRun(t, st, res3.RunID, 15*time.Second)
+	if run3.Status != model.StatusSuccess {
+		t.Fatalf("third run status = %s (%s), want success", run3.Status, run3.Reason)
+	}
+	if run3.WorkspaceDir != persist {
+		t.Errorf("third run dir = %q, want the persistent dir %q reused again", run3.WorkspaceDir, persist)
+	}
+}
+
 func TestTriggerPersistentContentionFallsBackToFresh(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

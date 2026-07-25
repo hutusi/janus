@@ -234,10 +234,12 @@ What you trade and how it behaves:
   Delete the repo's `persist-*` directory any time to force a clean rebuild —
   the next run recreates it. (A directory that is no longer a usable git
   repository — a missing or corrupt `.git` — rebuilds itself automatically, at
-  the cost of one cold build. Nothing else does: a run cancelled mid-update, a
-  fetch that cannot reach the remote, or a commit that is not there leaves the
-  directory intact and falls back to a fresh per-run clone for that run, so a
-  shutdown or a network blip never costs the next run its caches.)
+  the cost of one cold build. Nothing else does. A fetch that cannot reach the
+  remote, or a commit that is not there, leaves the directory intact and the
+  run **falls back to a fresh per-run clone**, so a network blip costs a cold
+  build rather than a failed one. A run cancelled mid-update — a shutdown, a
+  cancel — also leaves it intact and simply ends, since there is no longer a
+  run to fall back for. Either way the next run keeps its caches.)
 - **Same-repo runs are serialized.** A trigger that arrives while another run
   of the same repo is building falls back to a fresh per-run directory for
   that one run — correct, just without the caches. Different repos are

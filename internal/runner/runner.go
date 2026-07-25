@@ -777,6 +777,43 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		ws, err = workspace.Checkout(cctx, opt)
 		cancel()
 	}
+	if err != nil && reuse && runCtx.Err() == nil {
+		// The persistent workspace could not be updated — a failed fetch, a
+		// commit that is not there. Checkout only rebuilds a directory git
+		// itself rejects, so this one is intact and deliberately left alone;
+		// retry the run in a fresh per-run directory instead of failing it.
+		// The persistent workspace is an accelerator, never a gate — the same
+		// contract the mirror above already honours. (Mutually exclusive with
+		// that retry: a mirror run never sets reuse.)
+		// Allocate the replacement BEFORE mutating anything. reuse and wsDir
+		// must move together: with reuse=false still pointing at the persistent
+		// directory, the error path below would RemoveAll it — reintroducing
+		// exactly the cache destruction this fallback exists to prevent.
+		fresh, mkErr := os.MkdirTemp(r.wsRoot, "run-*")
+		if mkErr != nil {
+			// Nowhere to fall back to. Leave every variable untouched so the
+			// error path keeps the persistent workspace and reports the
+			// original checkout failure rather than this one.
+			r.logger.Warn("persistent workspace fallback could not create a run workspace", "repo", model.RedactURL(ev.RepoURL), "err", mkErr)
+		} else {
+			r.logger.Warn("persistent workspace checkout failed; retrying with a fresh clone", "repo", model.RedactURL(ev.RepoURL), "err", model.RedactURL(err.Error()))
+			// Nothing touches the persistent directory from here on, so release
+			// its lock rather than holding it for the rest of the run and
+			// blocking every other trigger for this repo. abort() reads this
+			// variable and `defer unlock()` below snapshots it — both after
+			// this point — so both become no-ops and mu is unlocked once.
+			unlock()
+			unlock = func() {}
+			// An ordinary per-run workspace from here: reuse=false makes the
+			// error path clean it up, and Keep drops back to the operator's
+			// setting so the deferred Cleanup removes it after the run.
+			reuse, wsDir = false, fresh
+			opt.Dir, opt.Reuse, opt.Keep = wsDir, false, r.keepWS
+			cctx, cancel = context.WithTimeout(runCtx, checkoutTimeout)
+			ws, err = workspace.Checkout(cctx, opt)
+			cancel()
+		}
+	}
 	if err != nil {
 		// MkdirTemp created wsDir before Checkout validated the target, so a
 		// validation (or any pre-workspace) failure would otherwise leave an
