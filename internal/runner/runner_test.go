@@ -146,6 +146,92 @@ func TestTriggerPersistentUsesRepoDir(t *testing.T) {
 	}
 }
 
+// A persistent workspace that cannot be updated for a reason that is not the
+// directory's fault must never fail the run: the cache is an accelerator, not a
+// gate. The run falls back to a fresh per-run clone, the persistent directory
+// and its untracked caches survive, and it is reused again once it works.
+func TestTriggerPersistentCheckoutFailureFallsBackToFresh(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline)
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyPersistent})
+	ev := model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"}
+
+	// Prime the persistent workspace, then leave an untracked cache in it.
+	res, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("priming Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("priming run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	persist := filepath.Join(root, persistDirName(repo))
+	if run.WorkspaceDir != persist {
+		t.Fatalf("priming run dir = %q, want the persistent dir %q", run.WorkspaceDir, persist)
+	}
+	marker := filepath.Join(persist, "node_modules_marker")
+	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The repo unlock runs in the trigger's defers, which finish just before
+	// the admission slot is released — so waiting for a free slot keeps the
+	// next trigger off the *contention* fallback rather than the one under test.
+	waitSlotsFree(t, r, 5*time.Second)
+
+	// Break the in-place update without touching the repository's structure. A
+	// stale index.lock is what a killed git leaves behind: `remote set-url` and
+	// the fetch still succeed, but `reset --hard` fails — so Checkout reports a
+	// non-structural error and must not rebuild the directory.
+	lock := filepath.Join(persist, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res2, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	run2 := waitRun(t, st, res2.RunID, 15*time.Second)
+	if run2.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success via a fresh per-run clone", run2.Status, run2.Reason)
+	}
+	if base := filepath.Base(run2.WorkspaceDir); !strings.HasPrefix(base, "run-") {
+		t.Errorf("workspace dir = %q, want a fresh run-* dir", run2.WorkspaceDir)
+	}
+	// The fallback dir is an ordinary per-run workspace, so it is cleaned up.
+	waitGone(t, run2.WorkspaceDir, 5*time.Second)
+	if _, err := os.Stat(filepath.Join(persist, ".git")); err != nil {
+		t.Errorf("persistent workspace must survive a non-structural failure: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("untracked cache must survive a non-structural failure: %v", err)
+	}
+
+	// The repo lock was released, not leaked: once the directory works again
+	// the next run reuses it. (A leak would wedge the repo onto the fresh path
+	// forever; a double release would have panicked the daemon.)
+	waitSlotsFree(t, r, 5*time.Second)
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	res3, err := r.Trigger(ev)
+	if err != nil {
+		t.Fatalf("third Trigger: %v", err)
+	}
+	run3 := waitRun(t, st, res3.RunID, 15*time.Second)
+	if run3.Status != model.StatusSuccess {
+		t.Fatalf("third run status = %s (%s), want success", run3.Status, run3.Reason)
+	}
+	if run3.WorkspaceDir != persist {
+		t.Errorf("third run dir = %q, want the persistent dir %q reused again", run3.WorkspaceDir, persist)
+	}
+}
+
 func TestTriggerPersistentContentionFallsBackToFresh(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -157,9 +243,9 @@ func TestTriggerPersistentContentionFallsBackToFresh(t *testing.T) {
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyPersistent})
 
 	// Simulate a run of the same repo holding the persistent workspace.
-	mu := r.repoLock(repo)
+	mu, put := r.repoLock(repo)
 	mu.Lock()
-	defer mu.Unlock()
+	defer func() { mu.Unlock(); put() }()
 
 	res, err := r.Trigger(model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
 	if err != nil {
@@ -287,6 +373,96 @@ func TestReconcileIgnoresStaleSidecar(t *testing.T) {
 	sums, _ := st.ListRuns(0, 0)
 	if len(sums) != 1 || sums[0].Status != model.StatusSuccess {
 		t.Errorf("stale sidecar not healed: %+v", sums)
+	}
+}
+
+// A run whose record is unreadable must be settled from its summary, not
+// reported as a store failure: the caller latches /healthz degraded on any
+// error, so returning one here would re-latch on every startup with no way to
+// clear it short of deleting the file by hand.
+func TestReconcileSettlesUnreadableRecord(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	run := &model.Run{ID: "broken", Status: model.StatusRunning, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusRunning, Steps: []*model.StepRun{{Index: 0, Status: model.StatusRunning}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the record while leaving the (non-terminal) sidecar intact — what
+	// a torn write at power-loss leaves behind.
+	if err := os.WriteFile(filepath.Join(dir, "runs", "broken", "run.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := r.ReconcileInterrupted()
+	if err != nil {
+		t.Fatalf("an unreadable record is a bad record, not a bad store: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("repaired = %d, want 1", n)
+	}
+	got, err := st.GetRun("broken")
+	if err != nil {
+		t.Fatalf("the salvaged record must be readable: %v", err)
+	}
+	if got.Status != model.StatusCancelled {
+		t.Errorf("status = %s, want cancelled", got.Status)
+	}
+	if got.Reason == "" {
+		t.Error("the salvaged run should explain itself in reason")
+	}
+
+	// And the pass must converge: a second startup has nothing left to do.
+	if n, err := r.ReconcileInterrupted(); err != nil || n != 0 {
+		t.Errorf("second ReconcileInterrupted = %d, %v; want 0, nil", n, err)
+	}
+}
+
+// The repo-lock map used to keep every key it ever saw, so a long-lived daemon
+// accumulated one entry per distinct repo URL string forever.
+func TestRepoLockReleasedWhenIdle(t *testing.T) {
+	st := store.NewMemory()
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	for i := 0; i < 3; i++ {
+		// Same shape as the mirror path: try-lock, do the work, unlock, release.
+		mu, put := r.repoLock("https://git.example.com/g/p.git")
+		if !mu.TryLock() {
+			t.Fatalf("iteration %d: an idle repo lock should be free", i)
+		}
+		mu.Unlock()
+		put()
+	}
+	r.locksMu.Lock()
+	n := len(r.locks)
+	r.locksMu.Unlock()
+	if n != 0 {
+		t.Errorf("locks map holds %d idle entries, want 0", n)
+	}
+
+	// A second holder must keep the entry alive while it is still in use.
+	mu1, put1 := r.repoLock("repo")
+	_, put2 := r.repoLock("repo")
+	mu1.Lock()
+	put2()
+	r.locksMu.Lock()
+	n = len(r.locks)
+	r.locksMu.Unlock()
+	if n != 1 {
+		t.Errorf("entry dropped while still held: len(locks) = %d, want 1", n)
+	}
+	mu1.Unlock()
+	put1()
+	r.locksMu.Lock()
+	n = len(r.locks)
+	r.locksMu.Unlock()
+	if n != 0 {
+		t.Errorf("entry survived its last release: len(locks) = %d, want 0", n)
 	}
 }
 
@@ -1390,9 +1566,9 @@ func TestTriggerMirrorContentionFallsBackToFresh(t *testing.T) {
 	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 2, Allowlist: allow, Strategy: StrategyMirror})
 
 	// Simulate a sync of the same repo holding the mirror lock.
-	mu := r.repoLock(repo)
+	mu, put := r.repoLock(repo)
 	mu.Lock()
-	defer mu.Unlock()
+	defer func() { mu.Unlock(); put() }()
 
 	res, err := r.Trigger(model.Event{Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main"})
 	if err != nil {

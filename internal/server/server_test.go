@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,8 +30,11 @@ import (
 )
 
 const (
-	testGitLabSecret = "shh-secret"
-	testAPIToken     = "test-api-token"
+	testGitLabSecret  = "shh-secret"
+	testGitHubSecret  = "gh-secret"
+	testGiteeSecret   = "gitee-secret"
+	testGitCodeSecret = "gitcode-secret"
+	testAPIToken      = "test-api-token"
 )
 
 // initGitRepo creates a repo containing .janus/ci.yml and returns its path + SHA.
@@ -89,11 +93,201 @@ func newTestServerAllow(t *testing.T, entries ...string) *httptest.Server {
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithProvider(provider.GitLab{}, testGitLabSecret),
+		WithProvider(provider.GitHub{}, testGitHubSecret),
+		WithProvider(provider.Gitee{}, testGiteeSecret),
+		WithProvider(provider.GitCode{}, testGitCodeSecret),
 		WithAPIToken(testAPIToken),
 	)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+// A Server can legitimately be built without a runner (several tests do), and
+// the cancel and health handlers already guard for it. The two trigger paths
+// dereferenced it, so a webhook or an API trigger panicked — recovered by
+// net/http per connection, leaving the client with a dropped connection and no
+// usable status instead of an answer.
+func TestNoRunnerConfiguredIsNotAPanic(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithProvider(provider.GitLab{}, testGitLabSecret),
+		WithAPIToken(testAPIToken),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	t.Run("webhook", func(t *testing.T) {
+		resp := gitlabPush(t, ts, "https://git.example.com/g/p.git", strings.Repeat("a", 40), "main", testGitLabSecret)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", resp.StatusCode)
+		}
+	})
+
+	t.Run("api trigger", func(t *testing.T) {
+		body := `{"repo_url":"https://git.example.com/g/p.git","ref":"refs/heads/main"}`
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/trigger", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testAPIToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", resp.StatusCode)
+		}
+		// A panic would yield no parseable body at all.
+		var got map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Errorf("response should be well-formed JSON: %v", err)
+		}
+	})
+}
+
+// followTestServer serves one run with a still-running step, so a ?follow=1
+// request stays inside streamStep instead of returning immediately.
+func followTestServer(t *testing.T) *httptest.Server {
+	return followTestServerLog(t, "hello\n")
+}
+
+// followTestServerLog is followTestServer with the step's log seeded to an
+// arbitrary body — used to make the log far larger than any socket buffer, so a
+// client that stops reading actually blocks the server's write.
+func followTestServerLog(t *testing.T, logBody string) *httptest.Server {
+	t.Helper()
+	st := store.NewMemory()
+	run := &model.Run{ID: "r1", Status: model.StatusRunning,
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusRunning,
+			Steps: []*model.StepRun{{Index: 0, Status: model.StatusRunning}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	w, err := st.LogWriter("r1", "build", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(w, logBody); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// Each follower holds a goroutine and polls the store ~3×/second for as long as
+// it is connected, on an endpoint that is open by default. Excess followers
+// must be turned away rather than accumulate.
+func TestLogFollowCapRejectsExcess(t *testing.T) {
+	orig := maxFollowers
+	maxFollowers = 1
+	t.Cleanup(func() { maxFollowers = orig })
+
+	ts := followTestServer(t) // built after the var is shrunk
+	url := ts.URL + "/api/runs/r1/logs?job=build&step=0&follow=1"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Body.Close() }()
+	// Read the already-written line, proving the handler is inside streamStep
+	// and holding its slot.
+	buf := make([]byte, len("hello\n"))
+	if _, err := io.ReadFull(first.Body, buf); err != nil {
+		t.Fatalf("first follower produced no output: %v", err)
+	}
+
+	second, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Body.Close() }()
+	if second.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("second follower status = %d, want 503", second.StatusCode)
+	}
+	if got := second.Header.Get("Retry-After"); got == "" {
+		t.Error("a 503 for saturation should carry Retry-After")
+	}
+}
+
+// A client that opens a stream and stops reading blocks the server's write on
+// TCP backpressure. It never closes the connection, so the request context
+// never cancels — and because the follower cap and the duration bound are both
+// only checked *between* writes, neither can reclaim the slot. Only a write
+// deadline can. Without one this test hangs until the package timeout.
+func TestLogFollowStalledClientReleasesSlot(t *testing.T) {
+	origW, origN := followWriteTimeout, maxFollowers
+	followWriteTimeout = 200 * time.Millisecond
+	maxFollowers = 1
+	t.Cleanup(func() { followWriteTimeout, maxFollowers = origW, origN })
+
+	// Far larger than any socket buffer, so the server cannot finish the write
+	// into the kernel and genuinely blocks on the stalled reader.
+	ts := followTestServerLog(t, strings.Repeat("x", 8<<20))
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	// Send the request and then never read the response.
+	if _, err := fmt.Fprintf(conn, "GET /api/runs/r1/logs?job=build&step=0&follow=1 HTTP/1.1\r\nHost: %s\r\n\r\n", addr); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stalled follower must give its slot back once its write deadline
+	// expires, so a well-behaved client can get in.
+	url := ts.URL + "/api/runs/r1/logs?job=build&step=0&follow=1"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		// The step never finishes, so a successful follow streams forever —
+		// check the status and hang up rather than draining the body.
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := resp.StatusCode
+		_ = resp.Body.Close()
+		if code != http.StatusServiceUnavailable {
+			return // the slot was released
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a stalled follower never released its slot; the write deadline is not bounding it")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A client that connects and then stops reading never cancels its request
+// context, so only the duration bound reclaims its slot.
+func TestLogFollowStopsAtMaxDuration(t *testing.T) {
+	origD, origN := maxFollowDuration, maxFollowers
+	maxFollowDuration = 150 * time.Millisecond
+	t.Cleanup(func() { maxFollowDuration, maxFollowers = origD, origN })
+
+	ts := followTestServer(t)
+	body := getText(t, ts.URL+"/api/runs/r1/logs?job=build&step=0&follow=1")
+	if !strings.Contains(body, "hello") {
+		t.Errorf("body = %q, want the step output", body)
+	}
+	if !strings.Contains(body, "log follow ended after") {
+		t.Errorf("body = %q, want the follow-ended marker", body)
+	}
 }
 
 // saveFailStore rejects SaveRun, as a full/read-only data dir would.

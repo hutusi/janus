@@ -2,13 +2,16 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hutusi/janus/internal/model"
 )
@@ -70,8 +73,16 @@ func (f *File) writeRun(run *model.Run) error {
 	// sidecar. That ordering keeps a stale sidecar's lifecycle status <= the
 	// record's (pending->running->terminal is monotonic, terminal is final), so
 	// a lagging sidecar can never claim "terminal" for a still-running run.
-	if err := writeAtomic(dir, "run.json", data); err != nil {
+	terminal := run.Status.Terminal()
+	if err := writeAtomic(dir, "run.json", data, terminal); err != nil {
 		return err
+	}
+	if terminal {
+		// writeAtomic flushed run.json and the directory holding it, but the
+		// entry for <id> itself lives in runs/, created by the MkdirAll above
+		// and never flushed — so a power loss could take the whole directory
+		// with it and lose the very record the fsync exists to protect.
+		syncDir(filepath.Join(f.root, "runs"))
 	}
 	// The sidecar is a listing cache; a write hiccup must not fail a valid
 	// persist — readSummary falls back to run.json (and re-heals) if it is
@@ -80,17 +91,29 @@ func (f *File) writeRun(run *model.Run) error {
 	return nil
 }
 
-// writeSummary writes the compact summary sidecar used by ListRuns/Prune.
+// writeSummary writes the compact summary sidecar used by ListRuns/Prune. It
+// is never synced: it is a listing cache, and readSummary rebuilds it from
+// run.json (the source of truth) whenever it is missing or unreadable.
 func writeSummary(dir string, s *model.RunSummary) error {
 	data, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, "summary.json", data)
+	return writeAtomic(dir, "summary.json", data, false)
 }
 
-// writeAtomic writes data to dir/name via a temp file + rename.
-func writeAtomic(dir, name string, data []byte) error {
+// writeAtomic writes data to dir/name via a temp file + rename. The rename
+// gives readers atomicity: they see the old file or the new one, never a
+// half-written mix.
+//
+// With sync, the write is additionally made durable — the data is flushed
+// before the rename and the parent directory afterwards, so the record
+// survives a power loss and not merely a process crash. Durability is not free
+// (each flush waits on the disk), and writeRun is called on every step and job
+// transition, so only terminal writes ask for it: those are the ones startup
+// reconciliation reads back, and a lost intermediate "running" state is
+// repaired by that same reconciliation.
+func writeAtomic(dir, name string, data []byte, sync bool) error {
 	tmp, err := os.CreateTemp(dir, "."+name+"-*")
 	if err != nil {
 		return err
@@ -101,11 +124,47 @@ func writeAtomic(dir, name string, data []byte) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	if sync {
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return err
+		}
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, filepath.Join(dir, name))
+	if err := os.Rename(tmpName, filepath.Join(dir, name)); err != nil {
+		// Every other failure path clears the temp file; this one used to leak
+		// it, leaving .run.json-* debris behind on a full or read-only mount.
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if sync {
+		syncDir(dir)
+	}
+	return nil
+}
+
+// syncDir flushes a directory so an entry created or renamed inside it
+// survives a power loss.
+//
+// Deliberately best-effort, and the guarantee it does *not* provide is worth
+// stating: syncing a directory handle is not portable — Windows refuses it —
+// so returning the error here would fail every terminal write on that platform.
+// The load-bearing flush is the file's own contents, whose error writeAtomic
+// does return. What is silently lost when this fails is the durability of the
+// *directory entry*: after a power cut the file's data is intact but the name
+// may not be. That is a strictly better failure than refusing to record runs at
+// all on a supported platform.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // maxRunFileBytes bounds both a run.json write and read symmetrically. Records
@@ -114,29 +173,50 @@ func writeAtomic(dir, name string, data []byte) error {
 // written or read whole. A var so tests can shrink it.
 var maxRunFileBytes int64 = 16 << 20
 
+// readCapped reads path without ever buffering more than max bytes, reporting
+// tooBig when the file exists but exceeds the cap. Every site that loads a
+// store file goes through it — a corrupt or hostile record must not be able to
+// turn a listing, a prune, or startup reconciliation into an OOM, and checking
+// the size *after* os.ReadFile would do exactly that. Same shape, and the same
+// reason, as pipeline.ReadFile.
+func readCapped(path string, max int64) (data []byte, tooBig bool, err error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err = io.ReadAll(io.LimitReader(file, max+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > max {
+		return nil, true, nil
+	}
+	return data, false, nil
+}
+
 func (f *File) GetRun(id string) (*model.Run, error) {
 	if err := checkRunID(id); err != nil {
 		return nil, err
 	}
-	file, err := os.Open(filepath.Join(f.runDir(id), "run.json"))
+	data, tooBig, err := readCapped(filepath.Join(f.runDir(id), "run.json"), maxRunFileBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("run %q not found", id)
 		}
 		return nil, err
 	}
-	defer func() { _ = file.Close() }()
-	data, err := io.ReadAll(io.LimitReader(file, maxRunFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxRunFileBytes {
+	if tooBig {
 		return nil, fmt.Errorf("run %q metadata is too large (limit %d bytes)", id, maxRunFileBytes)
 	}
 	var run model.Run
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("run %q: %w", id, err)
 	}
+	// Identity comes from the path, never from the record — see readSummary.
+	// checkRunID above has already vetted id, so this also guarantees every
+	// caller gets an id that is safe to build a path from.
+	run.ID = id
 	return &run, nil
 }
 
@@ -168,9 +248,15 @@ const maxSummaryFileBytes = 64 << 10
 // deriving the summary from run.json and rewrites the sidecar (self-healing,
 // backward-compatible).
 func (f *File) readSummary(id string) (*model.RunSummary, error) {
-	if data, err := os.ReadFile(filepath.Join(f.runDir(id), "summary.json")); err == nil && int64(len(data)) <= maxSummaryFileBytes {
+	if data, tooBig, err := readCapped(filepath.Join(f.runDir(id), "summary.json"), maxSummaryFileBytes); err == nil && !tooBig {
 		var s model.RunSummary
 		if err := json.Unmarshal(data, &s); err == nil {
+			// The directory a record was found in IS its identity — runDir(id)
+			// is what defines where a run lives — so the id field is only ever
+			// a copy, and a copy that disagrees is wrong by construction.
+			// Taking it from the file instead would hand a caller an id that
+			// does not resolve, and Prune builds a delete path out of this.
+			s.ID = id
 			return &s, nil
 		}
 	}
@@ -180,8 +266,84 @@ func (f *File) readSummary(id string) (*model.RunSummary, error) {
 		return nil, err
 	}
 	s := run.Summary()
+	s.ID = id
 	_ = writeSummary(f.runDir(id), s)
 	return s, nil
+}
+
+// unreadableGrace is how long a run directory with no readable record is left
+// alone before it is treated as debris. writeRun creates the directory (and its
+// logs/ subdirectory) *before* it writes run.json, so a run being recorded
+// right now legitimately looks unreadable for that instant — without this
+// window a concurrent Prune could delete a live run's directory out from under
+// it. A var only so tests can shrink it.
+var unreadableGrace = 5 * time.Minute
+
+// unreadableWorkflowName is the placeholder name a debris directory is listed
+// under. Named so callers (and tests) can recognise the placeholder rather than
+// matching the string.
+const unreadableWorkflowName = "(unreadable run record)"
+
+// recordStructurallyBroken reports whether id's run.json is unusable in a way
+// that cannot resolve on its own — absent, oversized, or unparseable.
+//
+// This distinction is what keeps a placeholder from destroying good history.
+// Any *other* error — EACCES from a permission change, EIO from a flaky disk,
+// EMFILE when the process is out of descriptors — means "cannot read it right
+// now", which says nothing about the record and will very likely succeed on the
+// next scan. Treating those as debris would let one transient failure mark a
+// healthy run terminal and hand it to Prune, deleting the run and its logs.
+// Structural breakage is judged from the file itself rather than from a
+// readSummary error, because that error deliberately collapses every cause.
+func (f *File) recordStructurallyBroken(id string) bool {
+	// readCapped, not os.ReadFile: this runs on the listing, counting, pruning
+	// and startup paths, and the record it is inspecting is by definition one
+	// GetRun could not read — including because it is enormous. Reading it
+	// whole to decide that would be an OOM in exactly the place the cap exists
+	// to protect.
+	data, tooBig, err := readCapped(filepath.Join(f.runDir(id), "run.json"), maxRunFileBytes)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return true // nothing to recover, and nothing will create it
+	case err != nil:
+		return false // transient or environmental: leave the directory alone
+	case tooBig:
+		return true // GetRun would refuse it too, forever
+	}
+	var run model.Run
+	return json.Unmarshal(data, &run) != nil
+}
+
+// unreadableSummary synthesizes a terminal placeholder for a run directory
+// whose record is structurally broken, or returns nil when the directory should
+// be left alone for now.
+//
+// Two independent gates, because they guard different hazards. The record must
+// be *structurally* broken (see recordStructurallyBroken), so a transient read
+// failure never makes a healthy run prune-eligible. And the directory must be
+// older than unreadableGrace, because writeRun creates it before writing the
+// record — without that window a concurrent Prune could delete a run being
+// saved right now.
+//
+// The placeholder is cancelled rather than failed: "we cannot tell how this
+// ended" is the same thing crash recovery records, and a run that may well have
+// succeeded should not be painted red. Terminal is what makes it eligible for
+// history_limit retention, which is the whole point.
+func (f *File) unreadableSummary(e os.DirEntry) *model.RunSummary {
+	info, err := e.Info()
+	if err != nil || time.Since(info.ModTime()) < unreadableGrace {
+		return nil
+	}
+	if !f.recordStructurallyBroken(e.Name()) {
+		return nil
+	}
+	return &model.RunSummary{
+		ID:           e.Name(),
+		WorkflowName: unreadableWorkflowName,
+		Status:       model.StatusCancelled,
+		CreatedAt:    info.ModTime(),
+		FinishedAt:   info.ModTime(),
+	}
 }
 
 // allSummaries scans every run directory and returns compact summaries
@@ -199,9 +361,27 @@ func (f *File) allSummaries() ([]*model.RunSummary, error) {
 		if !e.IsDir() {
 			continue
 		}
+		if err := checkRunID(e.Name()); err != nil {
+			continue // not a run directory Janus created
+		}
 		s, err := f.readSummary(e.Name())
 		if err != nil {
-			continue // skip incomplete/unreadable run dirs
+			// Neither summary.json nor run.json can be read. Skipping made the
+			// directory invisible to listing, counting, reconciliation AND
+			// Prune, so its logs were never reclaimed and history_limit
+			// silently under-counted — a permanent leak, and an interrupted
+			// writeRun leaves exactly this shape.
+			//
+			// Surface it as a terminal placeholder instead, so the operator can
+			// see it and ordinary retention reclaims it — but only once
+			// unreadableSummary has confirmed the record is structurally broken
+			// rather than merely unreadable at this instant. The placeholder is
+			// terminal, so Prune will delete the directory and its logs: a
+			// transient EIO, EACCES or EMFILE must never reach that path.
+			s = f.unreadableSummary(e)
+			if s == nil {
+				continue
+			}
 		}
 		sums = append(sums, s)
 	}
@@ -230,6 +410,18 @@ func (f *File) Prune(keep int) (int, error) {
 		}
 		if kept < keep {
 			kept++
+			continue
+		}
+		// Never build a recursive delete out of an id that has not been vetted.
+		// readSummary now takes identity from the directory name, which
+		// allSummaries already validated, so this cannot fire — which is
+		// exactly why it belongs here. An empty id would make runDir resolve
+		// to the runs/ directory itself and take every run with it, and one
+		// containing "../" would climb out of the data directory entirely.
+		if err := checkRunID(s.ID); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		if err := os.RemoveAll(f.runDir(s.ID)); err != nil {

@@ -155,6 +155,75 @@ func TestCheckoutReuseUpdatesInPlace(t *testing.T) {
 	}
 }
 
+// A cancelled reuse checkout must leave the persistent workspace alone: the
+// self-heal rebuild would delete exactly the untracked caches the strategy
+// exists to keep, and a cancelled fetch is no evidence the directory is broken.
+func TestCheckoutReuseCancelledKeepsDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	dir := filepath.Join(t.TempDir(), "ws")
+
+	ws, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: src, SHA: sha, Ref: "refs/heads/main", Keep: true, Reuse: true})
+	if err != nil {
+		t.Fatalf("first Checkout: %v", err)
+	}
+	marker := filepath.Join(ws.Dir, "node_modules_marker")
+	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Checkout(ctx, Options{Dir: dir, RepoURL: src, SHA: sha, Ref: "refs/heads/main", Keep: true, Reuse: true}); err == nil {
+		t.Fatal("Checkout with a cancelled context should fail")
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("cancelled reuse must not wipe the workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Errorf("cancelled reuse must not remove the git dir: %v", err)
+	}
+}
+
+// A fetch that cannot reach the remote says nothing about the workspace, so it
+// must not trigger the self-heal rebuild. Deleting the directory would throw
+// away the untracked caches this strategy exists to keep, and the rebuild would
+// fail against the same unreachable remote anyway — losing the caches for
+// nothing. ensureMirror already applies this rule to mirrors.
+func TestCheckoutReuseUnreachableRemoteKeepsDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src, sha := initGitRepo(t)
+	dir := filepath.Join(t.TempDir(), "ws")
+
+	ws, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: src, SHA: sha, Ref: "refs/heads/main", Keep: true, Reuse: true})
+	if err != nil {
+		t.Fatalf("first Checkout: %v", err)
+	}
+	marker := filepath.Join(ws.Dir, "node_modules_marker")
+	if err := os.WriteFile(marker, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same healthy workspace, but the remote has gone away — a deleted repo,
+	// a DNS failure, a revoked key all land here.
+	gone := filepath.Join(t.TempDir(), "not-a-repo")
+	if _, err := Checkout(context.Background(), Options{Dir: dir, RepoURL: gone, SHA: sha, Ref: "refs/heads/main", Keep: true, Reuse: true}); err == nil {
+		t.Fatal("Checkout against an unreachable remote should fail")
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("a failed fetch must not wipe the workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Errorf("a failed fetch must not remove the git dir: %v", err)
+	}
+}
+
 func TestCheckoutReuseForcePush(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

@@ -32,6 +32,8 @@ type Server struct {
 	providers map[string]registeredProvider
 	mux       *http.ServeMux
 	tmpl      *template.Template
+	// followers bounds concurrent ?follow=1 log streams (see maxFollowers).
+	followers chan struct{}
 }
 
 // Option configures a Server.
@@ -62,6 +64,7 @@ func New(st store.Store, rn *runner.Runner, version string, opts ...Option) *Ser
 		providers: map[string]registeredProvider{},
 		mux:       http.NewServeMux(),
 		tmpl:      template.Must(template.New("").Funcs(templateFuncs).ParseFS(templateFS, "templates/*.html")),
+		followers: make(chan struct{}, maxFollowers),
 	}
 	for _, o := range opts {
 		o(s)

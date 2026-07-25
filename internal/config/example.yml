@@ -15,6 +15,7 @@ pipeline_path: ".janus/ci.yml"      # in-repo path to the pipeline file
 max_parallel_jobs: 4                # jobs running concurrently within a run
 max_parallel_runs: 4                # runs executing concurrently
 history_limit: 1000                 # max terminal runs to retain; oldest + their logs are pruned after each run and at startup (0 = unlimited)
+log_limit: 10485760                 # 10 MiB: max bytes one step may write to its log; beyond it the log is truncated with a marker (0 = unlimited)
 step_timeout: "0s"                  # fail a step that runs longer than this (0 = no timeout), e.g. "10m"
 keep_workspaces: false              # keep workspaces after runs (debugging)
 workspace_strategy: "fresh"         # "fresh" = new dir per run; "persistent" = one reusable dir per repo; "mirror" = per-repo bare-mirror cache, fresh dir per run

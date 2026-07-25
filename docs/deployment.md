@@ -160,6 +160,17 @@ after retries (a full or read-only data dir) — stored history is then stale;
 check the logs and restart to clear the latch. Point your monitoring at this
 endpoint.
 
+A graceful stop exits **0** even if the HTTP shutdown deadline expires with
+connections still open — one client tailing logs (`?follow=1`) is enough to
+reach it, and in-flight runs are drained regardless — so `systemctl stop` does
+not report a failure for that. A real shutdown error still exits non-zero.
+
+Degraded always means the store rejected a **write**. A single unreadable run
+record is not that: at startup such a run is settled `cancelled` from its
+listing sidecar (logged as `settled a run whose record was unreadable`) and the
+daemon stays healthy — so one corrupt file cannot wedge a liveness probe into
+restarting the service forever.
+
 ## 6. TLS / reverse proxy
 
 Janus speaks **plain HTTP** and has no TLS of its own — terminate TLS at a reverse

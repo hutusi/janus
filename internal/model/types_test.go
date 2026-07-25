@@ -75,3 +75,24 @@ func TestRunMarshalRedactsEmbeddedEvent(t *testing.T) {
 		}
 	}
 }
+
+// Reason is redacted before it is stored, but records written by earlier
+// versions still hold raw git errors — which a credentialed clone URL can end
+// up inside. Serializing must not hand those back out.
+func TestRunMarshalRedactsReason(t *testing.T) {
+	run := &Run{
+		ID:     "r1",
+		Status: StatusFailed,
+		Reason: "checkout: fatal: could not read from https://u:p@host/repo.git",
+	}
+	out, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "u:p@") {
+		t.Errorf("run JSON leaks credentials via reason: %s", out)
+	}
+	if !strings.Contains(string(out), "https://host/repo.git") {
+		t.Errorf("redaction should keep the rest of the reason intact: %s", out)
+	}
+}

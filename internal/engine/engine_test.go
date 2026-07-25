@@ -84,6 +84,66 @@ jobs:
 	}
 }
 
+// A step whose output exceeds log_limit is truncated in the store, but must
+// still run to completion and succeed: os/exec fails a command whose output
+// copy short-writes or errors, so the cap has to stay invisible to the process.
+func TestRunStepLogRespectsLogLimit(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+`)
+	st := store.NewMemory()
+	const limit = 8
+	run, err := New(st, WithLogLimit(limit)).Run(context.Background(), wf, model.Event{Kind: model.EventManual, Branch: "main"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success — a capped log must not fail the step", run.Status)
+	}
+	build := jobRun(run, "build")
+	if build.Steps[0].ExitCode != 0 {
+		t.Errorf("exit code = %d, want 0", build.Steps[0].ExitCode)
+	}
+
+	got := readStepLog(t, st, run.ID, "build", 0)
+	if !strings.Contains(got, "log truncated") {
+		t.Errorf("log = %q, want the truncation marker", got)
+	}
+	if body := strings.TrimSuffix(got, logTruncatedMarker); len(body) > limit {
+		t.Errorf("kept %d bytes of output, want at most %d", len(body), limit)
+	}
+	// The head is what is kept, so the start of the output survives.
+	if !strings.HasPrefix(got, "aaaa") {
+		t.Errorf("log = %q, want the head of the output preserved", got)
+	}
+}
+
+// 0 means unlimited, so a zero value must be honored rather than replaced by
+// the default the way the other engine options treat zero.
+func TestRunLogLimitZeroIsUnlimited(t *testing.T) {
+	wf := mustParse(t, `
+name: ci
+on: { push: {} }
+jobs:
+  build:
+    steps:
+      - run: echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+`)
+	st := store.NewMemory()
+	run, err := New(st, WithLogLimit(0)).Run(context.Background(), wf, model.Event{Kind: model.EventManual, Branch: "main"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := readStepLog(t, st, run.ID, "build", 0); strings.Contains(got, "log truncated") {
+		t.Errorf("log = %q, want no truncation with log_limit 0", got)
+	}
+}
+
 func TestRunFailingStepStopsJob(t *testing.T) {
 	wf := mustParse(t, `
 name: ci

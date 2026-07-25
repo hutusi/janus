@@ -69,6 +69,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		ev.PipelinePath = p
 	}
 
+	if s.runner == nil {
+		// A Server can be built without a runner; the cancel and health
+		// handlers already guard for it. Dereferencing here would panic, which
+		// net/http recovers per-connection — the client just sees the
+		// connection drop, with no usable status.
+		s.logger.Error("webhook rejected: no runner configured", "provider", name)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "reason": "no runner configured"})
+		return
+	}
 	// Logged before Trigger so every delivery leaves evidence of what will be
 	// cloned, even if the background checkout later stalls.
 	s.logger.Info("webhook trigger accepted", "provider", name, "event", ev.Kind, "repo", model.RedactURL(ev.RepoURL), "branch", ev.Branch)

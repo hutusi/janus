@@ -72,8 +72,8 @@ type Runner struct {
 
 	degraded atomic.Bool // latched on a startup failure (e.g. an unwritable store); surfaced via /healthz
 
-	locksMu sync.Mutex             // guards locks
-	locks   map[string]*sync.Mutex // per-repo workspace locks (persistent strategy)
+	locksMu sync.Mutex                // guards locks
+	locks   map[string]*repoLockEntry // per-repo workspace locks (persistent/mirror strategies)
 
 	// cancels maps a run ID to the cancel func of its per-run context, from
 	// registration (before the pending run is saved, so any non-terminal run
@@ -175,7 +175,7 @@ func New(st store.Store, eng *engine.Engine, opts Options) *Runner {
 		// than configurable: the point is that a trigger burst cannot start
 		// unbounded git processes or workspaces, not the exact queue depth.
 		admit:   make(chan struct{}, 4*maxRuns),
-		locks:   make(map[string]*sync.Mutex),
+		locks:   make(map[string]*repoLockEntry),
 		cancels: make(map[string]context.CancelCauseFunc),
 		groups:  newGroupReg(),
 	}
@@ -273,17 +273,50 @@ func (r *Runner) pruneHistory() {
 	}
 }
 
-// repoLock returns the mutex serializing repoURL's shared on-disk state: its
-// persistent workspace, or its bare mirror's fetches.
-func (r *Runner) repoLock(repoURL string) *sync.Mutex {
+// repoLockEntry is one repo's lock plus the number of triggers currently
+// holding a reference to it, so an idle entry can be dropped from the map.
+type repoLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// repoLock returns the mutex serializing repoURL's shared on-disk state — its
+// persistent workspace, or its bare mirror's fetches — along with a release
+// func the caller MUST invoke once it is done with the mutex (including when
+// TryLock fails).
+//
+// The map used to keep every key it ever saw. Nothing removed them, so a
+// long-lived daemon accumulated one entry per distinct repo URL string forever;
+// since the key is the raw URL, spellings of one repo (…/x, …/x.git, …/x?ci=1)
+// each added their own. Reference counting bounds the map by the number of
+// in-flight triggers instead. Releasing more than once, or never, costs memory
+// only — it can never wedge a repo onto the fallback path, which is the failure
+// mode that would actually hurt.
+func (r *Runner) repoLock(repoURL string) (*sync.Mutex, func()) {
 	r.locksMu.Lock()
 	defer r.locksMu.Unlock()
-	mu, ok := r.locks[repoURL]
+	e, ok := r.locks[repoURL]
 	if !ok {
-		mu = &sync.Mutex{}
-		r.locks[repoURL] = mu
+		e = &repoLockEntry{}
+		r.locks[repoURL] = e
 	}
-	return mu
+	// Counted under locksMu, so an entry can only be deleted when no caller
+	// holds the mutex or is about to take it.
+	e.refs++
+	var once sync.Once
+	return &e.mu, func() { once.Do(func() { r.releaseRepoLock(repoURL) }) }
+}
+
+func (r *Runner) releaseRepoLock(repoURL string) {
+	r.locksMu.Lock()
+	defer r.locksMu.Unlock()
+	e, ok := r.locks[repoURL]
+	if !ok {
+		return
+	}
+	if e.refs--; e.refs <= 0 {
+		delete(r.locks, repoURL)
+	}
 }
 
 // persistDirName is the stable directory name for a repo's persistent
@@ -343,9 +376,34 @@ func (r *Runner) ReconcileInterrupted() (int, error) {
 		}
 		run, err := r.store.GetRun(s.ID)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+			// The full record is unreadable (missing, truncated, corrupt) but
+			// the summary still lists the run as non-terminal. Settle it from
+			// the summary alone: leaving it be would strand it "running"
+			// forever AND re-fail this pass on every subsequent startup, which
+			// latches /healthz degraded permanently — for a bad *record*,
+			// though degraded means a bad *store*. The jobs are genuinely lost
+			// with the record; the reason says so.
+			salvaged := &model.Run{
+				ID:           s.ID,
+				WorkflowName: s.WorkflowName,
+				Event:        s.Event,
+				Status:       model.StatusCancelled,
+				Reason:       "interrupted by a restart; the run record was unreadable and could not be recovered",
+				CreatedAt:    s.CreatedAt,
+				StartedAt:    s.StartedAt,
+				FinishedAt:   now,
+				Jobs:         []*model.JobRun{},
 			}
+			if werr := r.store.UpdateRun(salvaged); werr != nil {
+				// Now the store itself is refusing writes — that is what
+				// degraded is for.
+				if firstErr == nil {
+					firstErr = werr
+				}
+				continue
+			}
+			r.logger.Warn("settled a run whose record was unreadable", "run_id", s.ID, "err", err)
+			repaired++
 			continue
 		}
 		// The summary is a listing cache and can lag behind run.json (the
@@ -653,18 +711,25 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	var mirrorDir, mirrorSHA string
 	switch r.strategy {
 	case StrategyPersistent:
-		if mu := r.repoLock(ev.RepoURL); mu.TryLock() {
-			unlock = mu.Unlock
+		mu, put := r.repoLock(ev.RepoURL)
+		if mu.TryLock() {
+			// Held for the whole run; put runs with the unlock so the entry
+			// outlives every user of the mutex.
+			unlock = func() { mu.Unlock(); put() }
 			reuse = true
 			wsDir = filepath.Join(r.wsRoot, persistDirName(ev.RepoURL))
+		} else {
+			put()
 		}
 	case StrategyMirror:
-		if mu := r.repoLock(ev.RepoURL); mu.TryLock() {
+		mu, put := r.repoLock(ev.RepoURL)
+		if mu.TryLock() {
 			dir := filepath.Join(r.wsRoot, mirrorDirName(ev.RepoURL))
 			sctx, scancel := context.WithTimeout(runCtx, checkoutTimeout)
 			head, err := workspace.SyncMirror(sctx, dir, ev.RepoURL, ev.SHA, ev.Ref)
 			scancel()
 			mu.Unlock()
+			put()
 			if err != nil {
 				// Both fields redacted: the URL may embed credentials, and the
 				// error echoes the URL through git's argument list and stderr.
@@ -672,6 +737,8 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 			} else {
 				mirrorDir, mirrorSHA = dir, head
 			}
+		} else {
+			put()
 		}
 	}
 	if !reuse {
@@ -709,6 +776,43 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 		cctx, cancel = context.WithTimeout(runCtx, checkoutTimeout)
 		ws, err = workspace.Checkout(cctx, opt)
 		cancel()
+	}
+	if err != nil && reuse && runCtx.Err() == nil {
+		// The persistent workspace could not be updated — a failed fetch, a
+		// commit that is not there. Checkout only rebuilds a directory git
+		// itself rejects, so this one is intact and deliberately left alone;
+		// retry the run in a fresh per-run directory instead of failing it.
+		// The persistent workspace is an accelerator, never a gate — the same
+		// contract the mirror above already honours. (Mutually exclusive with
+		// that retry: a mirror run never sets reuse.)
+		// Allocate the replacement BEFORE mutating anything. reuse and wsDir
+		// must move together: with reuse=false still pointing at the persistent
+		// directory, the error path below would RemoveAll it — reintroducing
+		// exactly the cache destruction this fallback exists to prevent.
+		fresh, mkErr := os.MkdirTemp(r.wsRoot, "run-*")
+		if mkErr != nil {
+			// Nowhere to fall back to. Leave every variable untouched so the
+			// error path keeps the persistent workspace and reports the
+			// original checkout failure rather than this one.
+			r.logger.Warn("persistent workspace fallback could not create a run workspace", "repo", model.RedactURL(ev.RepoURL), "err", mkErr)
+		} else {
+			r.logger.Warn("persistent workspace checkout failed; retrying with a fresh clone", "repo", model.RedactURL(ev.RepoURL), "err", model.RedactURL(err.Error()))
+			// Nothing touches the persistent directory from here on, so release
+			// its lock rather than holding it for the rest of the run and
+			// blocking every other trigger for this repo. abort() reads this
+			// variable and `defer unlock()` below snapshots it — both after
+			// this point — so both become no-ops and mu is unlocked once.
+			unlock()
+			unlock = func() {}
+			// An ordinary per-run workspace from here: reuse=false makes the
+			// error path clean it up, and Keep drops back to the operator's
+			// setting so the deferred Cleanup removes it after the run.
+			reuse, wsDir = false, fresh
+			opt.Dir, opt.Reuse, opt.Keep = wsDir, false, r.keepWS
+			cctx, cancel = context.WithTimeout(runCtx, checkoutTimeout)
+			ws, err = workspace.Checkout(cctx, opt)
+			cancel()
+		}
 	}
 	if err != nil {
 		// MkdirTemp created wsDir before Checkout validated the target, so a

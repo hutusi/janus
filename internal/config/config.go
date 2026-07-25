@@ -53,6 +53,7 @@ type Config struct {
 	MaxParallelJobs   int      `yaml:"max_parallel_jobs"`
 	MaxParallelRuns   int      `yaml:"max_parallel_runs"`
 	HistoryLimit      int      `yaml:"history_limit"`
+	LogLimit          int64    `yaml:"log_limit"`
 	StepTimeout       Duration `yaml:"step_timeout"`
 	KeepWorkspaces    bool     `yaml:"keep_workspaces"`
 	WorkspaceStrategy string   `yaml:"workspace_strategy"`
@@ -124,6 +125,7 @@ func Defaults() Config {
 		MaxParallelJobs:   4,
 		MaxParallelRuns:   4,
 		HistoryLimit:      1000,
+		LogLimit:          10 << 20, // 10 MiB per step
 		StepTimeout:       0,
 		KeepWorkspaces:    false,
 		WorkspaceStrategy: "fresh",
@@ -155,6 +157,9 @@ func (c Config) Validate() error {
 	}
 	if c.HistoryLimit < 0 {
 		return fmt.Errorf("history_limit: %d is not valid (must be >= 0; 0 means unlimited)", c.HistoryLimit)
+	}
+	if c.LogLimit < 0 {
+		return fmt.Errorf("log_limit: %d is not valid (must be >= 0; 0 means unlimited)", c.LogLimit)
 	}
 	if c.StepTimeout < 0 {
 		return fmt.Errorf("step_timeout: %q is not valid (must be positive; omit for no timeout)", time.Duration(c.StepTimeout).String())
@@ -247,6 +252,8 @@ func (c *Config) OverlayFlags(fs *flag.FlagSet) {
 			c.MaxParallelRuns = g.Get().(int)
 		case "history-limit":
 			c.HistoryLimit = g.Get().(int)
+		case "log-limit":
+			c.LogLimit = g.Get().(int64)
 		case "step-timeout":
 			c.StepTimeout = Duration(g.Get().(time.Duration))
 		case "keep-workspaces":

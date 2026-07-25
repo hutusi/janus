@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,85 @@ func TestFilePruneKeepsNewestTerminal(t *testing.T) {
 	// keep=0 is a no-op.
 	if n, _ := st.Prune(0); n != 0 {
 		t.Errorf("Prune(0) removed %d, want 0", n)
+	}
+}
+
+// A run's identity is its directory, never what its record claims. A sidecar
+// whose id disagrees used to steer Prune's recursive delete: an empty id makes
+// runDir resolve to runs/ itself and takes the whole store with it, and a "../"
+// id climbs out of the data directory. An operator copying a run directory to
+// poke at a build is enough to produce the mismatch.
+func TestFilePruneIgnoresRecordClaimedIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+	}{
+		{"empty id would delete the whole store", ""},
+		{"traversing id would escape the data dir", "../../escape"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			st, err := NewFile(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A healthy run that retention must keep, plus a canary outside
+			// runs/ that a traversing delete would reach.
+			if err := st.SaveRun(sampleRun("keeper", time.Now())); err != nil {
+				t.Fatal(err)
+			}
+			canary := filepath.Join(root, "canary")
+			if err := os.WriteFile(canary, []byte("keep me"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// An older run whose sidecar lies about which run it is.
+			victim := sampleRun("victim", time.Now().Add(-time.Hour))
+			if err := st.SaveRun(victim); err != nil {
+				t.Fatal(err)
+			}
+			lying, _ := json.Marshal(&model.RunSummary{
+				ID: tc.id, Status: model.StatusSuccess, CreatedAt: victim.CreatedAt,
+			})
+			if err := os.WriteFile(filepath.Join(root, "runs", "victim", "summary.json"), lying, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Listing reports it under the directory it actually lives in.
+			sums, err := st.ListRuns(0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, s := range sums {
+				ids = append(ids, s.ID)
+			}
+			if len(ids) != 2 || (ids[0] != "keeper" && ids[1] != "keeper") {
+				t.Fatalf("ListRuns ids = %v, want keeper and victim", ids)
+			}
+			for _, s := range sums {
+				if s.ID == "" || strings.Contains(s.ID, "..") {
+					t.Errorf("listing surfaced a record-claimed id %q", s.ID)
+				}
+			}
+
+			// Pruning removes exactly the victim's directory.
+			if _, err := st.Prune(1); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "runs")); err != nil {
+				t.Fatalf("the runs directory itself must survive: %v", err)
+			}
+			if _, err := st.GetRun("keeper"); err != nil {
+				t.Errorf("the healthy run must survive pruning: %v", err)
+			}
+			if _, err := os.Stat(canary); err != nil {
+				t.Errorf("pruning escaped the runs directory: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "runs", "victim")); !os.IsNotExist(err) {
+				t.Errorf("the victim should have been pruned, stat err = %v", err)
+			}
+		})
 	}
 }
 
@@ -337,6 +417,231 @@ func TestFileWriteRunRejectsOversized(t *testing.T) {
 	run.Event.Title = strings.Repeat("t", 500) // pushes serialized size past the cap
 	if err := st.SaveRun(run); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Errorf("SaveRun of an oversized record = %v, want a too-large error (symmetric with GetRun)", err)
+	}
+}
+
+// A failed rename must not leave its temp file behind: every other error path
+// in writeAtomic clears it, and the debris accumulates in the run directory.
+func TestFileWriteAtomicCleansUpAfterFailedRename(t *testing.T) {
+	dir := t.TempDir()
+	// Renaming onto a non-empty directory fails on every supported platform.
+	blocker := filepath.Join(dir, "run.json")
+	if err := os.MkdirAll(filepath.Join(blocker, "occupied"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAtomic(dir, "run.json", []byte(`{}`), true); err == nil {
+		t.Fatal("writeAtomic onto a non-empty directory should fail")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".run.json-") {
+			t.Errorf("temp file %q leaked after a failed rename", e.Name())
+		}
+	}
+}
+
+// A run directory with no readable record used to be skipped everywhere, so it
+// was invisible to listing and counting AND unreachable by Prune — its logs
+// leaked forever. It must surface as a terminal placeholder that retention can
+// then reclaim.
+func TestFileUnreadableRunDirIsListedAndPruned(t *testing.T) {
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A healthy, newer run that retention should keep.
+	if err := st.SaveRun(sampleRun("good", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	// Debris: both files unreadable, and old enough to be past the grace window.
+	debris := filepath.Join(root, "runs", "deadbeef")
+	if err := os.MkdirAll(filepath.Join(debris, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"run.json", "summary.json"} {
+		if err := os.WriteFile(filepath.Join(debris, name), []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * unreadableGrace)
+	if err := os.Chtimes(debris, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != 2 {
+		t.Fatalf("ListRuns = %d runs, want 2 (the debris must be visible)", len(sums))
+	}
+	if n, err := st.CountRuns(); err != nil || n != 2 {
+		t.Errorf("CountRuns = %d, %v; want 2, nil", n, err)
+	}
+
+	// Retention reclaims it: it is terminal, and older than the run we keep.
+	if _, err := st.Prune(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(debris); !os.IsNotExist(err) {
+		t.Errorf("unreadable run dir should have been pruned, stat err = %v", err)
+	}
+	if _, err := st.GetRun("good"); err != nil {
+		t.Errorf("the healthy run must survive: %v", err)
+	}
+}
+
+// An oversized record is debris — GetRun will refuse it forever — but deciding
+// that must not read it whole. This is the listing/pruning/startup path, which
+// is exactly what the read cap exists to keep bounded.
+func TestFileOversizedRecordIsDebrisWithoutReadingItWhole(t *testing.T) {
+	orig := maxRunFileBytes
+	maxRunFileBytes = 1 << 10
+	t.Cleanup(func() { maxRunFileBytes = orig })
+
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveRun(sampleRun("good", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	// A record far past the cap, with an unusable sidecar so listing has to
+	// fall back to the record — the path that used to slurp the whole file.
+	dir := filepath.Join(root, "runs", "huge")
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), make([]byte, maxRunFileBytes*64), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "summary.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * unreadableGrace)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if !st.recordStructurallyBroken("huge") {
+		t.Error("an oversized record should be classified as structurally broken")
+	}
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed bool
+	for _, s := range sums {
+		if s.ID == "huge" && s.WorkflowName == unreadableWorkflowName {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("an oversized record should surface as a debris placeholder")
+	}
+}
+
+// A run that is merely unreadable *right now* — a permission change, a flaky
+// disk, the process out of descriptors — must never be treated as debris. The
+// placeholder is terminal, so Prune would delete the run and its logs; one
+// transient errno would silently destroy real history.
+func TestFileTransientlyUnreadableRunSurvives(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod only toggles the read-only attribute there, so the file
+		// stays readable and the unreadable case cannot be staged at all.
+		t.Skip("cannot revoke read permission on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveRun(sampleRun("newer", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	// A perfectly good, finished run whose files just cannot be read at the
+	// moment — and old enough that the age gate alone would not save it.
+	victim := sampleRun("victim", time.Now().Add(-time.Hour))
+	victim.Status = model.StatusSuccess
+	if err := st.SaveRun(victim); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "runs", "victim")
+	for _, name := range []string{"run.json", "summary.json"} {
+		if err := os.Chmod(filepath.Join(dir, name), 0o000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, name := range []string{"run.json", "summary.json"} {
+			_ = os.Chmod(filepath.Join(dir, name), 0o600)
+		}
+	})
+	old := time.Now().Add(-2 * unreadableGrace)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// It must never be labelled debris. (Appearing with its real identity would
+	// be fine — the invariant is about the placeholder, not about presence.)
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sums {
+		if s.ID == "victim" && s.WorkflowName == unreadableWorkflowName {
+			t.Fatalf("a transiently unreadable run must not be listed as debris: %+v", s)
+		}
+	}
+	// ...and, crucially, retention must not delete it.
+	if _, err := st.Prune(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("a transiently unreadable run was destroyed by Prune: %v", err)
+	}
+}
+
+// writeRun creates a run's directory before it writes run.json, so a run being
+// recorded right now looks briefly unreadable. Treating that as debris would
+// let a concurrent Prune delete a live run out from under itself.
+func TestFileUnreadableRunDirWithinGraceIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory that has only just appeared — exactly writeRun's first step.
+	fresh := filepath.Join(root, "runs", "inflight")
+	if err := os.MkdirAll(filepath.Join(fresh, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != 0 {
+		t.Fatalf("a just-created run dir must not be listed as debris, got %d", len(sums))
+	}
+	if _, err := st.Prune(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a just-created run dir must survive Prune: %v", err)
 	}
 }
 
