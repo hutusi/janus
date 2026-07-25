@@ -393,8 +393,25 @@ func runServe(args []string) error {
 		// lingering log-follow connection is enough to exceed the deadline) —
 		// returning early here would exit the process with build process groups
 		// still alive; the deferred drain above handles that.
-		return srv.Shutdown(shutdownCtx)
+		return shutdownServer(shutdownCtx, srv, logger)
 	}
+}
+
+// shutdownServer stops srv gracefully and treats an expired deadline as a
+// successful — if abrupt — shutdown. Shutdown never cancels an in-flight
+// request's context, so a single lingering `?follow=1` log stream is enough to
+// exceed the deadline while everything that matters still unwinds: the listener
+// is closed either way, and the caller's deferred drain cancels in-flight runs
+// and kills their process groups. Reporting that as an error would exit
+// non-zero and tell systemd (or Docker) that a clean `systemctl stop` failed.
+// Any other error is real and propagates.
+func shutdownServer(ctx context.Context, srv *http.Server, logger *slog.Logger) error {
+	err := srv.Shutdown(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		logger.Warn("graceful HTTP shutdown timed out with connections still open; exiting anyway", "err", err)
+		return nil
+	}
+	return err
 }
 
 // runInit writes a starter config file, refusing to overwrite unless --force.

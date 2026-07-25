@@ -1,13 +1,74 @@
 package main
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"testing"
+	"time"
 
 	"github.com/hutusi/janus/internal/config"
 )
+
+// An operator's `systemctl stop` must not report failure just because someone
+// was tailing logs: http.Server.Shutdown never cancels an in-flight request, so
+// one long-lived connection always trips the deadline while runs still drain.
+func TestShutdownServerSwallowsDeadline(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A handler that stays open exactly as a ?follow=1 log stream would.
+	blocked := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(blocked)
+		<-r.Context().Done()
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	go func() { _, _ = http.Get("http://" + ln.Addr().String()) }()
+	<-blocked // the connection is established and held
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := shutdownServer(ctx, srv, logger); err != nil {
+		t.Errorf("a drained shutdown blocked only by an open stream should exit 0, got %v", err)
+	}
+}
+
+// Anything that is not an expired deadline is a real failure and must
+// propagate — only DeadlineExceeded is forgiven.
+func TestShutdownServerPropagatesOtherErrors(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(blocked)
+		<-r.Context().Done()
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	go func() { _, _ = http.Get("http://" + ln.Addr().String()) }()
+	<-blocked
+
+	// Cancelled, not expired: Shutdown reports context.Canceled.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := shutdownServer(ctx, srv, logger); err == nil {
+		t.Error("a cancelled (not expired) context should surface as an error")
+	}
+}
 
 func TestRunInit(t *testing.T) {
 	dir := t.TempDir()
