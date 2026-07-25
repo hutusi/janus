@@ -343,9 +343,34 @@ func (r *Runner) ReconcileInterrupted() (int, error) {
 		}
 		run, err := r.store.GetRun(s.ID)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+			// The full record is unreadable (missing, truncated, corrupt) but
+			// the summary still lists the run as non-terminal. Settle it from
+			// the summary alone: leaving it be would strand it "running"
+			// forever AND re-fail this pass on every subsequent startup, which
+			// latches /healthz degraded permanently — for a bad *record*,
+			// though degraded means a bad *store*. The jobs are genuinely lost
+			// with the record; the reason says so.
+			salvaged := &model.Run{
+				ID:           s.ID,
+				WorkflowName: s.WorkflowName,
+				Event:        s.Event,
+				Status:       model.StatusCancelled,
+				Reason:       "interrupted by a restart; the run record was unreadable and could not be recovered",
+				CreatedAt:    s.CreatedAt,
+				StartedAt:    s.StartedAt,
+				FinishedAt:   now,
+				Jobs:         []*model.JobRun{},
 			}
+			if werr := r.store.UpdateRun(salvaged); werr != nil {
+				// Now the store itself is refusing writes — that is what
+				// degraded is for.
+				if firstErr == nil {
+					firstErr = werr
+				}
+				continue
+			}
+			r.logger.Warn("settled a run whose record was unreadable", "run_id", s.ID, "err", err)
+			repaired++
 			continue
 		}
 		// The summary is a listing cache and can lag behind run.json (the

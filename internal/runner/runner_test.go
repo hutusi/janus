@@ -290,6 +290,53 @@ func TestReconcileIgnoresStaleSidecar(t *testing.T) {
 	}
 }
 
+// A run whose record is unreadable must be settled from its summary, not
+// reported as a store failure: the caller latches /healthz degraded on any
+// error, so returning one here would re-latch on every startup with no way to
+// clear it short of deleting the file by hand.
+func TestReconcileSettlesUnreadableRecord(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
+
+	run := &model.Run{ID: "broken", Status: model.StatusRunning, CreatedAt: time.Now(),
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusRunning, Steps: []*model.StepRun{{Index: 0, Status: model.StatusRunning}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the record while leaving the (non-terminal) sidecar intact — what
+	// a torn write at power-loss leaves behind.
+	if err := os.WriteFile(filepath.Join(dir, "runs", "broken", "run.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := r.ReconcileInterrupted()
+	if err != nil {
+		t.Fatalf("an unreadable record is a bad record, not a bad store: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("repaired = %d, want 1", n)
+	}
+	got, err := st.GetRun("broken")
+	if err != nil {
+		t.Fatalf("the salvaged record must be readable: %v", err)
+	}
+	if got.Status != model.StatusCancelled {
+		t.Errorf("status = %s, want cancelled", got.Status)
+	}
+	if got.Reason == "" {
+		t.Error("the salvaged run should explain itself in reason")
+	}
+
+	// And the pass must converge: a second startup has nothing left to do.
+	if n, err := r.ReconcileInterrupted(); err != nil || n != 0 {
+		t.Errorf("second ReconcileInterrupted = %d, %v; want 0, nil", n, err)
+	}
+}
+
 func TestTriggerAdmissionBound(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
