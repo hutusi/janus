@@ -123,12 +123,39 @@ func (s *Server) copyStep(w io.Writer, runID, job string, step int) {
 	_, _ = io.Copy(w, rc)
 }
 
-// streamStep tails a single step's output until the step is terminal or the
-// client disconnects, polling the store.
+// Bounds on log following. Each follower costs a goroutine and polls the store
+// ~3×/second for as long as it is connected, and a run queued behind a
+// concurrency group can keep one connected for its whole wait. Read endpoints
+// are open when no api_token is configured (the documented default) and the
+// server deliberately sets no WriteTimeout (it would cut streams short), so
+// without these a handful of clients is enough to keep the store busy
+// indefinitely. Vars, not consts, only so tests can shrink them.
+var (
+	maxFollowers      = 32
+	maxFollowDuration = 15 * time.Minute
+)
+
+// streamStep tails a single step's output until the step is terminal, the
+// client disconnects, or the follow duration is reached, polling the store.
 func (s *Server) streamStep(w http.ResponseWriter, r *http.Request, runID, job string, step int) {
+	select {
+	case s.followers <- struct{}{}:
+		defer func() { <-s.followers }()
+	default:
+		// Nothing has been written yet, so writeError can still set its own
+		// headers and status.
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "too many log followers; retry shortly")
+		return
+	}
+
 	flusher, _ := w.(http.Flusher)
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
+	// A disconnect cancels the request context, but a client that connects and
+	// then simply stops reading does not — it would hold its slot forever.
+	deadline := time.NewTimer(maxFollowDuration)
+	defer deadline.Stop()
 
 	// Each tick reads only what appended since the last one — re-reading the
 	// whole log every 300ms would make following an O(n²) disk workload.
@@ -166,6 +193,12 @@ func (s *Server) streamStep(w http.ResponseWriter, r *http.Request, runID, job s
 		}
 		select {
 		case <-r.Context().Done():
+			return
+		case <-deadline.C:
+			_, _ = fmt.Fprintf(w, "\njanus: log follow ended after %s; reconnect to continue\n", maxFollowDuration)
+			if flusher != nil {
+				flusher.Flush()
+			}
 			return
 		case <-ticker.C:
 		}

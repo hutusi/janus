@@ -142,6 +142,91 @@ func TestNoRunnerConfiguredIsNotAPanic(t *testing.T) {
 	})
 }
 
+// followTestServer serves one run with a still-running step, so a ?follow=1
+// request stays inside streamStep instead of returning immediately.
+func followTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	st := store.NewMemory()
+	run := &model.Run{ID: "r1", Status: model.StatusRunning,
+		Jobs: []*model.JobRun{{Name: "build", Status: model.StatusRunning,
+			Steps: []*model.StepRun{{Index: 0, Status: model.StatusRunning}}}}}
+	if err := st.SaveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	w, err := st.LogWriter("r1", "build", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(w, "hello\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// Each follower holds a goroutine and polls the store ~3×/second for as long as
+// it is connected, on an endpoint that is open by default. Excess followers
+// must be turned away rather than accumulate.
+func TestLogFollowCapRejectsExcess(t *testing.T) {
+	orig := maxFollowers
+	maxFollowers = 1
+	t.Cleanup(func() { maxFollowers = orig })
+
+	ts := followTestServer(t) // built after the var is shrunk
+	url := ts.URL + "/api/runs/r1/logs?job=build&step=0&follow=1"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Body.Close() }()
+	// Read the already-written line, proving the handler is inside streamStep
+	// and holding its slot.
+	buf := make([]byte, len("hello\n"))
+	if _, err := io.ReadFull(first.Body, buf); err != nil {
+		t.Fatalf("first follower produced no output: %v", err)
+	}
+
+	second, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Body.Close() }()
+	if second.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("second follower status = %d, want 503", second.StatusCode)
+	}
+	if got := second.Header.Get("Retry-After"); got == "" {
+		t.Error("a 503 for saturation should carry Retry-After")
+	}
+}
+
+// A client that connects and then stops reading never cancels its request
+// context, so only the duration bound reclaims its slot.
+func TestLogFollowStopsAtMaxDuration(t *testing.T) {
+	origD, origN := maxFollowDuration, maxFollowers
+	maxFollowDuration = 150 * time.Millisecond
+	t.Cleanup(func() { maxFollowDuration, maxFollowers = origD, origN })
+
+	ts := followTestServer(t)
+	body := getText(t, ts.URL+"/api/runs/r1/logs?job=build&step=0&follow=1")
+	if !strings.Contains(body, "hello") {
+		t.Errorf("body = %q, want the step output", body)
+	}
+	if !strings.Contains(body, "log follow ended after") {
+		t.Errorf("body = %q, want the follow-ended marker", body)
+	}
+}
+
 // saveFailStore rejects SaveRun, as a full/read-only data dir would.
 type saveFailStore struct {
 	store.Store
