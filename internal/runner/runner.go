@@ -487,6 +487,17 @@ func (r *Runner) Shutdown(grace time.Duration) {
 		r.cancel()
 	case <-time.After(grace):
 		r.cancel() // grace expired: cancel in-flight work, then wait for unwind
+		// Deliberately unbounded, and not an oversight: runTrigger dispatches to
+		// the notifier and the commit-status reporter from a defer that runs
+		// before release() calls wg.Done, so this returning is precisely what
+		// guarantees every finished run was handed off before the caller closes
+		// them. Bounding it lets a live trigger call Notify after Close — an
+		// unguarded wg.Add racing a concurrent wg.Wait, which panics — and drops
+		// commit statuses. It would buy nothing either: every process the daemon
+		// spawns is already bounded (per-step WaitDelay in the engine, per-git
+		// WaitDelay in the workspace), so there is nothing left here that a
+		// deadline would rescue, and the service manager's stop timeout is the
+		// real ceiling regardless.
 		<-done
 	}
 }

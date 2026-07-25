@@ -778,6 +778,47 @@ func TestShutdownRejectsNewTriggers(t *testing.T) {
 	}
 }
 
+// The wait *after* the grace period expires is deliberately unbounded — see the
+// comment on that line in Shutdown for why. This pins the behaviour so the arm
+// is not left with no coverage at all: every other Shutdown test passes a grace
+// long enough that it is never taken.
+//
+// Its reach is limited, and worth being honest about: a timing test cannot
+// prove "unbounded", only that nothing fired within the window it waits. It
+// catches a bound shorter than that window; a longer one (30s, say) would slip
+// past. The comment in Shutdown is the real guard — this is the tripwire under
+// it.
+func TestShutdownWaitsPastGraceForTheUnwind(t *testing.T) {
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	// Admitted and never released: work that does not unwind even once the
+	// grace period has expired and cancellation has been signalled.
+	release, err := r.admitOne()
+	if err != nil {
+		t.Fatalf("admitOne: %v", err)
+	}
+
+	const grace = 20 * time.Millisecond
+	done := make(chan struct{})
+	go func() { r.Shutdown(grace); close(done) }()
+
+	// Far past the grace period, Shutdown must still be waiting.
+	select {
+	case <-done:
+		t.Fatal("Shutdown returned while an admitted trigger was outstanding; the post-grace wait must stay unbounded so the notifier and reporter are not closed underneath a live run")
+	case <-time.After(50 * grace):
+	}
+
+	release()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after the trigger released")
+	}
+}
+
 func TestShutdownWaitsForAdmittedTrigger(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
