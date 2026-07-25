@@ -924,6 +924,35 @@ jobs:
       - run: sleep 30
 `
 
+// waitRunReason is waitRun for a test that is about to assert on Reason.
+//
+// A run cancelled while it was *executing* reaches its terminal status inside
+// Execute, which persists it, and only then does runTrigger attach the cause in
+// a second write — the cause is not attachable earlier, since writing Reason
+// while Execute's goroutines are live would race runState. So a poll that stops
+// at terminality can observe the run in between and read an empty Reason. (Runs
+// cancelled before they execute settle through finishRun, which writes status
+// and reason together, so they are not exposed — but asserting through this
+// helper everywhere keeps the rule simple: if you are going to read Reason,
+// wait for Reason.)
+func waitRunReason(t *testing.T, st store.Store, id string, timeout time.Duration) *model.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		run, err := st.GetRun(id)
+		if err == nil && run.Status.Terminal() && run.Reason != "" {
+			return run
+		}
+		if time.Now().After(deadline) {
+			if err == nil {
+				t.Fatalf("run %s recorded no reason within %s (status %s)", id, timeout, run.Status)
+			}
+			t.Fatalf("run %s did not finish within %s: %v", id, timeout, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // waitStatus polls the store until run id reaches status.
 func waitStatus(t *testing.T, st store.Store, id string, want model.Status, timeout time.Duration) *model.Run {
 	t.Helper()
@@ -988,7 +1017,7 @@ func TestCancelRunningRunKillsProcess(t *testing.T) {
 	}
 	// Idempotent while teardown may still be in flight.
 	r.Cancel(res.RunID, "again")
-	run := waitRun(t, st, res.RunID, 15*time.Second)
+	run := waitRunReason(t, st, res.RunID, 15*time.Second)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Errorf("cancel took %s; the sleeping process was not killed", elapsed)
 	}
@@ -1042,7 +1071,7 @@ func TestCancelPendingRunQueuedForSlot(t *testing.T) {
 	if !r.Cancel(resB.RunID, "cancelled via API") {
 		t.Fatal("Cancel returned false for the queued run")
 	}
-	runB := waitRun(t, st, resB.RunID, 15*time.Second)
+	runB := waitRunReason(t, st, resB.RunID, 15*time.Second)
 	if runB.Status != model.StatusCancelled {
 		t.Fatalf("run B status = %s, want cancelled", runB.Status)
 	}
@@ -1142,7 +1171,7 @@ func TestGroupSupersedesQueuedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Trigger C: %v", err)
 	}
-	runB := waitRun(t, st, resB.RunID, 15*time.Second)
+	runB := waitRunReason(t, st, resB.RunID, 15*time.Second)
 	if runB.Status != model.StatusCancelled {
 		t.Fatalf("run B status = %s, want cancelled", runB.Status)
 	}
@@ -1215,7 +1244,7 @@ jobs:
 	if err != nil {
 		t.Fatalf("Trigger B: %v", err)
 	}
-	runA = waitRun(t, st, resA.RunID, 15*time.Second)
+	runA = waitRunReason(t, st, resA.RunID, 15*time.Second)
 	if runA.Status != model.StatusCancelled {
 		t.Fatalf("run A status = %s, want cancelled", runA.Status)
 	}
