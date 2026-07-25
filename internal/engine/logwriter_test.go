@@ -72,6 +72,61 @@ func TestCappedWriterZeroBudget(t *testing.T) {
 	}
 }
 
+// A step is not obliged to ever emit a newline — a progress bar redrawing with
+// \r never does. linePrefixer held every such byte until one arrived, and
+// `janus run` keeps that buffer for the whole step, so it grew without bound.
+func TestLinePrefixerBoundsUnterminatedLines(t *testing.T) {
+	var buf bytes.Buffer
+	p := newLinePrefixer(&buf, "[build] ")
+
+	// Five times the bound, with no newline anywhere.
+	total := 5 * maxPrefixedLineBytes
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	for written := 0; written < total; written += len(chunk) {
+		n, err := p.Write(chunk)
+		if err != nil {
+			t.Fatalf("Write errored: %v", err)
+		}
+		if n != len(chunk) {
+			t.Fatalf("Write = %d, want %d (a short write would fail the step)", n, len(chunk))
+		}
+		if len(p.buf) >= 2*maxPrefixedLineBytes {
+			t.Fatalf("buffer grew to %d bytes, want it bounded near %d", len(p.buf), maxPrefixedLineBytes)
+		}
+	}
+
+	// The output was emitted rather than hoarded, and stayed attributable.
+	if buf.Len() == 0 {
+		t.Fatal("nothing was emitted for an unterminated line")
+	}
+	if !bytes.HasPrefix(buf.Bytes(), []byte("[build] ")) {
+		t.Error("emitted chunks should still carry the job prefix")
+	}
+	if got := bytes.Count(buf.Bytes(), []byte("[build] ")); got < 2 {
+		t.Errorf("prefix appears %d times, want it repeated across chunks", got)
+	}
+
+	// Close still flushes the remainder.
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.buf) != 0 {
+		t.Errorf("Close left %d bytes buffered", len(p.buf))
+	}
+}
+
+// A newline-terminated stream must be unaffected by the bound.
+func TestLinePrefixerNormalLinesUnchanged(t *testing.T) {
+	var buf bytes.Buffer
+	p := newLinePrefixer(&buf, "[build] ")
+	if _, err := p.Write([]byte("one\ntwo\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "[build] one\n[build] two\n"; got != want {
+		t.Errorf("buf = %q, want %q", got, want)
+	}
+}
+
 // os/exec fails a command on a short write or a write error, so a capped log
 // must never report either — no matter how the output is chunked.
 func TestCappedWriterNeverShortWrites(t *testing.T) {

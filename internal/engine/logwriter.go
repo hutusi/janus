@@ -75,10 +75,20 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 	return len(p), err
 }
 
+// maxPrefixedLineBytes bounds how much of an unterminated line linePrefixer
+// will hold. Steps are not obliged to emit newlines — a progress bar redrawing
+// with \r, or one enormous line, never does — and `janus run` keeps this buffer
+// in memory for the whole step, so without a bound it grows without limit. It
+// is the tee's counterpart to log_limit, which bounds only the stored sink.
+const maxPrefixedLineBytes = 64 << 10
+
 // linePrefixer prepends a prefix to every complete line, emitting each line as
 // a single Write to the underlying writer so a parallel job cannot slip output
 // between a line's prefix and its content. Partial lines are buffered until a
-// newline arrives (or Close flushes the remainder).
+// newline arrives (or Close flushes the remainder) — except that a line running
+// past maxPrefixedLineBytes is emitted in bounded chunks, each carrying the
+// prefix. Repeating the prefix mid-line is the deliberate trade: interleaved
+// output from parallel jobs stays attributable, and memory stays bounded.
 type linePrefixer struct {
 	w      io.Writer
 	prefix []byte
@@ -103,6 +113,19 @@ func (p *linePrefixer) Write(b []byte) (int, error) {
 			return 0, err
 		}
 		p.buf = p.buf[i+1:]
+	}
+	// No newline in sight and the buffer has grown past its bound: emit what we
+	// have as a prefixed chunk rather than hold it. Write still reports a full
+	// write with no error — os/exec fails a command whose output copy
+	// short-writes, and bounding a log must never change a step's exit code.
+	for len(p.buf) >= maxPrefixedLineBytes {
+		chunk := make([]byte, 0, len(p.prefix)+maxPrefixedLineBytes)
+		chunk = append(chunk, p.prefix...)
+		chunk = append(chunk, p.buf[:maxPrefixedLineBytes]...)
+		if _, err := p.w.Write(chunk); err != nil {
+			return 0, err // matches the newline path above
+		}
+		p.buf = p.buf[maxPrefixedLineBytes:]
 	}
 	return len(b), nil
 }
