@@ -125,16 +125,22 @@ func Checkout(ctx context.Context, opt Options) (*Workspace, error) {
 		if err == nil {
 			return ws, nil
 		}
-		// A reuse failure caused by cancellation or a deadline says nothing
-		// about the directory's health — the same reasoning ensureMirror
-		// applies to its own probe. Rebuilding here would delete the untracked
-		// build caches this strategy exists to keep, and every git command
-		// below would fail against the same dead context anyway.
-		if ctx.Err() != nil {
+		// Rebuild only when git itself rendered a verdict on the directory.
+		// Every other failure — a cancelled context, a fetch that could not
+		// reach the remote, a commit that is not there, a HEAD that did not
+		// verify — says nothing about the directory's health, and rebuilding
+		// on one would delete the untracked build caches this strategy exists
+		// to keep. It would also not help: the rebuild re-runs the same fetch
+		// against the same broken network. This mirrors what ensureMirror
+		// already does for mirrors ("deleting a large healthy mirror on a
+		// transient error would force a full re-clone on the same bad
+		// network"); the caller falls back to a fresh per-run clone for this
+		// run, so the run still proceeds.
+		if !errors.Is(err, errUnusableRepo) {
 			return nil, err
 		}
-		// Self-heal: any other reuse failure (missing/corrupt .git, stale lock
-		// files, unreachable commit) rebuilds the directory from scratch.
+		// Self-heal: the directory is not a git repository we can operate on
+		// (missing or corrupt .git), so rebuild it from scratch.
 		if err := os.RemoveAll(opt.Dir); err != nil {
 			return nil, err
 		}
@@ -296,14 +302,33 @@ func (w *Workspace) ChangedFiles(ctx context.Context, before string) ([]string, 
 // output) deliberately survive — reset, unlike checkout, also overwrites
 // untracked files that a new commit starts tracking. Any failure is returned
 // so the caller can rebuild the directory from scratch.
+// errUnusableRepo marks a reuse failure that is genuinely about the directory —
+// it is not a git repository we can operate on — as opposed to a failure of the
+// work being done in it (a fetch, a reset, a HEAD verification), which says
+// nothing about whether the directory is sound. Only the former justifies
+// deleting it. See the self-heal branch in Checkout.
+var errUnusableRepo = errors.New("workspace: reused directory is not a usable git repository")
+
 func reuseCheckout(ctx context.Context, opt Options) (*Workspace, error) {
 	if _, err := os.Stat(filepath.Join(opt.Dir, ".git")); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %v", errUnusableRepo, err)
+		}
 		return nil, err
 	}
 	ws := &Workspace{Dir: opt.Dir, keep: opt.Keep, env: gitEnv(os.Environ(),
 		gitConfigSet(ctx, opt.Dir, "core.sshCommand"),
 		gitConfigSet(ctx, opt.Dir, "core.askpass"))}
+	// A purely local operation, and the first thing to touch the repository:
+	// if git cannot even rewrite the remote, the directory is not a repository
+	// we can work with. A cancelled context surfaces as an ExitError too (the
+	// deadline kills git mid-run), so it is checked first — same ordering as
+	// ensureMirror's probe.
 	if err := ws.git(ctx, "remote", "set-url", "origin", opt.RepoURL); err != nil {
+		var ee *exec.ExitError
+		if ctx.Err() == nil && errors.As(err, &ee) {
+			return nil, fmt.Errorf("%w: %v", errUnusableRepo, err)
+		}
 		return nil, err
 	}
 	target, err := ws.fetchTarget(ctx, opt)

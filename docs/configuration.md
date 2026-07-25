@@ -232,11 +232,12 @@ What you trade and how it behaves:
 
 - **Not hermetic.** A build can be affected by leftovers from previous runs.
   Delete the repo's `persist-*` directory any time to force a clean rebuild —
-  the next run recreates it. (Any git failure in the reuse path — a corrupt
-  directory, a stale lock file, an unfetchable commit — also triggers an
-  automatic rebuild from scratch, at the cost of one cold build. A run
-  **cancelled** mid-update is not such a failure: the directory is left intact,
-  so shutting down or cancelling a run never costs the next one its caches.)
+  the next run recreates it. (A directory that is no longer a usable git
+  repository — a missing or corrupt `.git` — rebuilds itself automatically, at
+  the cost of one cold build. Nothing else does: a run cancelled mid-update, a
+  fetch that cannot reach the remote, or a commit that is not there leaves the
+  directory intact and falls back to a fresh per-run clone for that run, so a
+  shutdown or a network blip never costs the next run its caches.)
 - **Same-repo runs are serialized.** A trigger that arrives while another run
   of the same repo is building falls back to a fresh per-run directory for
   that one run — correct, just without the caches. Different repos are
