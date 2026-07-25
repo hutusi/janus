@@ -231,6 +231,20 @@ type Run struct {
 	WorkspaceDir     string    `json:"workspace_dir,omitempty"`
 }
 
+// MarshalJSON redacts credentials from Reason whenever a Run is serialized,
+// mirroring what Event.MarshalJSON does for RepoURL. Reason is redacted before
+// it is stored too, so this is belt-and-braces for records written by versions
+// that predate that fix: a checkout failure could fill Reason with a git error
+// echoing a credentialed clone URL, and those records are still read back by
+// GET /api/runs/{id} and rendered on the (unauthenticated) dashboard. Redacting
+// on the way out closes that surface without rewriting history on disk.
+func (r Run) MarshalJSON() ([]byte, error) {
+	type alias Run // no MarshalJSON of its own → no recursion, same fields/tags
+	a := alias(r)
+	a.Reason = RedactURL(r.Reason)
+	return json.Marshal(a)
+}
+
 // RunSummary is the compact projection of a Run used for listings: it omits
 // the heavy Jobs slice (commands, steps), so listing/pruning/reconciliation can
 // scan history without holding every full record in memory. Its json tags match
