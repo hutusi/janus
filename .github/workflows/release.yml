@@ -20,6 +20,14 @@ jobs:
           go-version-file: go.mod
           cache: false # publish job: don't reuse shared cache (poisoning surface)
 
+      # Gate publication on the suite passing. A tag can point at any commit,
+      # including one that never went through ci.yml, and a release is not
+      # retractable once the binaries are up — so the tests run here too rather
+      # than being assumed from the branch. `-race` stays ci.yml's job: it is
+      # enforced on every push to main and every PR, and tags are cut from main.
+      - name: Test
+        run: go test ./...
+
       - name: Build cross-platform binaries
         env:
           VERSION: ${{ github.ref_name }} # the tag, e.g. v0.1.0
