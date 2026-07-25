@@ -29,8 +29,11 @@ import (
 )
 
 const (
-	testGitLabSecret = "shh-secret"
-	testAPIToken     = "test-api-token"
+	testGitLabSecret  = "shh-secret"
+	testGitHubSecret  = "gh-secret"
+	testGiteeSecret   = "gitee-secret"
+	testGitCodeSecret = "gitcode-secret"
+	testAPIToken      = "test-api-token"
 )
 
 // initGitRepo creates a repo containing .janus/ci.yml and returns its path + SHA.
@@ -89,6 +92,9 @@ func newTestServerAllow(t *testing.T, entries ...string) *httptest.Server {
 	srv := New(st, rn, "test",
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		WithProvider(provider.GitLab{}, testGitLabSecret),
+		WithProvider(provider.GitHub{}, testGitHubSecret),
+		WithProvider(provider.Gitee{}, testGiteeSecret),
+		WithProvider(provider.GitCode{}, testGitCodeSecret),
 		WithAPIToken(testAPIToken),
 	)
 	ts := httptest.NewServer(srv.Handler())

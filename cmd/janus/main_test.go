@@ -1,19 +1,248 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hutusi/janus/internal/config"
+	"github.com/hutusi/janus/internal/store"
 )
+
+// buildServeArgs returns the flags every wiring test needs: an explicit config
+// path (so ./janus.yml in the working directory can never leak in) plus temp
+// directories, with extra flags appended.
+func buildServeArgs(t *testing.T, configPath string, extra ...string) []string {
+	t.Helper()
+	args := []string{
+		"--config", configPath,
+		"--data-dir", t.TempDir(),
+		"--workspace-root", t.TempDir(),
+	}
+	return append(args, extra...)
+}
+
+// writeConfig writes a config file and returns its path.
+func writeConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "janus.yml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Precedence is documented as defaults < file < env < flags, and it is applied
+// at the call site in buildServe, so nothing below the CLI can verify it.
+func TestBuildServeConfigPrecedence(t *testing.T) {
+	cfgPath := writeConfig(t, "addr: \":9001\"\nhistory_limit: 7\ngitlab_secret: from-file\n")
+
+	t.Run("file overrides defaults", func(t *testing.T) {
+		c, err := buildServe(buildServeArgs(t, cfgPath), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.cfg.Addr != ":9001" || c.cfg.HistoryLimit != 7 || c.cfg.GitLabSecret != "from-file" {
+			t.Errorf("cfg = %+v, want the file's values", c.cfg)
+		}
+	})
+
+	t.Run("env overrides file", func(t *testing.T) {
+		t.Setenv("JANUS_GITLAB_SECRET", "from-env")
+		c, err := buildServe(buildServeArgs(t, cfgPath), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.cfg.GitLabSecret != "from-env" {
+			t.Errorf("gitlab_secret = %q, want from-env", c.cfg.GitLabSecret)
+		}
+	})
+
+	t.Run("flag overrides env and file", func(t *testing.T) {
+		t.Setenv("JANUS_GITLAB_SECRET", "from-env")
+		c, err := buildServe(buildServeArgs(t, cfgPath, "--gitlab-secret", "from-flag", "--addr", ":9002"), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.cfg.GitLabSecret != "from-flag" || c.cfg.Addr != ":9002" {
+			t.Errorf("gitlab_secret = %q, addr = %q; want the flag values", c.cfg.GitLabSecret, c.cfg.Addr)
+		}
+	})
+
+	t.Run("unset flags do not clobber the file", func(t *testing.T) {
+		c, err := buildServe(buildServeArgs(t, cfgPath, "--addr", ":9003"), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.cfg.HistoryLimit != 7 {
+			t.Errorf("history_limit = %d, want 7 — an unset flag must not apply its default", c.cfg.HistoryLimit)
+		}
+	})
+}
+
+// Which /webhooks/* routes exist is decided entirely by which secrets are
+// configured. Asserted through the real handler, since the registry is
+// unexported: a configured provider rejects a bad signature (401) while an
+// unconfigured one does not exist at all (404).
+func TestBuildServeRegistersConfiguredProviders(t *testing.T) {
+	all := []string{"gitlab", "github", "gitee", "gitcode"}
+	for _, name := range all {
+		t.Run(name, func(t *testing.T) {
+			cfgPath := writeConfig(t, name+"_secret: s3cret\n")
+			c, err := buildServe(buildServeArgs(t, cfgPath), io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ts := httptest.NewServer(c.srv.Handler)
+			t.Cleanup(ts.Close)
+
+			for _, p := range all {
+				resp, err := http.Post(ts.URL+"/webhooks/"+p, "application/json", strings.NewReader("{}"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = resp.Body.Close()
+				if p == name {
+					if resp.StatusCode == http.StatusNotFound {
+						t.Errorf("/webhooks/%s should be enabled by %s_secret, got 404", p, name)
+					}
+				} else if resp.StatusCode != http.StatusNotFound {
+					t.Errorf("/webhooks/%s should be disabled, got %d", p, resp.StatusCode)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildServeNotifierAndReporter(t *testing.T) {
+	t.Run("absent by default", func(t *testing.T) {
+		c, err := buildServe(buildServeArgs(t, writeConfig(t, "addr: \":0\"\n")), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.notifier != nil {
+			t.Error("notifier should be nil with no notifications configured")
+		}
+		if c.reporter != nil {
+			t.Error("reporter should be nil with no API token configured")
+		}
+	})
+
+	t.Run("built when configured", func(t *testing.T) {
+		cfgPath := writeConfig(t, "notifications:\n  - url: \"https://hooks.example.com/x\"\ngitlab_api_token: tok\ngitlab_url: \"https://gitlab.example.com\"\n")
+		c, err := buildServe(buildServeArgs(t, cfgPath), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.notifier == nil {
+			t.Error("notifier should be built when notifications are configured")
+		}
+		if c.reporter == nil {
+			t.Error("reporter should be built when gitlab_api_token is set")
+		}
+	})
+
+	t.Run("a bad notification url is a named startup error", func(t *testing.T) {
+		cfgPath := writeConfig(t, "notifications:\n  - url: \"not-a-url\"\n")
+		_, err := buildServe(buildServeArgs(t, cfgPath), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "notifications") {
+			t.Errorf("err = %v, want it to name notifications", err)
+		}
+	})
+}
+
+func TestBuildServeStoreSelection(t *testing.T) {
+	t.Run("data_dir gives a file store", func(t *testing.T) {
+		c, err := buildServe(buildServeArgs(t, writeConfig(t, "addr: \":0\"\n")), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := c.store.(*store.File); !ok {
+			t.Errorf("store = %T, want *store.File", c.store)
+		}
+	})
+
+	t.Run("no data_dir warns and uses memory", func(t *testing.T) {
+		var logs bytes.Buffer
+		c, err := buildServe([]string{
+			"--config", writeConfig(t, "addr: \":0\"\n"),
+			"--workspace-root", t.TempDir(),
+		}, &logs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := c.store.(*store.Memory); !ok {
+			t.Errorf("store = %T, want *store.Memory", c.store)
+		}
+		if !strings.Contains(logs.String(), "in-memory") {
+			t.Errorf("logs = %q, want an in-memory warning", logs.String())
+		}
+	})
+}
+
+// The allowlist is deny-by-default, so an operator who configures nothing gets
+// 403 on every trigger — that has to be said out loud at startup.
+func TestBuildServeWarnings(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"empty allowlist", nil, "no repos allowed"},
+		{"wildcard allowlist", []string{"--allow-repos", "*"}, "allowing ALL repositories"},
+		{"no provider secret", []string{"--allow-repos", "*"}, "no webhook provider secret set"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			if _, err := buildServe(buildServeArgs(t, writeConfig(t, "addr: \":0\"\n"), tc.args...), &logs); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), tc.want) {
+				t.Errorf("logs = %q, want them to mention %q", logs.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An unreadable run record must not leave the daemon degraded at startup —
+// the end-to-end form of the reconciliation fix.
+func TestBuildServeStartupSurvivesUnreadableRecord(t *testing.T) {
+	dataDir := t.TempDir()
+	runDir := filepath.Join(dataDir, "runs", "broken")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	summary := `{"id":"broken","workflow_name":"ci","status":"running","created_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(runDir, "summary.json"), []byte(summary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := buildServe([]string{
+		"--config", writeConfig(t, "addr: \":0\"\n"),
+		"--data-dir", dataDir,
+		"--workspace-root", t.TempDir(),
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.runner.Degraded() {
+		t.Error("a single unreadable run record must not latch the daemon degraded")
+	}
+}
 
 // An operator's `systemctl stop` must not report failure just because someone
 // was tailing logs: http.Server.Shutdown never cancels an in-flight request, so

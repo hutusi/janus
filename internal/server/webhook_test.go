@@ -2,6 +2,9 @@ package server
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +43,147 @@ func gitlabPushTo(t *testing.T, ts *httptest.Server, path, repo, sha, branch, to
 		t.Fatal(err)
 	}
 	return resp
+}
+
+// githubPush posts a GitHub "push" event, signed the way GitHub signs it.
+func githubPush(t *testing.T, ts *httptest.Server, repo, sha, branch, secret string) *http.Response {
+	t.Helper()
+	payload := fmt.Sprintf(`{
+		"ref": "refs/heads/%s",
+		"after": %q,
+		"repository": { "clone_url": %q, "full_name": "acme/app" }
+	}`, branch, sha, repo)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	req, _ := http.NewRequest("POST", ts.URL+"/webhooks/github", strings.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// giteePush posts a Gitee "Push Hook" in password mode (the plaintext secret in
+// X-Gitee-Token), which is one of the two modes a Gitee hook can be set to.
+func giteePush(t *testing.T, ts *httptest.Server, repo, sha, branch, token string) *http.Response {
+	t.Helper()
+	payload := fmt.Sprintf(`{
+		"ref": "refs/heads/%s",
+		"after": %q,
+		"repository": { "clone_url": %q, "full_name": "acme/app" }
+	}`, branch, sha, repo)
+	req, _ := http.NewRequest("POST", ts.URL+"/webhooks/gitee", strings.NewReader(payload))
+	req.Header.Set("X-Gitee-Event", "Push Hook")
+	req.Header.Set("X-Gitee-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// gitcodePush posts a GitCode "Push Hook". GitCode emits GitLab-format
+// payloads, so the body matches gitlabPushTo's — only the headers differ.
+func gitcodePush(t *testing.T, ts *httptest.Server, repo, sha, branch, token string) *http.Response {
+	t.Helper()
+	payload := fmt.Sprintf(`{
+		"object_kind": "push",
+		"ref": "refs/heads/%s",
+		"after": "%s",
+		"project": { "git_http_url": %q }
+	}`, branch, sha, repo)
+	req, _ := http.NewRequest("POST", ts.URL+"/webhooks/gitcode", strings.NewReader(payload))
+	req.Header.Set("X-GitCode-Event", "Push Hook")
+	req.Header.Set("X-GitCode-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// Every provider must survive the whole server path — verify, allowlist,
+// Trigger, checkout, run — not just its parser's unit tests. Only GitLab was
+// covered end to end before.
+func TestWebhookProvidersEndToEnd(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	tests := []struct {
+		name     string
+		post     func(*testing.T, *httptest.Server, string, string, string, string) *http.Response
+		secret   string
+		provider string
+	}{
+		{"gitlab", gitlabPush, testGitLabSecret, "gitlab"},
+		{"github", githubPush, testGitHubSecret, "github"},
+		{"gitee", giteePush, testGiteeSecret, "gitee"},
+		{"gitcode", gitcodePush, testGitCodeSecret, "gitcode"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, sha := initGitRepo(t, `name: ci
+on: { push: { branches: [main] } }
+jobs:
+  build:
+    steps:
+      - run: echo ok
+`)
+			ts := newTestServer(t)
+
+			resp := tc.post(t, ts, repo, sha, "main", tc.secret)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusAccepted {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 202; body = %s", resp.StatusCode, body)
+			}
+			var tr struct {
+				RunID string `json:"run_id"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+				t.Fatal(err)
+			}
+			if tr.RunID == "" {
+				t.Fatal("empty run_id")
+			}
+
+			run := pollRun(t, ts, tr.RunID, 15*time.Second)
+			if run.Status != model.StatusSuccess {
+				t.Fatalf("run status = %s (reason %q), want success", run.Status, run.Reason)
+			}
+			if got := string(run.Event.Provider); got != tc.provider {
+				t.Errorf("event provider = %q, want %q", got, tc.provider)
+			}
+			if run.Event.Kind != model.EventPush {
+				t.Errorf("event kind = %q, want push", run.Event.Kind)
+			}
+		})
+	}
+}
+
+// A tampered secret or signature must be rejected on every provider.
+func TestWebhookProvidersRejectBadSecret(t *testing.T) {
+	tests := []struct {
+		name string
+		post func(*testing.T, *httptest.Server, string, string, string, string) *http.Response
+	}{
+		{"gitlab", gitlabPush},
+		{"github", githubPush},
+		{"gitee", giteePush},
+		{"gitcode", gitcodePush},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newTestServer(t)
+			resp := tc.post(t, ts, "https://git.example.com/g/p.git", strings.Repeat("a", 40), "main", "wrong-secret")
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+	}
 }
 
 func TestWebhookGitLabPushRuns(t *testing.T) {
@@ -372,7 +516,9 @@ func TestWebhookCheckoutFailureRecordsFailedRun(t *testing.T) {
 
 func TestWebhookUnknownProvider(t *testing.T) {
 	ts := newTestServer(t)
-	resp, err := http.Post(ts.URL+"/webhooks/github", "application/json", bytes.NewReader([]byte(`{}`)))
+	// A provider Janus has no implementation for at all — the route must not
+	// exist, rather than existing and rejecting the signature.
+	resp, err := http.Post(ts.URL+"/webhooks/bitbucket", "application/json", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
