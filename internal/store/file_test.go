@@ -365,6 +365,89 @@ func TestFileWriteAtomicCleansUpAfterFailedRename(t *testing.T) {
 	}
 }
 
+// A run directory with no readable record used to be skipped everywhere, so it
+// was invisible to listing and counting AND unreachable by Prune — its logs
+// leaked forever. It must surface as a terminal placeholder that retention can
+// then reclaim.
+func TestFileUnreadableRunDirIsListedAndPruned(t *testing.T) {
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A healthy, newer run that retention should keep.
+	if err := st.SaveRun(sampleRun("good", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	// Debris: both files unreadable, and old enough to be past the grace window.
+	debris := filepath.Join(root, "runs", "deadbeef")
+	if err := os.MkdirAll(filepath.Join(debris, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"run.json", "summary.json"} {
+		if err := os.WriteFile(filepath.Join(debris, name), []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * unreadableGrace)
+	if err := os.Chtimes(debris, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != 2 {
+		t.Fatalf("ListRuns = %d runs, want 2 (the debris must be visible)", len(sums))
+	}
+	if n, err := st.CountRuns(); err != nil || n != 2 {
+		t.Errorf("CountRuns = %d, %v; want 2, nil", n, err)
+	}
+
+	// Retention reclaims it: it is terminal, and older than the run we keep.
+	if _, err := st.Prune(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(debris); !os.IsNotExist(err) {
+		t.Errorf("unreadable run dir should have been pruned, stat err = %v", err)
+	}
+	if _, err := st.GetRun("good"); err != nil {
+		t.Errorf("the healthy run must survive: %v", err)
+	}
+}
+
+// writeRun creates a run's directory before it writes run.json, so a run being
+// recorded right now looks briefly unreadable. Treating that as debris would
+// let a concurrent Prune delete a live run out from under itself.
+func TestFileUnreadableRunDirWithinGraceIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory that has only just appeared — exactly writeRun's first step.
+	fresh := filepath.Join(root, "runs", "inflight")
+	if err := os.MkdirAll(filepath.Join(fresh, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != 0 {
+		t.Fatalf("a just-created run dir must not be listed as debris, got %d", len(sums))
+	}
+	if _, err := st.Prune(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a just-created run dir must survive Prune: %v", err)
+	}
+}
+
 func TestFileStoreMissingRun(t *testing.T) {
 	st, _ := NewFile(t.TempDir())
 	if _, err := st.GetRun("nope"); err == nil {

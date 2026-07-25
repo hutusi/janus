@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hutusi/janus/internal/model"
 )
@@ -225,6 +226,36 @@ func (f *File) readSummary(id string) (*model.RunSummary, error) {
 	return s, nil
 }
 
+// unreadableGrace is how long a run directory with no readable record is left
+// alone before it is treated as debris. writeRun creates the directory (and its
+// logs/ subdirectory) *before* it writes run.json, so a run being recorded
+// right now legitimately looks unreadable for that instant — without this
+// window a concurrent Prune could delete a live run's directory out from under
+// it. A var only so tests can shrink it.
+var unreadableGrace = 5 * time.Minute
+
+// unreadableSummary synthesizes a terminal placeholder for a run directory
+// whose record cannot be read, or returns nil if the directory is too young to
+// be debris (see unreadableGrace) and should simply be ignored for now.
+//
+// The placeholder is cancelled rather than failed: "we cannot tell how this
+// ended" is the same thing crash recovery records, and a run that may well have
+// succeeded should not be painted red. Terminal is what makes it eligible for
+// history_limit retention, which is the whole point.
+func (f *File) unreadableSummary(e os.DirEntry) *model.RunSummary {
+	info, err := e.Info()
+	if err != nil || time.Since(info.ModTime()) < unreadableGrace {
+		return nil
+	}
+	return &model.RunSummary{
+		ID:           e.Name(),
+		WorkflowName: "(unreadable run record)",
+		Status:       model.StatusCancelled,
+		CreatedAt:    info.ModTime(),
+		FinishedAt:   info.ModTime(),
+	}
+}
+
 // allSummaries scans every run directory and returns compact summaries
 // newest-first, reading only the tiny summary.json sidecar per run (see
 // readSummary) — not the full run.json — so listing stays cheap in both memory
@@ -240,9 +271,25 @@ func (f *File) allSummaries() ([]*model.RunSummary, error) {
 		if !e.IsDir() {
 			continue
 		}
+		if err := checkRunID(e.Name()); err != nil {
+			continue // not a run directory Janus created
+		}
 		s, err := f.readSummary(e.Name())
 		if err != nil {
-			continue // skip incomplete/unreadable run dirs
+			// Neither summary.json nor run.json can be read. Skipping made the
+			// directory invisible to listing, counting, reconciliation AND
+			// Prune, so its logs were never reclaimed and history_limit
+			// silently under-counted — a permanent leak, and an interrupted
+			// writeRun leaves exactly this shape.
+			//
+			// Surface it as a terminal placeholder instead, so the operator can
+			// see it and ordinary retention reclaims it. Deleting it outright
+			// here would be wrong: a transient EIO or permission blip would
+			// destroy a run and its logs that are merely unreadable right now.
+			s = f.unreadableSummary(e)
+			if s == nil {
+				continue
+			}
 		}
 		sums = append(sums, s)
 	}
