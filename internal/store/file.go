@@ -173,23 +173,40 @@ func syncDir(dir string) {
 // written or read whole. A var so tests can shrink it.
 var maxRunFileBytes int64 = 16 << 20
 
+// readCapped reads path without ever buffering more than max bytes, reporting
+// tooBig when the file exists but exceeds the cap. Every site that loads a
+// store file goes through it — a corrupt or hostile record must not be able to
+// turn a listing, a prune, or startup reconciliation into an OOM, and checking
+// the size *after* os.ReadFile would do exactly that. Same shape, and the same
+// reason, as pipeline.ReadFile.
+func readCapped(path string, max int64) (data []byte, tooBig bool, err error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err = io.ReadAll(io.LimitReader(file, max+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > max {
+		return nil, true, nil
+	}
+	return data, false, nil
+}
+
 func (f *File) GetRun(id string) (*model.Run, error) {
 	if err := checkRunID(id); err != nil {
 		return nil, err
 	}
-	file, err := os.Open(filepath.Join(f.runDir(id), "run.json"))
+	data, tooBig, err := readCapped(filepath.Join(f.runDir(id), "run.json"), maxRunFileBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("run %q not found", id)
 		}
 		return nil, err
 	}
-	defer func() { _ = file.Close() }()
-	data, err := io.ReadAll(io.LimitReader(file, maxRunFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxRunFileBytes {
+	if tooBig {
 		return nil, fmt.Errorf("run %q metadata is too large (limit %d bytes)", id, maxRunFileBytes)
 	}
 	var run model.Run
@@ -227,7 +244,7 @@ const maxSummaryFileBytes = 64 << 10
 // deriving the summary from run.json and rewrites the sidecar (self-healing,
 // backward-compatible).
 func (f *File) readSummary(id string) (*model.RunSummary, error) {
-	if data, err := os.ReadFile(filepath.Join(f.runDir(id), "summary.json")); err == nil && int64(len(data)) <= maxSummaryFileBytes {
+	if data, tooBig, err := readCapped(filepath.Join(f.runDir(id), "summary.json"), maxSummaryFileBytes); err == nil && !tooBig {
 		var s model.RunSummary
 		if err := json.Unmarshal(data, &s); err == nil {
 			return &s, nil
@@ -251,6 +268,11 @@ func (f *File) readSummary(id string) (*model.RunSummary, error) {
 // it. A var only so tests can shrink it.
 var unreadableGrace = 5 * time.Minute
 
+// unreadableWorkflowName is the placeholder name a debris directory is listed
+// under. Named so callers (and tests) can recognise the placeholder rather than
+// matching the string.
+const unreadableWorkflowName = "(unreadable run record)"
+
 // recordStructurallyBroken reports whether id's run.json is unusable in a way
 // that cannot resolve on its own — absent, oversized, or unparseable.
 //
@@ -263,13 +285,18 @@ var unreadableGrace = 5 * time.Minute
 // Structural breakage is judged from the file itself rather than from a
 // readSummary error, because that error deliberately collapses every cause.
 func (f *File) recordStructurallyBroken(id string) bool {
-	data, err := os.ReadFile(filepath.Join(f.runDir(id), "run.json"))
+	// readCapped, not os.ReadFile: this runs on the listing, counting, pruning
+	// and startup paths, and the record it is inspecting is by definition one
+	// GetRun could not read — including because it is enormous. Reading it
+	// whole to decide that would be an OOM in exactly the place the cap exists
+	// to protect.
+	data, tooBig, err := readCapped(filepath.Join(f.runDir(id), "run.json"), maxRunFileBytes)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return true // nothing to recover, and nothing will create it
 	case err != nil:
 		return false // transient or environmental: leave the directory alone
-	case int64(len(data)) > maxRunFileBytes:
+	case tooBig:
 		return true // GetRun would refuse it too, forever
 	}
 	var run model.Run
@@ -301,7 +328,7 @@ func (f *File) unreadableSummary(e os.DirEntry) *model.RunSummary {
 	}
 	return &model.RunSummary{
 		ID:           e.Name(),
-		WorkflowName: "(unreadable run record)",
+		WorkflowName: unreadableWorkflowName,
 		Status:       model.StatusCancelled,
 		CreatedAt:    info.ModTime(),
 		FinishedAt:   info.ModTime(),

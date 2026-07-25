@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -418,11 +419,68 @@ func TestFileUnreadableRunDirIsListedAndPruned(t *testing.T) {
 	}
 }
 
+// An oversized record is debris — GetRun will refuse it forever — but deciding
+// that must not read it whole. This is the listing/pruning/startup path, which
+// is exactly what the read cap exists to keep bounded.
+func TestFileOversizedRecordIsDebrisWithoutReadingItWhole(t *testing.T) {
+	orig := maxRunFileBytes
+	maxRunFileBytes = 1 << 10
+	t.Cleanup(func() { maxRunFileBytes = orig })
+
+	root := t.TempDir()
+	st, err := NewFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveRun(sampleRun("good", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	// A record far past the cap, with an unusable sidecar so listing has to
+	// fall back to the record — the path that used to slurp the whole file.
+	dir := filepath.Join(root, "runs", "huge")
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), make([]byte, maxRunFileBytes*64), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "summary.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * unreadableGrace)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if !st.recordStructurallyBroken("huge") {
+		t.Error("an oversized record should be classified as structurally broken")
+	}
+	sums, err := st.ListRuns(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed bool
+	for _, s := range sums {
+		if s.ID == "huge" && s.WorkflowName == unreadableWorkflowName {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("an oversized record should surface as a debris placeholder")
+	}
+}
+
 // A run that is merely unreadable *right now* — a permission change, a flaky
 // disk, the process out of descriptors — must never be treated as debris. The
 // placeholder is terminal, so Prune would delete the run and its logs; one
 // transient errno would silently destroy real history.
 func TestFileTransientlyUnreadableRunSurvives(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod only toggles the read-only attribute there, so the file
+		// stays readable and the unreadable case cannot be staged at all.
+		t.Skip("cannot revoke read permission on windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores file permissions")
 	}
@@ -458,13 +516,14 @@ func TestFileTransientlyUnreadableRunSurvives(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// It is skipped (not listed as a placeholder)...
+	// It must never be labelled debris. (Appearing with its real identity would
+	// be fine — the invariant is about the placeholder, not about presence.)
 	sums, err := st.ListRuns(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range sums {
-		if s.ID == "victim" {
+		if s.ID == "victim" && s.WorkflowName == unreadableWorkflowName {
 			t.Fatalf("a transiently unreadable run must not be listed as debris: %+v", s)
 		}
 	}
