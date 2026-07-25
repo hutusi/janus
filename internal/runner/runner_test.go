@@ -576,12 +576,15 @@ func TestTriggerRejectsMalformedSHA(t *testing.T) {
 		t.Errorf("a malformed sha must not record a run, got %d", len(runs))
 	}
 
-	// A full 40-hex SHA and an empty SHA (ref-only trigger) stay valid.
-	for _, sha := range []string{"", "0123456789abcdef0123456789abcdef01234567"} {
-		if _, err := r.Trigger(model.Event{
+	// A full 40-hex SHA, an abbreviation, and an empty SHA (ref-only trigger) stay
+	// valid. Asserted against validateEvent rather than Trigger: an accepted
+	// trigger starts background checkout work, which would still be creating
+	// workspace directories under t.TempDir() when the test returns.
+	for _, sha := range []string{"", "0123456789abcdef0123456789abcdef01234567", "0123abc"} {
+		if err := validateEvent(model.Event{
 			Kind: model.EventManual, RepoURL: "/repo", Ref: "refs/heads/main", Branch: "main", SHA: sha,
 		}); err != nil {
-			t.Errorf("Trigger rejected valid sha %q: %v", sha, err)
+			t.Errorf("validateEvent rejected valid sha %q: %v", sha, err)
 		}
 	}
 }
