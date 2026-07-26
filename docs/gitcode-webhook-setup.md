@@ -32,7 +32,8 @@ In your repository: **管理 / Settings → WebHooks → Add**.
 - **URL:** `https://janus.example.com/webhooks/gitcode`
 - **密码 / 签名密钥 (password / signing key):** the same value passed to
   `--gitcode-secret`
-- **Events:** check **Push** and **Merge Request**
+- **Events:** check **Push** and **Merge Request** — plus **Tag Push** if any
+  pipeline declares [`on.push.tags`](pipeline-reference.md#tag-filters)
 
 An optional `?pipeline_path=` query parameter selects a committed pipeline file
 other than the configured default, with the same relative-name rules as the
@@ -43,8 +44,9 @@ other providers.
 | GitCode event (`X-GitCode-Event`) | Action |
 |-----------------------------------|--------|
 | `Push Hook` | Checks out `after` on the pushed branch; `before` is the diff base for [`paths` filters](pipeline-reference.md#path-filters). |
+| `Tag Push Hook` | Checks out `checkout_sha` — the *commit* the tag names — and records the tag. Only workflows declaring [`on.push.tags`](pipeline-reference.md#tag-filters) run; the rest ignore it. `before` is not kept: a tag push has no diff base. |
 | `Merge Request Hook` (`open`/`reopen`/`update`) | Checks out the MR's head commit; matched against the **target** branch. |
-| `Tag Push Hook` / branch deletion | Ignored. |
+| Branch/tag deletion | Ignored. |
 | Other actions / event types | Ignored. |
 
 Because the payload is GitLab-shaped, the mapping is identical to GitLab's — a

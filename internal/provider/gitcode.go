@@ -48,7 +48,7 @@ func (GitCode) Verify(r *http.Request, body []byte, secret string) error {
 func (g GitCode) Parse(r *http.Request, body []byte) (*model.Event, error) {
 	f := gitlabFormat{provider: "gitcode", ssh: g.SSH}
 	switch r.Header.Get("X-GitCode-Event") {
-	case "Push Hook":
+	case "Push Hook", "Tag Push Hook":
 		return f.parsePush(body)
 	case "Merge Request Hook":
 		return f.parseMR(body)
