@@ -18,7 +18,7 @@ var (
 	// not matching — operators, functions, secrets.*, github.*, steps.*,
 	// matrix.* — is rejected. The regex's inability to express operators is the
 	// point: it structurally guarantees there is no expression language.
-	tokenRe = regexp.MustCompile(`^(?:ref|sha|short_sha|branch|event|env\.[A-Za-z_][A-Za-z0-9_]*)$`)
+	tokenRe = regexp.MustCompile(`^(?:ref|sha|short_sha|branch|tag|event|env\.[A-Za-z_][A-Za-z0-9_]*)$`)
 )
 
 // validateInterpolation ensures every ${{ ... }} placeholder anywhere in the
@@ -30,7 +30,7 @@ func validateInterpolation(wf *model.Workflow) error {
 			tok := strings.TrimSpace(m[1])
 			if !tokenRe.MatchString(tok) {
 				return fmt.Errorf("%s: unsupported interpolation ${{ %s }}; "+
-					"allowed tokens are env.NAME, ref, sha, short_sha, branch, event", where, tok)
+					"allowed tokens are env.NAME, ref, sha, short_sha, branch, tag, event", where, tok)
 			}
 		}
 		// A "${{" with no closing "}}" matches nothing above and would reach
@@ -95,6 +95,7 @@ type Context struct {
 	SHA      string
 	ShortSHA string
 	Branch   string
+	Tag      string
 	Event    string
 }
 
@@ -136,6 +137,8 @@ func (c Context) resolve(tok, match string) string {
 		return c.ShortSHA
 	case "branch":
 		return c.Branch
+	case "tag":
+		return c.Tag
 	case "event":
 		return c.Event
 	default:

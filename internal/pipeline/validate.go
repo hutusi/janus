@@ -41,22 +41,50 @@ func validatePathFilter(where string, f *model.PathFilter) error {
 		return fmt.Errorf("%s cannot set both `paths` and `paths-ignore`", where)
 	}
 	for key, patterns := range map[string][]string{"paths": f.Paths, "paths-ignore": f.Ignore} {
-		if patterns == nil {
-			continue
+		if err := validatePatterns(where, key, patterns); err != nil {
+			return err
 		}
-		if len(patterns) == 0 {
-			return fmt.Errorf("%s `%s` must list at least one pattern", where, key)
+	}
+	return nil
+}
+
+// validateTagFilter checks one `tags`/`tags-ignore` declaration. Tag patterns
+// are the same glob syntax and carry the same bounds as path patterns, so only
+// the both-keys rule and the key names differ.
+func validateTagFilter(where string, f *model.TagFilter) error {
+	if f == nil {
+		return nil
+	}
+	if f.Tags != nil && f.Ignore != nil {
+		return fmt.Errorf("%s cannot set both `tags` and `tags-ignore`", where)
+	}
+	for key, patterns := range map[string][]string{"tags": f.Tags, "tags-ignore": f.Ignore} {
+		if err := validatePatterns(where, key, patterns); err != nil {
+			return err
 		}
-		if len(patterns) > maxPathPatterns {
-			return fmt.Errorf("%s `%s` has too many patterns: %d (max %d)", where, key, len(patterns), maxPathPatterns)
+	}
+	return nil
+}
+
+// validatePatterns bounds one declared glob list. A nil list is an absent key;
+// an empty one is rejected, since `paths: []` or `tags: []` matches nothing and
+// would silently skip every event — a trap rather than a feature.
+func validatePatterns(where, key string, patterns []string) error {
+	if patterns == nil {
+		return nil
+	}
+	if len(patterns) == 0 {
+		return fmt.Errorf("%s `%s` must list at least one pattern", where, key)
+	}
+	if len(patterns) > maxPathPatterns {
+		return fmt.Errorf("%s `%s` has too many patterns: %d (max %d)", where, key, len(patterns), maxPathPatterns)
+	}
+	for _, p := range patterns {
+		if p == "" {
+			return fmt.Errorf("%s `%s` contains an empty pattern", where, key)
 		}
-		for _, p := range patterns {
-			if p == "" {
-				return fmt.Errorf("%s `%s` contains an empty pattern", where, key)
-			}
-			if len(p) > maxPathPatternLen {
-				return fmt.Errorf("%s `%s` pattern is too long: %d characters (max %d)", where, key, len(p), maxPathPatternLen)
-			}
+		if len(p) > maxPathPatternLen {
+			return fmt.Errorf("%s `%s` pattern is too long: %d characters (max %d)", where, key, len(p), maxPathPatternLen)
 		}
 	}
 	return nil
@@ -102,7 +130,13 @@ func validate(wf *model.Workflow) error {
 		if tr.f.Paths != nil && tr.key != "push" {
 			return fmt.Errorf("`on.%s` does not support `paths`/`paths-ignore` — path filters apply to push events only", tr.key)
 		}
+		if tr.f.Tags != nil && tr.key != "push" {
+			return fmt.Errorf("`on.%s` does not support `tags`/`tags-ignore` — a merge request has no tag", tr.key)
+		}
 		if err := validatePathFilter(fmt.Sprintf("`on.%s`", tr.key), tr.f.Paths); err != nil {
+			return err
+		}
+		if err := validateTagFilter(fmt.Sprintf("`on.%s`", tr.key), tr.f.Tags); err != nil {
 			return err
 		}
 	}

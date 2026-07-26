@@ -32,6 +32,59 @@ func TestBranchFilterMatches(t *testing.T) {
 	}
 }
 
+func TestTagFilterMatches(t *testing.T) {
+	tests := []struct {
+		name   string
+		filter TagFilter
+		tag    string
+		want   bool
+	}{
+		{"empty filter matches all", TagFilter{}, "v1.0.0", true},
+		{"exact allowlist hit", TagFilter{Tags: []string{"v1.0.0"}}, "v1.0.0", true},
+		{"exact allowlist miss", TagFilter{Tags: []string{"v1.0.0"}}, "v1.0.1", false},
+		// The reason tags glob and branches do not: one pattern must cover
+		// every future release.
+		{"glob hit", TagFilter{Tags: []string{"v*"}}, "v1.0.0", true},
+		{"glob miss", TagFilter{Tags: []string{"v*"}}, "nightly", false},
+		// `*` stops at a separator, like a path filter's; `**` crosses it.
+		{"star does not cross a slash", TagFilter{Tags: []string{"v*"}}, "release/v1", false},
+		{"globstar crosses a slash", TagFilter{Tags: []string{"**/v*"}}, "release/v1", true},
+		{"denylist hit", TagFilter{Ignore: []string{"*-rc*"}}, "v1.0.0-rc1", false},
+		{"denylist miss matches all", TagFilter{Ignore: []string{"*-rc*"}}, "v1.0.0", true},
+		// Both lists is rejected by pipeline validation, but hand-built
+		// workflows can carry it — deny must win, as it does for branches.
+		{"deny wins over allow", TagFilter{Tags: []string{"v*"}, Ignore: []string{"v*"}}, "v1.0.0", false},
+		{"present-but-empty denylist matches all", TagFilter{Ignore: []string{}}, "v1.0.0", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.filter.Matches(tc.tag); got != tc.want {
+				t.Errorf("Matches(%q) = %v, want %v", tc.tag, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEventTarget(t *testing.T) {
+	tests := []struct {
+		name  string
+		event Event
+		want  string
+	}{
+		{"branch wins", Event{Branch: "main", Tag: "v1", Ref: "refs/heads/main"}, "main"},
+		{"tag when no branch", Event{Tag: "v1.0.0", Ref: "refs/tags/v1.0.0"}, "v1.0.0"},
+		{"ref as the last resort", Event{Ref: "refs/heads/main"}, "refs/heads/main"},
+		{"empty event", Event{}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.event.Target(); got != tc.want {
+				t.Errorf("Target() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEventMarshalJSONRedactsRepoURL(t *testing.T) {
 	e := Event{
 		Provider: "gitlab",

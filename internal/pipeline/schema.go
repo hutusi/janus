@@ -36,6 +36,8 @@ type rawTriggers struct {
 type rawTrigger struct {
 	Branches    []string `yaml:"branches"`
 	Ignore      []string `yaml:"branches-ignore"`
+	Tags        []string `yaml:"tags"`
+	TagsIgnore  []string `yaml:"tags-ignore"`
 	Paths       []string `yaml:"paths"`
 	PathsIgnore []string `yaml:"paths-ignore"`
 }
@@ -104,6 +106,7 @@ func (t *rawTrigger) toModel() *model.Trigger {
 	return &model.Trigger{
 		BranchFilter: model.BranchFilter{Branches: t.Branches, Ignore: t.Ignore},
 		Paths:        pathFilter(t.Paths, t.PathsIgnore),
+		Tags:         tagFilter(t.Tags, t.TagsIgnore),
 	}
 }
 
@@ -114,4 +117,15 @@ func pathFilter(paths, ignore []string) *model.PathFilter {
 		return nil
 	}
 	return &model.PathFilter{Paths: paths, Ignore: ignore}
+}
+
+// tagFilter builds a TagFilter only when a key was present. The nil-ness is
+// load-bearing beyond the both-keys-set check the other filters need it for:
+// a nil TagFilter is what makes a trigger branches-only, so `tags: []` must
+// stay distinguishable from an absent key (validation rejects the empty list).
+func tagFilter(tags, ignore []string) *model.TagFilter {
+	if tags == nil && ignore == nil {
+		return nil
+	}
+	return &model.TagFilter{Tags: tags, Ignore: ignore}
 }
