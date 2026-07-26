@@ -131,15 +131,26 @@ jobs:
       - run: ./build.sh && ./publish.sh ${{ tag }}
 ```
 
-**Tag pushes are opt-in.** A workflow that does not declare `tags` or
-`tags-ignore` never runs on one, even with a bare `on: push:` and no filters at
-all. This is a deliberate departure from GitHub Actions, where `on: push` with
-no filters fires on tags as well. Janus runs jobs as unsandboxed host processes,
-so a Janus upgrade must not silently start executing pipelines against refs they
-have never seen; declaring the key is the opt-in, and it errs toward not running
-code. Conversely, a workflow that declares **only** `tags` still runs on branch
-pushes — add `branches` to narrow that, or keep the release pipeline in its own
-file (`.janus/release.yml`, selected per webhook with `?pipeline_path=`).
+**A declared filter selects that kind of ref.** `branches` makes `on.push` a
+branch trigger, `tags` makes it a tag trigger, and declaring both takes both —
+each matched by its own filter:
+
+| Declared on `on.push` | Branch push | Tag push |
+|-----------------------|-------------|----------|
+| nothing (bare `on: push:`) | every branch | **no** |
+| `branches` / `branches-ignore` only | per the filter | no |
+| `tags` / `tags-ignore` only | **no** | per the filter |
+| both | per the branch filter | per the tag filter |
+
+So the release example above runs on `v*` tags and on nothing else — a tags-only
+workflow is not also a branch workflow. To build on both, declare both.
+
+**Tag pushes are opt-in**, the one row that departs from GitHub Actions: a bare
+`on: push:` with no filters at all stays branches-only, where GHA would fire on
+tags as well. Janus runs jobs as unsandboxed host processes, so an upgrade must
+not silently start executing existing pipelines against refs they have never
+seen; declaring a tag key is the opt-in, and it errs toward not running code.
+The other three rows match GHA exactly.
 
 Unlike branch names, tag patterns are **globs** — the same syntax and the same
 matcher as [path filters](#path-filters), matched against the tag name:
@@ -309,7 +320,9 @@ user can read remains reachable — see the security model in the README.
 These produce a clear validation error rather than running:
 
 - `branches` together with `branches-ignore` on the same trigger or job — pick
-  an allowlist or a denylist.
+  an allowlist or a denylist; an empty `branches: []` (it reads as "no branches"
+  but would match **every** branch — omit the key, or see the
+  [tag filter table](#tag-filters) for how to run on tags only).
 - `paths` together with `paths-ignore` on the same trigger or job (same rule);
   `paths` on `on.merge_request` (push-only — see
   [path filters](#path-filters)); an empty `paths: []` (it would match nothing

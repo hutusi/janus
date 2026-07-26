@@ -675,6 +675,34 @@ func TestTriggerTagPushRunsTagWorkflow(t *testing.T) {
 	}
 }
 
+// The other half of the rule, end to end: a release pipeline must not fire on
+// ordinary commits. A branch push against a tags-only workflow is skipped —
+// otherwise `publish ${{ tag }}` runs on every push with an empty version.
+func TestTriggerBranchPushSkipsTagOnlyWorkflow(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, tagPipeline) // on: { push: { tags: ["v*"] } }
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	res, err := r.Trigger(model.Event{
+		Kind: model.EventPush, RepoURL: repo, SHA: sha,
+		Ref: "refs/heads/main", Branch: "main",
+	})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 30*time.Second)
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped: a tags-only workflow must not run on a branch push", run.Status)
+	}
+	if len(run.Jobs) != 0 {
+		t.Errorf("a skipped run should have no jobs, got %d", len(run.Jobs))
+	}
+}
+
 // The counterpart, and the reason tag support is opt-in: the same tag push
 // against a pipeline that only declares branches is skipped, not run.
 func TestTriggerTagPushSkipsBranchOnlyWorkflow(t *testing.T) {
@@ -905,6 +933,41 @@ func TestTriggerRejectsMalformedSHA(t *testing.T) {
 	}
 }
 
+// A tag is not on a branch, so an event naming both is contradictory. Silently
+// picking a winner is the trap: naming a branch alongside a tag ref checks out
+// the tag while ${{ tag }} stays empty, the dashboard shows the branch, and
+// branch-gated jobs run. Asserted against validateEvent so no background
+// checkout starts for the accepted cases.
+func TestValidateEventRejectsBranchWithTag(t *testing.T) {
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	bad := []model.Event{
+		// A branch alongside a tag ref — what POST /api/trigger receives.
+		{Kind: model.EventManual, RepoURL: "/repo", SHA: sha, Ref: "refs/tags/v1.0.0", Branch: "main"},
+		// Both named outright.
+		{Kind: model.EventPush, RepoURL: "/repo", SHA: sha, Branch: "main", Tag: "v1.0.0"},
+	}
+	for _, ev := range bad {
+		if err := validateEvent(ev); err == nil {
+			t.Errorf("validateEvent accepted branch %q with tag %q / ref %q, want an error",
+				ev.Branch, ev.Tag, ev.Ref)
+		}
+	}
+
+	// The shapes real providers produce stay valid.
+	good := []model.Event{
+		{Kind: model.EventPush, RepoURL: "/repo", SHA: sha, Ref: "refs/heads/main", Branch: "main"},
+		{Kind: model.EventPush, RepoURL: "/repo", SHA: sha, Ref: "refs/tags/v1.0.0", Tag: "v1.0.0"},
+		{Kind: model.EventManual, RepoURL: "/repo", SHA: sha, Ref: "refs/tags/v1.0.0"},
+		{Kind: model.EventManual, RepoURL: "/repo", SHA: sha, Ref: "refs/heads/main", Branch: "main"},
+	}
+	for _, ev := range good {
+		if err := validateEvent(ev); err != nil {
+			t.Errorf("validateEvent rejected a valid event (branch %q tag %q ref %q): %v",
+				ev.Branch, ev.Tag, ev.Ref, err)
+		}
+	}
+}
+
 func TestShutdownRejectsNewTriggers(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
@@ -1107,9 +1170,15 @@ func TestMatches(t *testing.T) {
 		{"tag push against the tag denylist", pushTagsIgnoreRC, tagPush("v1.0.0"), true},
 		{"tag push matching the tag denylist", pushTagsIgnoreRC, tagPush("v1.0.0-rc1"), false},
 		{"tag push when only MR declared", mrMain, tagPush("v1.0.0"), false},
-		// Declaring tags does not take a workflow off branches, and a branch
-		// push never consults the tag filter.
-		{"branch push on a tags-only workflow", pushTagsV, model.Event{Kind: model.EventPush, Branch: "dev"}, true},
+		// A declared filter selects that kind of ref, so a tags-only trigger is
+		// a tag trigger: branch pushes do not match it. Without this a release
+		// workflow (`tags: ["v*"]`, publishing ${{ tag }}) would publish on
+		// every branch push with an empty version — and there is no other way
+		// to spell "tags only", since `branches: []` matches every branch and
+		// BranchFilter is exact-match.
+		{"branch push on a tags-only workflow", pushTagsV, model.Event{Kind: model.EventPush, Branch: "dev"}, false},
+		{"branch push on a tags-ignore-only workflow", pushTagsIgnoreRC, model.Event{Kind: model.EventPush, Branch: "main"}, false},
+		// Declaring both takes both, each matched by its own filter.
 		{"branch push on a both-filters workflow", pushMainAndTags, model.Event{Kind: model.EventPush, Branch: "main"}, true},
 		{"other branch on a both-filters workflow", pushMainAndTags, model.Event{Kind: model.EventPush, Branch: "dev"}, false},
 		{"tag push on a both-filters workflow", pushMainAndTags, tagPush("v2.0.0"), true},

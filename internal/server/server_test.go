@@ -499,6 +499,16 @@ jobs:
 		t.Errorf("logs = %q, want the tag interpolated and the branch empty", logs)
 	}
 
+	// Naming a branch alongside a tag ref is contradictory, not a hint about
+	// which to prefer: honoring the branch would check out the tag while
+	// ${{ tag }} stayed empty and branch-gated jobs ran. 400, matching what
+	// `janus run` does with the equivalent flags.
+	resp3 := postTrigger(t, ts, `{"repo_url":"`+repo+`","sha":"`+sha+`","ref":"refs/tags/v1.0.0","branch":"main"}`)
+	defer func() { _ = resp3.Body.Close() }()
+	if resp3.StatusCode != http.StatusBadRequest {
+		t.Errorf("branch with a tag ref = %d, want 400", resp3.StatusCode)
+	}
+
 	// A bare name (not a full ref) is still taken as a branch, as before.
 	body2, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "main"})
 	resp2 := postTrigger(t, ts, string(body2))

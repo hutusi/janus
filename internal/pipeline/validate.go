@@ -48,6 +48,29 @@ func validatePathFilter(where string, f *model.PathFilter) error {
 	return nil
 }
 
+// validateBranchFilter checks one `branches`/`branches-ignore` declaration
+// (trigger or job level). Branch names are exact strings rather than globs, so
+// there are no patterns to bound — but an empty list is rejected for the same
+// reason `tags: []` and `paths: []` are: `branches: []` reads as "no branches"
+// and means "every branch", which is precisely the mistake someone reaching for
+// a tags-only trigger would make.
+func validateBranchFilter(where string, f *model.BranchFilter) error {
+	if f == nil {
+		return nil
+	}
+	// Checked first so a declaration that is both empty and doubled still
+	// reports the more fundamental problem.
+	if f.Branches != nil && f.Ignore != nil {
+		return fmt.Errorf("%s cannot set both `branches` and `branches-ignore`", where)
+	}
+	for key, names := range map[string][]string{"branches": f.Branches, "branches-ignore": f.Ignore} {
+		if names != nil && len(names) == 0 {
+			return fmt.Errorf("%s `%s` must list at least one branch", where, key)
+		}
+	}
+	return nil
+}
+
 // validateTagFilter checks one `tags`/`tags-ignore` declaration. Tag patterns
 // are the same glob syntax and carry the same bounds as path patterns, so only
 // the both-keys rule and the key names differ.
@@ -124,8 +147,8 @@ func validate(wf *model.Workflow) error {
 		if tr.f == nil {
 			continue
 		}
-		if tr.f.Branches != nil && tr.f.Ignore != nil {
-			return fmt.Errorf("`on.%s` cannot set both `branches` and `branches-ignore`", tr.key)
+		if err := validateBranchFilter(fmt.Sprintf("`on.%s`", tr.key), &tr.f.BranchFilter); err != nil {
+			return err
 		}
 		if tr.f.Paths != nil && tr.key != "push" {
 			return fmt.Errorf("`on.%s` does not support `paths`/`paths-ignore` — path filters apply to push events only", tr.key)
@@ -159,8 +182,8 @@ func validate(wf *model.Workflow) error {
 			return fmt.Errorf("job name too long: %d characters (max %d)", len(name), maxJobNameLen)
 		}
 		// Same allowlist-or-denylist rule as the on: filters.
-		if job.Filter != nil && job.Filter.Branches != nil && job.Filter.Ignore != nil {
-			return fmt.Errorf("job %q cannot set both `branches` and `branches-ignore`", name)
+		if err := validateBranchFilter(fmt.Sprintf("job %q", name), job.Filter); err != nil {
+			return err
 		}
 		if err := validatePathFilter(fmt.Sprintf("job %q", name), job.PathFilter); err != nil {
 			return err

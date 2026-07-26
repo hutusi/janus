@@ -34,7 +34,15 @@ var (
 	// refRe is a conservative subset of git's ref grammar: it must start
 	// alphanumeric (so it can never be read as a `-option`) and use only a
 	// safe alphabet. hasBadRefSeq below rejects the remaining forbidden runs.
-	refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@-]*$`)
+	//
+	// `+` is in the set for SemVer build metadata (`v1.2.3+build.7`), a legal
+	// git tag that release pipelines really do push. It is safe precisely
+	// because the first character is already constrained to alphanumeric: a
+	// leading `+` is the refspec force prefix, and that is the only position
+	// where git reads `+` as anything but a literal. The rest of git's grammar
+	// (`#`, `{`, `!`, `&`, `$`, Unicode, …) stays excluded on purpose — these
+	// strings arrive in untrusted webhook payloads and become git arguments.
+	refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@+-]*$`)
 )
 
 // validateTarget rejects SHAs and refs that git could parse as options (e.g.

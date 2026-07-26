@@ -560,6 +560,17 @@ func validateEvent(ev model.Event) error {
 	if ev.ProjectID < 0 {
 		return fmt.Errorf("project_id is negative: %d", ev.ProjectID)
 	}
+	// A tag is not on a branch, so no provider ever produces both — a caller
+	// that names one of each is contradicting itself, and silently picking a
+	// winner is the worst answer: naming a branch alongside a tag ref would
+	// check out the tag while ${{ tag }} stayed empty, the dashboard showed the
+	// branch, and branch-gated jobs ran. Rejected here rather than in one
+	// handler because this is the single choke point every trigger passes
+	// through (`janus run` enforces the same rule on its own flags).
+	if ev.Branch != "" && (ev.Tag != "" || model.TagFromRef(ev.Ref) != "") {
+		return fmt.Errorf("a branch and a tag cannot both be named (branch %q, tag %q, ref %q)",
+			ev.Branch, ev.Tag, ev.Ref)
+	}
 	return nil
 }
 
@@ -1101,16 +1112,23 @@ func hasPathFilters(wf *model.Workflow) bool {
 }
 
 // matches reports whether the event should start the workflow. Manual triggers
-// always match; push/merge_request match when the trigger is declared and the
-// branch passes its filter.
+// always match; merge_request matches when the trigger is declared and the
+// target branch passes its filter.
 //
-// A tag push is the exception: it matches only a workflow that declares
-// `tags`/`tags-ignore`, so a bare `on: push:` stays branches-only. GitHub
-// Actions would run it — the divergence is deliberate. Tag pushes were dropped
-// outright before this existed, so honoring the GHA reading would mean an
-// upgrade silently starts executing every deployed pipeline against a ref it
-// has never seen, as unsandboxed host processes. Declaring the key is the
-// opt-in; see model.Trigger.Tags.
+// For a push, a *declared filter selects that kind of ref*: `branches` makes it
+// a branch trigger, `tags` makes it a tag trigger, and declaring both takes
+// both, each matched by its own filter. That is GitHub Actions' rule, and it is
+// what makes "tags only" expressible at all — `branches: []` would match every
+// branch, and BranchFilter is exact-match so `branches-ignore` cannot spell
+// "all". Without it `on: { push: { tags: ["v*"] } }` publishes on every branch
+// push with ${{ tag }} empty.
+//
+// The one divergence is a bare `on: push:` with no filters, which stays
+// branches-only where GHA would also run tags. Tag pushes were dropped outright
+// before this existed, so honoring the GHA reading there would mean an upgrade
+// silently starts executing every deployed pipeline against a ref it has never
+// seen, as unsandboxed host processes. Declaring a tag key is the opt-in; see
+// model.Trigger.Tags.
 func matches(wf *model.Workflow, ev model.Event) bool {
 	switch ev.Kind {
 	case model.EventManual:
@@ -1121,6 +1139,9 @@ func matches(wf *model.Workflow, ev model.Event) bool {
 		}
 		if ev.Tag != "" {
 			return wf.On.Push.Tags != nil && wf.On.Push.Tags.Matches(ev.Tag)
+		}
+		if wf.On.Push.Tags != nil && wf.On.Push.Branches == nil && wf.On.Push.Ignore == nil {
+			return false // a tags-only trigger; this push moved a branch
 		}
 		return wf.On.Push.Matches(ev.Branch)
 	case model.EventMergeRequest:

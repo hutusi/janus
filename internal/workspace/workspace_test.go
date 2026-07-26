@@ -410,6 +410,9 @@ func TestValidateTarget(t *testing.T) {
 		{"abc1234", "feature/x-y_z"},
 		{"", "refs/tags/v1.0"},
 		{"", "release@2026"},
+		// SemVer build metadata: a legal git tag a release pipeline really
+		// pushes. `+` is safe here only because position 0 stays alphanumeric.
+		{"", "refs/tags/v1.2.3+build.7"},
 	}
 	for _, tc := range valid {
 		if err := validateTarget(tc.sha, tc.ref); err != nil {
@@ -427,6 +430,9 @@ func TestValidateTarget(t *testing.T) {
 		{"lock-suffix ref", "", "refs/heads/x.lock"},
 		{"trailing-slash ref", "", "refs/heads/x/"},
 		{"reflog ref", "", "main@{0}"},
+		// A leading `+` is git's refspec force prefix — the one position where
+		// the character means something, and still unreachable.
+		{"leading-plus ref", "", "+refs/heads/main"},
 		{"too-short SHA", "abc12", ""},
 		{"non-hex SHA", "zzzzzzz", ""},
 		{"over-long SHA", strings.Repeat("a", 65), ""},

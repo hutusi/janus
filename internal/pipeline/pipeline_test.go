@@ -386,6 +386,46 @@ jobs:
 			wantInErr: "`on.merge_request` cannot set both",
 		},
 		{
+			// `branches: []` reads as "no branches" but would match every
+			// branch — the mistake someone reaching for a tags-only trigger
+			// makes. Rejected like `tags: []` and `paths: []`.
+			name: "empty branches list on push",
+			src: `
+name: ci
+on: { push: { branches: [] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`branches` must list at least one branch",
+		},
+		{
+			name: "empty branches-ignore list on push",
+			src: `
+name: ci
+on: { push: { branches-ignore: [] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`branches-ignore` must list at least one branch",
+		},
+		{
+			name: "empty branches list on a job",
+			src: `
+name: ci
+on: { push: {} }
+jobs:
+  a:
+    branches: []
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`branches` must list at least one branch",
+		},
+		{
 			name: "tags and tags-ignore on push",
 			src: `
 name: ci
