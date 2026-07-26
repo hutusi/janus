@@ -1,6 +1,7 @@
 # GitLab webhook setup
 
-Janus triggers pipelines from GitLab **push** and **merge request** webhooks.
+Janus triggers pipelines from GitLab **push**, **tag push**, and **merge
+request** webhooks.
 
 ## 1. Run Janus with a secret
 

@@ -526,6 +526,15 @@ func runRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// A tag is not on a branch, so no real event ever carries both. Rehearsing
+	// a state the daemon cannot produce is worse than useless here: job-level
+	// `branches:` filters are applied by `janus run`, so a run claiming to be
+	// both would exercise branch-gated jobs for a tag. Checked before any git
+	// work, so a contradiction is reported instead of a doomed clone's error.
+	if *branch != "" && (*tag != "" || model.TagFromRef(*ref) != "") {
+		return errors.New("provide either --branch or a tag (--tag, or --ref refs/tags/…), " +
+			"not both: a tag is not on a branch")
+	}
 
 	// Ctrl-C must drive the engine's cancellation path (process-group kill,
 	// run marked cancelled) rather than just dying with orphaned children.

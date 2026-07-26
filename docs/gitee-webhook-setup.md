@@ -1,7 +1,7 @@
 # Gitee webhook setup
 
-Janus triggers pipelines from Gitee (码云) **push** and **pull request**
-webhooks.
+Janus triggers pipelines from Gitee (码云) **push**, **tag push**, and **pull
+request** webhooks.
 
 ## 1. Run Janus with a secret
 

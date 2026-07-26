@@ -407,6 +407,24 @@ func TestRunRunDerivesTagFromRef(t *testing.T) {
 	}
 }
 
+// No real event carries a branch and a tag at once, so `janus run` refuses to
+// fabricate one: job-level `branches:` filters are applied locally, and a run
+// claiming to be both would exercise branch-gated jobs for a tag.
+func TestRunRunRejectsBranchAndTag(t *testing.T) {
+	dir := t.TempDir()
+	if err := runRun([]string{"--branch", "main", "--tag", "v1.0.0", dir}); err == nil {
+		t.Error("--branch with --tag was accepted, want an error")
+	}
+	// The same contradiction reached through a tag-naming --ref.
+	err := runRun([]string{"--repo", dir, "--ref", "refs/tags/v1.0.0", "--branch", "main"})
+	if err == nil {
+		t.Fatal("--ref refs/tags/... with --branch was accepted, want an error")
+	}
+	if !strings.Contains(err.Error(), "not on a branch") {
+		t.Errorf("error = %v, want it to explain the branch/tag conflict", err)
+	}
+}
+
 func TestVersionString(t *testing.T) {
 	origVersion, origCommit := version, commit
 	t.Cleanup(func() { version, commit = origVersion, origCommit })

@@ -1,8 +1,9 @@
 # GitCode webhook setup
 
-Janus triggers pipelines from GitCode (gitcode.com) **push** and **merge
-request** webhooks. GitCode's webhooks use GitLab's payload format, so setup
-mirrors [GitLab](gitlab-webhook-setup.md) closely — only the header names differ.
+Janus triggers pipelines from GitCode (gitcode.com) **push**, **tag push**, and
+**merge request** webhooks. GitCode's webhooks use GitLab's payload format, so
+setup mirrors [GitLab](gitlab-webhook-setup.md) closely — only the header names
+differ.
 
 ## 1. Run Janus with a secret
 

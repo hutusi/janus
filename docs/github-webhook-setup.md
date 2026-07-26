@@ -1,6 +1,7 @@
 # GitHub webhook setup
 
-Janus triggers pipelines from GitHub **push** and **pull request** webhooks.
+Janus triggers pipelines from GitHub **push** (branches and tags) and **pull
+request** webhooks.
 
 ## 1. Run Janus with a secret
 

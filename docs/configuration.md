@@ -299,7 +299,7 @@ Runs a pipeline locally, streaming logs to the terminal.
 |------|---------|---------|
 | `--file` | `.janus/ci.yml` | Pipeline file, relative to the workspace. |
 | `--branch` | _(empty)_ | Value for `${{ branch }}`. |
-| `--tag` | _(empty)_ | Value for `${{ tag }}`, for testing a [tag pipeline](pipeline-reference.md#tag-filters) locally. |
+| `--tag` | _(empty)_ | Value for `${{ tag }}`, for testing a [tag pipeline](pipeline-reference.md#tag-filters) locally. Mutually exclusive with `--branch` — a tag is not on a branch, and no real event carries both. |
 | `--max-parallel-jobs` | `4` | Max jobs running concurrently. |
 | `--step-timeout` | `0` | Per-step timeout. |
 | `--repo` | _(empty)_ | Git URL to check out (instead of `<dir>`). |

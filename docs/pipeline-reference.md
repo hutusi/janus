@@ -20,7 +20,7 @@ on:                                       # required: at least one trigger
   push:
     branches: [main]                      # optional; omit/empty = all branches
     tags: ["v*"]                          # optional; tag pushes are opt-in
-    paths: ["src/**", "go.mod"]           # optional; run only when these changed
+    paths: ["src/**", "go.mod"]           # optional; branch pushes only, run when these changed
   merge_request:                          # GitLab term; normalized internally
     branches-ignore: [wip]                # optional; every branch except these
 
@@ -232,8 +232,8 @@ avoids — so `on.merge_request` rejects `paths` at validation), and local
   the executing run finishes and the newest waiter starts.
 
 `group:` is a template over a **subset** of the interpolation tokens: `branch`,
-`ref`, `event`, and `env.NAME` (resolved against the workflow-level `env:`
-only, so the group is known before any job runs). `sha` / `short_sha` are a
+`tag`, `ref`, `event`, and `env.NAME` (resolved against the workflow-level
+`env:` only, so the group is known before any job runs). `sha` / `short_sha` are a
 validation error here — every run would form its own group, silently disabling
 the serialization the key exists to provide. With `group:` omitted or empty the
 group is `<workflow name>-<branch>` (falling back to the tag, then the raw ref,
