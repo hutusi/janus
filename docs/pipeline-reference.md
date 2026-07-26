@@ -196,8 +196,8 @@ A tag push carries no branch: `${{ branch }}` and `JANUS_BRANCH` are **empty**,
 Tag **deletions** are ignored, like branch deletions. `on.merge_request` rejects
 `tags`/`tags-ignore` at validation: a merge request has no tag.
 
-**Tag and branch names are restricted** to letters, digits and `. _ / @ + - `,
-starting with a letter or digit. That is narrower than git, which also accepts
+**Tag and branch names are restricted** to letters, digits and `.` `_` `/` `@`
+`+` `-`, starting with a letter or digit. That is narrower than git, which also accepts
 `#`, `$`, backticks, `;` and Unicode: a run for such a ref is refused with a
 message naming the rule rather than checked out. The reason is that
 `${{ tag }}` and `${{ ref }}` are substituted into a step's `run` command, which
