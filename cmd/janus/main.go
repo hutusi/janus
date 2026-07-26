@@ -564,7 +564,9 @@ func runRun(args []string) error {
 		if ev.Tag == "" {
 			ev.Tag = model.TagFromRef(*ref)
 		}
-		if ev.Branch == "" {
+		// Same guard as the trigger API: TrimPrefix is a no-op on a miss, so a
+		// tag ref must not fall through and become a bogus branch name.
+		if ev.Branch == "" && ev.Tag == "" {
 			ev.Branch = strings.TrimPrefix(*ref, "refs/heads/")
 		}
 	} else {

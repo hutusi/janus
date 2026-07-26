@@ -151,15 +151,21 @@ func gitlabState(s model.Status) string {
 	return ""
 }
 
-// refName strips the refs/heads/ prefix so the status carries the branch name
-// GitLab associates the pipeline with — the pushed branch, or an MR's source
-// branch (parseGitLabMR sets Ref = "refs/heads/" + source_branch). Without it a
-// status can attach to the wrong/null external pipeline and vanish from the MR.
+// refName strips the refs/heads/ or refs/tags/ prefix so the status carries the
+// short name GitLab associates the pipeline with — the pushed branch, an MR's
+// source branch (parseGitLabMR sets Ref = "refs/heads/" + source_branch), or a
+// pushed tag (GitLab's `ref` parameter takes a branch *or* tag name). Without it
+// a status can attach to the wrong/null external pipeline and vanish from the
+// MR. TrimPrefix alone is not enough: it returns its input unchanged on a miss,
+// so a tag would post as the full refs/tags/v1.0.0 and name nothing.
 // A ref over GitLab's 255-char cap (event refs are accepted up to 512) is
 // omitted rather than truncated — a truncated ref would name a different branch,
 // and the status still posts keyed on the SHA.
 func refName(ref string) string {
 	r := strings.TrimPrefix(ref, "refs/heads/")
+	if tag := model.TagFromRef(ref); tag != "" {
+		r = tag
+	}
 	if utf8.RuneCountInString(r) > maxRefLen { // characters, not bytes
 		return ""
 	}

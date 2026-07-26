@@ -454,6 +454,65 @@ jobs:
 	}
 }
 
+// `{"ref": "refs/tags/v1.0.0"}` is how the manual API asks for a tag. The
+// branch default must not swallow it: strings.TrimPrefix returns its input
+// unchanged when the prefix misses, so the ref would otherwise be recorded as
+// a branch literally named "refs/tags/v1.0.0" — leaving ${{ tag }} empty and
+// handing job-level `branches:` filters a name no branch has.
+func TestTriggerTagRefRecordsTagNotBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, `name: release
+on: { push: { tags: ["v*"] } }
+jobs:
+  publish:
+    steps:
+      - run: echo "tag=[${{ tag }}] branch=[${{ branch }}]"
+`)
+	ts := newTestServer(t)
+
+	body, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/tags/v1.0.0"})
+	resp := postTrigger(t, ts, string(body))
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("trigger status = %d, want 202; body=%s", resp.StatusCode, b)
+	}
+	var tr struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&tr)
+	_ = resp.Body.Close()
+
+	run := pollRun(t, ts, tr.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	if run.Event.Tag != "v1.0.0" {
+		t.Errorf("event tag = %q, want v1.0.0 derived from the ref", run.Event.Tag)
+	}
+	if run.Event.Branch != "" {
+		t.Errorf("event branch = %q, want empty: a tag ref is not a branch", run.Event.Branch)
+	}
+	if logs := getText(t, ts.URL+"/api/runs/"+tr.RunID+"/logs"); !strings.Contains(logs, "tag=[v1.0.0] branch=[]") {
+		t.Errorf("logs = %q, want the tag interpolated and the branch empty", logs)
+	}
+
+	// A bare name (not a full ref) is still taken as a branch, as before.
+	body2, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "main"})
+	resp2 := postTrigger(t, ts, string(body2))
+	var tr2 struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp2.Body).Decode(&tr2)
+	_ = resp2.Body.Close()
+	run2 := pollRun(t, ts, tr2.RunID, 15*time.Second)
+	if run2.Event.Branch != "main" || run2.Event.Tag != "" {
+		t.Errorf("bare ref gave branch=%q tag=%q, want main/empty", run2.Event.Branch, run2.Event.Tag)
+	}
+}
+
 func TestTriggerCheckoutFailureIsAsync(t *testing.T) {
 	ts := newTestServer(t)
 

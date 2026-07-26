@@ -366,6 +366,47 @@ func TestRunRunSuppliesTag(t *testing.T) {
 	}
 }
 
+// `--ref refs/tags/v1.0.0` fills the tag, and must not also fill the branch:
+// strings.TrimPrefix is a no-op on a miss, so the branch default would
+// otherwise be the whole ref.
+func TestRunRunDerivesTagFromRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", src}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	out := filepath.Join(t.TempDir(), "out.txt")
+	pipeline := "name: release\non: { push: { tags: [\"v*\"] } }\njobs:\n  publish:\n    steps:\n      - run: printf '%s' \"${{ tag }}|${{ branch }}\" > " + out + "\n"
+	if err := os.MkdirAll(filepath.Join(src, ".janus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".janus", "ci.yml"), []byte(pipeline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("init", "-q", "-b", "main", ".")
+	git("config", "user.email", "t@e.com")
+	git("config", "user.name", "T")
+	git("add", ".")
+	git("commit", "-q", "-m", "init")
+	git("tag", "-a", "v1.0.0", "-m", "release") // annotated: object id != commit id
+
+	if err := runRun([]string{"--repo", src, "--ref", "refs/tags/v1.0.0", "--workspace-root", t.TempDir()}); err != nil {
+		t.Fatalf("runRun: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read step output: %v", err)
+	}
+	if string(got) != "v1.0.0|" {
+		t.Errorf("step saw %q, want the tag set and the branch empty", got)
+	}
+}
+
 func TestVersionString(t *testing.T) {
 	origVersion, origCommit := version, commit
 	t.Cleanup(func() { version, commit = origVersion, origCommit })
