@@ -169,12 +169,20 @@ func TestGitHubParseIgnored(t *testing.T) {
 		t.Errorf("branch deletion: got %v, want ErrIgnoredEvent", err)
 	}
 
-	// Tag push (non-branch ref).
-	rt := httptest.NewRequest("POST", "/webhooks/github", nil)
-	rt.Header.Set("X-GitHub-Event", "push")
-	tag := `{"ref":"refs/tags/v1.0.0","after":"da1560886d4f094c3e6c9ef40349f7d38b5d27d7","repository":{"clone_url":"https://github.com/acme/app.git"}}`
-	if _, err := gh.Parse(rt, []byte(tag)); !errors.Is(err, ErrIgnoredEvent) {
-		t.Errorf("tag push: got %v, want ErrIgnoredEvent", err)
+	// Tag deletion.
+	rtd := httptest.NewRequest("POST", "/webhooks/github", nil)
+	rtd.Header.Set("X-GitHub-Event", "push")
+	tagDel := `{"ref":"refs/tags/v1.0.0","deleted":true,"after":"0000000000000000000000000000000000000000","repository":{}}`
+	if _, err := gh.Parse(rtd, []byte(tagDel)); !errors.Is(err, ErrIgnoredEvent) {
+		t.Errorf("tag deletion: got %v, want ErrIgnoredEvent", err)
+	}
+
+	// A hosting-side ref namespace is neither a branch nor a tag.
+	ro := httptest.NewRequest("POST", "/webhooks/github", nil)
+	ro.Header.Set("X-GitHub-Event", "push")
+	other := `{"ref":"refs/pull/7/head","after":"da1560886d4f094c3e6c9ef40349f7d38b5d27d7","repository":{"clone_url":"https://github.com/acme/app.git"}}`
+	if _, err := gh.Parse(ro, []byte(other)); !errors.Is(err, ErrIgnoredEvent) {
+		t.Errorf("refs/pull: got %v, want ErrIgnoredEvent", err)
 	}
 
 	// A PR action Janus does not act on.

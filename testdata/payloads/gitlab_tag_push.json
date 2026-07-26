@@ -1,0 +1,20 @@
+{
+  "object_kind": "tag_push",
+  "event_name": "tag_push",
+  "before": "0000000000000000000000000000000000000000",
+  "after": "82b3d5ae55f7080f1e6022629cdb57bfae7cccc7",
+  "ref": "refs/tags/v1.0.0",
+  "checkout_sha": "da1560886d4f094c3e6c9ef40349f7d38b5d27d7",
+  "user_name": "John Smith",
+  "project": {
+    "id": 15,
+    "name": "app",
+    "git_http_url": "https://gitlab.example.com/acme/app.git",
+    "git_ssh_url": "git@gitlab.example.com:acme/app.git",
+    "default_branch": "main"
+  },
+  "commits": [
+    { "id": "da1560886d4f094c3e6c9ef40349f7d38b5d27d7", "title": "Fix the bug", "message": "Fix the bug\n" }
+  ],
+  "total_commits_count": 1
+}

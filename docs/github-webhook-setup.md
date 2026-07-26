@@ -1,6 +1,7 @@
 # GitHub webhook setup
 
-Janus triggers pipelines from GitHub **push** and **pull request** webhooks.
+Janus triggers pipelines from GitHub **push** (branches and tags) and **pull
+request** webhooks.
 
 ## 1. Run Janus with a secret
 
@@ -30,7 +31,8 @@ In your repository: **Settings → Webhooks → Add webhook**.
 - **Content type:** `application/json`
 - **Secret:** the same value passed to `--github-secret`
 - **Events:** choose *"Let me select individual events"* and check **Pushes**
-  and **Pull requests**
+  and **Pull requests** (GitHub delivers tag pushes on **Pushes** too, so
+  [`on.push.tags`](pipeline-reference.md#tag-filters) needs no extra box)
 - **SSL verification:** enable it (recommended)
 
 Click **Add webhook**; GitHub sends a `ping` (which Janus ignores with `200`) to
@@ -47,11 +49,11 @@ different pipelines.
 
 | GitHub event | Action |
 |--------------|--------|
-| `push` | Checks out `after` (the new commit) on the pushed branch; `before` is kept as the diff base for [`paths` filters](pipeline-reference.md#path-filters). |
+| `push` to `refs/heads/…` | Checks out `after` (the new commit) on the pushed branch; `before` is kept as the diff base for [`paths` filters](pipeline-reference.md#path-filters). |
+| `push` to `refs/tags/…` | Checks out `head_commit.id` — the *commit* the tag names — and records the tag. Only workflows declaring [`on.push.tags`](pipeline-reference.md#tag-filters) run; the rest ignore it. `before` is not kept: a tag push has no diff base. |
 | `pull_request` (`opened`/`reopened`/`synchronize`) | Checks out the PR's head commit; matched against the **base** (target) branch. |
 | Branch/tag deletion | Ignored (`deleted`, or the `after` SHA is all zeros). |
-| Tag push (`refs/tags/…`) | Ignored (Janus triggers on branches). |
-| Other PR actions / event types | Ignored. |
+| Other refs (`refs/pull/…`) / PR actions / event types | Ignored. |
 
 The event is matched against the workflow's `on:` filters exactly as for GitLab:
 **push** matches `on.push` against the pushed branch (with `paths`/`paths-ignore`
@@ -75,7 +77,7 @@ recorded as **skipped**; a checkout or pipeline error is recorded as **failed**.
 | Code | Meaning |
 |------|---------|
 | 202  | Delivery accepted; a run was recorded (`run_id` in the body). |
-| 200  | Ignored event type (`ping`, branch/tag deletion, tag push, non-actionable PR action). |
+| 200  | Ignored event type (`ping`, branch/tag deletion, a non-branch non-tag ref, non-actionable PR action). |
 | 403  | `{"status":"rejected"}` — the repository is not in the allowlist. |
 | 503  | Janus is at capacity or its store is unavailable (`Retry-After` set) — GitHub retries. |
 | 401  | Signature mismatch (`X-Hub-Signature-256`). |

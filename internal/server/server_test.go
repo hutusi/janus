@@ -454,6 +454,75 @@ jobs:
 	}
 }
 
+// `{"ref": "refs/tags/v1.0.0"}` is how the manual API asks for a tag. The
+// branch default must not swallow it: strings.TrimPrefix returns its input
+// unchanged when the prefix misses, so the ref would otherwise be recorded as
+// a branch literally named "refs/tags/v1.0.0" — leaving ${{ tag }} empty and
+// handing job-level `branches:` filters a name no branch has.
+func TestTriggerTagRefRecordsTagNotBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, `name: release
+on: { push: { tags: ["v*"] } }
+jobs:
+  publish:
+    steps:
+      - run: echo "tag=[${{ tag }}] branch=[${{ branch }}]"
+`)
+	ts := newTestServer(t)
+
+	body, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "refs/tags/v1.0.0"})
+	resp := postTrigger(t, ts, string(body))
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("trigger status = %d, want 202; body=%s", resp.StatusCode, b)
+	}
+	var tr struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&tr)
+	_ = resp.Body.Close()
+
+	run := pollRun(t, ts, tr.RunID, 15*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	if run.Event.Tag != "v1.0.0" {
+		t.Errorf("event tag = %q, want v1.0.0 derived from the ref", run.Event.Tag)
+	}
+	if run.Event.Branch != "" {
+		t.Errorf("event branch = %q, want empty: a tag ref is not a branch", run.Event.Branch)
+	}
+	if logs := getText(t, ts.URL+"/api/runs/"+tr.RunID+"/logs"); !strings.Contains(logs, "tag=[v1.0.0] branch=[]") {
+		t.Errorf("logs = %q, want the tag interpolated and the branch empty", logs)
+	}
+
+	// Naming a branch alongside a tag ref is contradictory, not a hint about
+	// which to prefer: honoring the branch would check out the tag while
+	// ${{ tag }} stayed empty and branch-gated jobs ran. 400, matching what
+	// `janus run` does with the equivalent flags.
+	resp3 := postTrigger(t, ts, `{"repo_url":"`+repo+`","sha":"`+sha+`","ref":"refs/tags/v1.0.0","branch":"main"}`)
+	defer func() { _ = resp3.Body.Close() }()
+	if resp3.StatusCode != http.StatusBadRequest {
+		t.Errorf("branch with a tag ref = %d, want 400", resp3.StatusCode)
+	}
+
+	// A bare name (not a full ref) is still taken as a branch, as before.
+	body2, _ := json.Marshal(map[string]string{"repo_url": repo, "sha": sha, "ref": "main"})
+	resp2 := postTrigger(t, ts, string(body2))
+	var tr2 struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp2.Body).Decode(&tr2)
+	_ = resp2.Body.Close()
+	run2 := pollRun(t, ts, tr2.RunID, 15*time.Second)
+	if run2.Event.Branch != "main" || run2.Event.Tag != "" {
+		t.Errorf("bare ref gave branch=%q tag=%q, want main/empty", run2.Event.Branch, run2.Event.Tag)
+	}
+}
+
 func TestTriggerCheckoutFailureIsAsync(t *testing.T) {
 	ts := newTestServer(t)
 
@@ -755,6 +824,40 @@ func TestDashboardDurations(t *testing.T) {
 		if !strings.Contains(page, "setInterval") {
 			t.Error("dashboard page misses the elapsed ticker script")
 		}
+	}
+}
+
+// A tag run has no branch, so the column that used to render Event.Branch
+// would be blank — the run would look like it ran against nothing. Both pages
+// render Event.Target instead.
+func TestDashboardShowsTagForTagRuns(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	base := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	tagRun := &model.Run{ID: "tagged", Status: model.StatusSuccess, WorkflowName: "release",
+		Event:     model.Event{Kind: model.EventPush, Tag: "v1.0.0", Ref: "refs/tags/v1.0.0"},
+		CreatedAt: base, StartedAt: base, FinishedAt: base.Add(time.Second)}
+	branchRun := &model.Run{ID: "branched", Status: model.StatusSuccess, WorkflowName: "ci",
+		Event:     model.Event{Kind: model.EventPush, Branch: "main", Ref: "refs/heads/main"},
+		CreatedAt: base, StartedAt: base, FinishedAt: base.Add(time.Second)}
+	for _, r := range []*model.Run{tagRun, branchRun} {
+		if err := st.SaveRun(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := getText(t, ts.URL+"/")
+	if !strings.Contains(list, "v1.0.0") {
+		t.Error("run list does not show the tag for a tag run")
+	}
+	if !strings.Contains(list, "main") {
+		t.Error("run list stopped showing the branch for a branch run")
+	}
+	if page := getText(t, ts.URL+"/runs/tagged"); !strings.Contains(page, "v1.0.0") {
+		t.Error("run page does not show the tag for a tag run")
 	}
 }
 

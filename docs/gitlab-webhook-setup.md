@@ -1,6 +1,7 @@
 # GitLab webhook setup
 
-Janus triggers pipelines from GitLab **push** and **merge request** webhooks.
+Janus triggers pipelines from GitLab **push**, **tag push**, and **merge
+request** webhooks.
 
 ## 1. Run Janus with a secret
 
@@ -27,7 +28,9 @@ In your project: **Settings → Webhooks**.
 
 - **URL:** `https://janus.example.com/webhooks/gitlab`
 - **Secret token:** the same value passed to `--gitlab-secret`
-- **Trigger:** check **Push events** and **Merge request events**
+- **Trigger:** check **Push events** and **Merge request events** — plus **Tag
+  push events** if any pipeline declares
+  [`on.push.tags`](pipeline-reference.md#tag-filters)
 - **SSL verification:** enable it (recommended)
 
 Click **Add webhook**, then **Test → Push events** to verify connectivity.
@@ -52,8 +55,9 @@ is recorded on the run's event.
 | GitLab event          | Action |
 |-----------------------|--------|
 | Push Hook             | Checks out `after` (the new commit) on the pushed branch; `before` is kept as the diff base for [`paths` filters](pipeline-reference.md#path-filters). |
+| Tag Push Hook         | Checks out `checkout_sha` — the *commit* the tag names — and records the tag. Only workflows declaring [`on.push.tags`](pipeline-reference.md#tag-filters) run; the rest ignore it. `before` is not kept: a tag push has no diff base. |
 | Merge Request Hook    | On `open`/`reopen`/`update`, checks out the MR's head commit. |
-| Branch deletion       | Ignored (the `after` SHA is all zeros). |
+| Branch/tag deletion   | Ignored (the `after` SHA is all zeros). |
 | MR `merge`/`close`/…  | Ignored. |
 | Other event types     | Ignored. |
 

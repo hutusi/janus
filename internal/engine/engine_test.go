@@ -84,6 +84,37 @@ jobs:
 	}
 }
 
+// A tag push reaches a step through both channels: the ${{ tag }} token and
+// the JANUS_TAG environment variable. Branch stays empty — a tag is on no
+// branch — and both variables are exported either way, so a script can test
+// one without tripping over an unset name.
+func TestRunExposesTagToSteps(t *testing.T) {
+	wf := mustParse(t, `
+name: release
+on: { push: { tags: ["v*"] } }
+jobs:
+  publish:
+    steps:
+      - run: echo "tag=${{ tag }} branch=[${{ branch }}]"
+      - run: echo "env tag=$JANUS_TAG branch=[$JANUS_BRANCH]"
+`)
+	st := store.NewMemory()
+	ev := model.Event{Kind: model.EventPush, Tag: "v1.0.0", Ref: "refs/tags/v1.0.0"}
+	run, err := New(st).Run(context.Background(), wf, ev, t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s, want success", run.Status)
+	}
+	if got := readStepLog(t, st, run.ID, "publish", 0); !strings.Contains(got, "tag=v1.0.0 branch=[]") {
+		t.Errorf("step 0 log = %q, want the interpolated tag and an empty branch", got)
+	}
+	if got := readStepLog(t, st, run.ID, "publish", 1); !strings.Contains(got, "env tag=v1.0.0 branch=[]") {
+		t.Errorf("step 1 log = %q, want JANUS_TAG set and JANUS_BRANCH empty", got)
+	}
+}
+
 // A step whose output exceeds log_limit is truncated in the store, but must
 // still run to completion and succeed: os/exec fails a command whose output
 // copy short-writes or errors, so the cap has to stay invisible to the process.

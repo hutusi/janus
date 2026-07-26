@@ -6,8 +6,20 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
+
+// TagFromRef returns the tag a git ref names, or "" when it names something
+// else. Callers that receive a bare ref rather than a parsed webhook — the
+// manual trigger API, `janus run --ref` — use it so `refs/tags/v1.0.0` fills
+// Event.Tag and ${{ tag }} is correct there too.
+func TagFromRef(ref string) string {
+	if tag, ok := strings.CutPrefix(ref, "refs/tags/"); ok {
+		return tag
+	}
+	return ""
+}
 
 // Workflow is a parsed and validated pipeline specification (.janus/ci.yml).
 // It is immutable once produced by pipeline.Parse.
@@ -43,10 +55,17 @@ type Triggers struct {
 // Trigger is one entry under `on:`: a branch filter plus, for push triggers
 // only, an optional changed-paths filter (validation rejects `paths` on
 // merge_request — an MR's changed set needs a merge base, which the shallow
-// checkout deliberately avoids).
+// checkout deliberately avoids) and an optional tag filter (a merge request has
+// no tag).
 type Trigger struct {
 	BranchFilter
 	Paths *PathFilter
+	// Tags restricts the trigger to tag pushes whose tag matches. Nil means the
+	// trigger does not apply to tag pushes at all — a bare `on: push:` is
+	// branches-only, deliberately unlike GitHub Actions, so upgrading Janus
+	// never starts running an existing pipeline on tags that were previously
+	// dropped. Declaring `tags`/`tags-ignore` is the opt-in.
+	Tags *TagFilter
 }
 
 // BranchFilter restricts a trigger to a set of branches. Branches is an
@@ -72,6 +91,41 @@ func (f *BranchFilter) Matches(branch string) bool {
 	}
 	for _, b := range f.Branches {
 		if b == branch {
+			return true
+		}
+	}
+	return false
+}
+
+// TagFilter restricts a push trigger to a set of tags. Tags is an allowlist
+// (empty or nil matches every tag); Ignore is a denylist that wins over the
+// allowlist. Validation rejects declaring both in the YAML; slice nil-ness (key
+// absent vs present-but-empty) is preserved from the YAML so that check can
+// tell them apart, mirroring BranchFilter.
+//
+// Unlike BranchFilter, entries are glob patterns rather than exact names — they
+// go through MatchPath, the same bounded matcher path filters use. A release
+// pipeline is written once and must match every future `v*`; exact matching
+// would mean editing the pipeline for each release, so the useful default here
+// is the opposite of the one branches want.
+type TagFilter struct {
+	Tags   []string
+	Ignore []string
+}
+
+// Matches reports whether tag is allowed by the filter: never when tag matches
+// a pattern in Ignore, otherwise when Tags is empty or some pattern matches.
+func (f *TagFilter) Matches(tag string) bool {
+	for _, p := range f.Ignore {
+		if MatchPath(p, tag) {
+			return false
+		}
+	}
+	if len(f.Tags) == 0 {
+		return true
+	}
+	for _, p := range f.Tags {
+		if MatchPath(p, tag) {
 			return true
 		}
 	}
@@ -133,10 +187,16 @@ type Event struct {
 	Provider string    `json:"provider"`        // "gitlab", "manual", ...
 	Kind     EventKind `json:"kind"`            // normalized trigger type
 	RepoURL  string    `json:"repo_url"`        // clone URL
-	Ref      string    `json:"ref,omitempty"`   // e.g. refs/heads/main
-	Branch   string    `json:"branch"`          // e.g. main
+	Ref      string    `json:"ref,omitempty"`   // e.g. refs/heads/main, refs/tags/v1.0.0
+	Branch   string    `json:"branch"`          // e.g. main; empty for a tag push
 	SHA      string    `json:"sha,omitempty"`   // commit to check out
 	Title    string    `json:"title,omitempty"` // commit/MR title, for display
+
+	// Tag is the tag name a tag push moved (Ref's refs/tags/ suffix), e.g.
+	// "v1.0.0". Empty for every other event. A tag push sets Tag and leaves
+	// Branch empty — a tag is not on any one branch, and inventing one would
+	// make job-level `branches:` filters and ${{ branch }} silently wrong.
+	Tag string `json:"tag,omitempty"`
 
 	// ProjectID is the provider's numeric project identifier (GitLab's
 	// project.id), recorded so a run names its project the way the host does.
@@ -173,6 +233,21 @@ type Event struct {
 	// webhook URL's ?pipeline_path= query parameter; empty means the
 	// configured default).
 	PipelinePath string `json:"pipeline_path,omitempty"`
+}
+
+// Target is the event's human identity: the branch, else the tag, else the raw
+// ref. It is the single answer to "what did this run run against", used for the
+// implicit concurrency group, the skip reasons, and the dashboard — all of which
+// would otherwise render a blank for a tag push, whose Branch is empty.
+func (e Event) Target() string {
+	switch {
+	case e.Branch != "":
+		return e.Branch
+	case e.Tag != "":
+		return e.Tag
+	default:
+		return e.Ref
+	}
 }
 
 // MarshalJSON redacts credentials from RepoURL whenever an Event is serialized —

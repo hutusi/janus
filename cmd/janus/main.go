@@ -515,6 +515,7 @@ func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	file := fs.String("file", ".janus/ci.yml", "pipeline file, relative to the workspace")
 	branch := fs.String("branch", "", "value for ${{ branch }}")
+	tag := fs.String("tag", "", "value for ${{ tag }}")
 	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently")
 	stepTimeout := fs.Duration("step-timeout", 0, "fail any step that runs longer than this (0 = no timeout)")
 	repo := fs.String("repo", "", "git repo URL to check out (instead of using <dir>)")
@@ -525,12 +526,21 @@ func runRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// A tag is not on a branch, so no real event ever carries both. Rehearsing
+	// a state the daemon cannot produce is worse than useless here: job-level
+	// `branches:` filters are applied by `janus run`, so a run claiming to be
+	// both would exercise branch-gated jobs for a tag. Checked before any git
+	// work, so a contradiction is reported instead of a doomed clone's error.
+	if *branch != "" && (*tag != "" || model.TagFromRef(*ref) != "") {
+		return errors.New("provide either --branch or a tag (--tag, or --ref refs/tags/…), " +
+			"not both: a tag is not on a branch")
+	}
 
 	// Ctrl-C must drive the engine's cancellation path (process-group kill,
 	// run marked cancelled) rather than just dying with orphaned children.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch}
+	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch, Tag: *tag}
 
 	var dir string
 	if *repo != "" {
@@ -557,7 +567,15 @@ func runRun(args []string) error {
 		if ws.Head != "" { // the exact commit checked out, not the abbreviation supplied
 			ev.SHA = ws.Head
 		}
-		if ev.Branch == "" {
+		// --ref refs/tags/v1.0.0 is how this asks for a tag, so fill ${{ tag }}
+		// from it — the same derivation the trigger API does — unless --tag
+		// already said otherwise.
+		if ev.Tag == "" {
+			ev.Tag = model.TagFromRef(*ref)
+		}
+		// Same guard as the trigger API: TrimPrefix is a no-op on a miss, so a
+		// tag ref must not fall through and become a bogus branch name.
+		if ev.Branch == "" && ev.Tag == "" {
 			ev.Branch = strings.TrimPrefix(*ref, "refs/heads/")
 		}
 	} else {

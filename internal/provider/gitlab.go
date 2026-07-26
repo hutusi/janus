@@ -39,7 +39,7 @@ func (GitLab) Verify(r *http.Request, _ []byte, secret string) error {
 func (g GitLab) Parse(r *http.Request, body []byte) (*model.Event, error) {
 	f := gitlabFormat{provider: "gitlab", ssh: g.SSH}
 	switch r.Header.Get("X-Gitlab-Event") {
-	case "Push Hook":
+	case "Push Hook", "Tag Push Hook":
 		return f.parsePush(body)
 	case "Merge Request Hook":
 		return f.parseMR(body)
@@ -110,10 +110,20 @@ func (f gitlabFormat) parsePush(body []byte) (*model.Event, error) {
 		return nil, fmt.Errorf("%s push: %w", f.provider, err)
 	}
 	if isZeroSHA(p.After) {
-		return nil, ErrIgnoredEvent // branch deletion
+		return nil, ErrIgnoredEvent // branch or tag deletion
 	}
+	branch, tag := refTarget(p.Ref)
+	if branch == "" && tag == "" {
+		return nil, ErrIgnoredEvent // a hosting-side ref namespace, not ours
+	}
+	// For a tag push, checkout_sha is the field that names a *commit*: `after`
+	// is whatever the tag ref now points at, which for an annotated tag is the
+	// tag object. Checking that out peels to the commit, and the workspace then
+	// fails the run because HEAD does not equal the SHA it was asked for — so
+	// preferring the peeled value here is what makes annotated tags work at all.
+	// Branch pushes are unaffected: the two fields agree there.
 	sha := p.After
-	if sha == "" {
+	if sha == "" || (tag != "" && p.CheckoutSHA != "") {
 		sha = p.CheckoutSHA
 	}
 	repo, err := f.repoURL(p.Project)
@@ -125,13 +135,16 @@ func (f gitlabFormat) parsePush(body []byte) (*model.Event, error) {
 		Kind:      model.EventPush,
 		RepoURL:   repo,
 		Ref:       p.Ref,
-		Branch:    strings.TrimPrefix(p.Ref, "refs/heads/"),
+		Branch:    branch,
+		Tag:       tag,
 		SHA:       sha,
 		ProjectID: p.Project.ID,
 	}
 	// An all-zeros before means a newly created branch: there is no base to
-	// diff against, so leave Before empty and let path filters fail open.
-	if !isZeroSHA(p.Before) {
+	// diff against, so leave Before empty and let path filters fail open. A tag
+	// push has no meaningful base either — the previous tag is not this tag's
+	// parent — so it never carries one.
+	if tag == "" && !isZeroSHA(p.Before) {
 		ev.Before = p.Before
 	}
 	if n := len(p.Commits); n > 0 {

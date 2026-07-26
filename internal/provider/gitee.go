@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/hutusi/janus/internal/model"
@@ -84,7 +83,7 @@ func giteeTimestampFresh(ts string) bool {
 
 func (g Gitee) Parse(r *http.Request, body []byte) (*model.Event, error) {
 	switch r.Header.Get("X-Gitee-Event") {
-	case "Push Hook":
+	case "Push Hook", "Tag Push Hook":
 		return g.parseGiteePush(body)
 	case "Merge Request Hook":
 		return g.parseGiteeMR(body)
@@ -138,6 +137,7 @@ func (g Gitee) parseGiteePush(body []byte) (*model.Event, error) {
 		Deleted    bool      `json:"deleted"`
 		Repository giteeRepo `json:"repository"`
 		HeadCommit *struct {
+			ID      string `json:"id"`
 			Message string `json:"message"`
 		} `json:"head_commit"`
 	}
@@ -145,10 +145,11 @@ func (g Gitee) parseGiteePush(body []byte) (*model.Event, error) {
 		return nil, fmt.Errorf("gitee push: %w", err)
 	}
 	if p.Deleted || isZeroSHA(p.After) {
-		return nil, ErrIgnoredEvent // branch deletion
+		return nil, ErrIgnoredEvent // branch or tag deletion
 	}
-	if !strings.HasPrefix(p.Ref, "refs/heads/") {
-		return nil, ErrIgnoredEvent // tag push or other non-branch ref
+	branch, tag := refTarget(p.Ref)
+	if branch == "" && tag == "" {
+		return nil, ErrIgnoredEvent // a hosting-side ref namespace, not ours
 	}
 	repo, err := g.repoURL(p.Repository)
 	if err != nil {
@@ -159,11 +160,19 @@ func (g Gitee) parseGiteePush(body []byte) (*model.Event, error) {
 		Kind:     model.EventPush,
 		RepoURL:  repo,
 		Ref:      p.Ref,
-		Branch:   strings.TrimPrefix(p.Ref, "refs/heads/"),
+		Branch:   branch,
+		Tag:      tag,
 		SHA:      p.After,
 		RepoSlug: p.Repository.slug(),
 	}
-	if !isZeroSHA(p.Before) {
+	// head_commit names a commit; for an annotated tag `after` is the tag
+	// object, which the workspace would reject after checkout peels it. See
+	// the same preference in gitlabFormat.parsePush.
+	if tag != "" && p.HeadCommit != nil && p.HeadCommit.ID != "" {
+		ev.SHA = p.HeadCommit.ID
+	}
+	// A tag push has no base to diff against, so it never carries one.
+	if tag == "" && !isZeroSHA(p.Before) {
 		ev.Before = p.Before
 	}
 	if p.HeadCommit != nil {

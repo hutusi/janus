@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -332,6 +333,95 @@ func TestRunInitDefaultPath(t *testing.T) {
 	}
 	if _, err := os.Stat(config.DefaultPath); err != nil {
 		t.Errorf("expected %s to be written: %v", config.DefaultPath, err)
+	}
+}
+
+// `janus run --tag` supplies the tag a local run would otherwise have no way
+// to name, so a release pipeline can be exercised before it is pushed. The
+// step writes the value to a file rather than stdout so the assertion does not
+// depend on capturing the engine's terminal tee.
+func TestRunRunSuppliesTag(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.txt")
+	pipeline := "name: release\non: { push: { tags: [\"v*\"] } }\njobs:\n  publish:\n    steps:\n      - run: printf '%s' \"${{ tag }}/$JANUS_TAG\" > " + out + "\n"
+	if err := os.MkdirAll(filepath.Join(dir, ".janus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".janus", "ci.yml"), []byte(pipeline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runRun([]string{"--tag", "v1.2.3", dir}); err != nil {
+		t.Fatalf("runRun: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read step output: %v", err)
+	}
+	if string(got) != "v1.2.3/v1.2.3" {
+		t.Errorf("step saw %q, want v1.2.3 through both ${{ tag }} and JANUS_TAG", got)
+	}
+}
+
+// `--ref refs/tags/v1.0.0` fills the tag, and must not also fill the branch:
+// strings.TrimPrefix is a no-op on a miss, so the branch default would
+// otherwise be the whole ref.
+func TestRunRunDerivesTagFromRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	src := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", src}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	out := filepath.Join(t.TempDir(), "out.txt")
+	pipeline := "name: release\non: { push: { tags: [\"v*\"] } }\njobs:\n  publish:\n    steps:\n      - run: printf '%s' \"${{ tag }}|${{ branch }}\" > " + out + "\n"
+	if err := os.MkdirAll(filepath.Join(src, ".janus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".janus", "ci.yml"), []byte(pipeline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("init", "-q", "-b", "main", ".")
+	git("config", "user.email", "t@e.com")
+	git("config", "user.name", "T")
+	git("add", ".")
+	git("commit", "-q", "-m", "init")
+	git("tag", "-a", "v1.0.0", "-m", "release") // annotated: object id != commit id
+
+	if err := runRun([]string{"--repo", src, "--ref", "refs/tags/v1.0.0", "--workspace-root", t.TempDir()}); err != nil {
+		t.Fatalf("runRun: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read step output: %v", err)
+	}
+	if string(got) != "v1.0.0|" {
+		t.Errorf("step saw %q, want the tag set and the branch empty", got)
+	}
+}
+
+// No real event carries a branch and a tag at once, so `janus run` refuses to
+// fabricate one: job-level `branches:` filters are applied locally, and a run
+// claiming to be both would exercise branch-gated jobs for a tag.
+func TestRunRunRejectsBranchAndTag(t *testing.T) {
+	dir := t.TempDir()
+	if err := runRun([]string{"--branch", "main", "--tag", "v1.0.0", dir}); err == nil {
+		t.Error("--branch with --tag was accepted, want an error")
+	}
+	// The same contradiction reached through a tag-naming --ref.
+	err := runRun([]string{"--repo", dir, "--ref", "refs/tags/v1.0.0", "--branch", "main"})
+	if err == nil {
+		t.Fatal("--ref refs/tags/... with --branch was accepted, want an error")
+	}
+	if !strings.Contains(err.Error(), "not on a branch") {
+		t.Errorf("error = %v, want it to explain the branch/tag conflict", err)
 	}
 }
 

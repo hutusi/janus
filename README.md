@@ -107,7 +107,7 @@ janus run --repo https://gitlab.com/acme/app.git --sha <commit> --ref refs/heads
 
 | Method & path                     | Purpose |
 |-----------------------------------|---------|
-| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref","pipeline_path"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist; `pipeline_path` optionally picks a committed pipeline file by name relative to the pipeline directory, e.g. `"release.yml"` → `.janus/release.yml`). The 202 is written before the checkout; poll `GET /api/runs/{id}` for the outcome — a checkout/pipeline failure appears there as a `failed` run with a reason. Unknown JSON fields are a `400`; when the run queue is full, `503` with `Retry-After` — retry later. |
+| `POST /api/trigger`               | Manually start a run: `{"repo_url","branch","sha","ref","pipeline_path"}` → `202 {"run_id"}` (requires `--api-token`; repo must be in the allowlist; `pipeline_path` optionally picks a committed pipeline file by name relative to the pipeline directory, e.g. `"release.yml"` → `.janus/release.yml`; a `"ref"` of `refs/tags/v1.0.0` records the tag, so `${{ tag }}` works). The 202 is written before the checkout; poll `GET /api/runs/{id}` for the outcome — a checkout/pipeline failure appears there as a `failed` run with a reason. Unknown JSON fields are a `400`; when the run queue is full, `503` with `Retry-After` — retry later. |
 | `GET /api/runs`                   | List run **summaries**, newest first (`?limit=&offset=` for paging); no per-step `jobs` — see the detail endpoint |
 | `GET /api/runs/{id}`              | Run detail (job/step statuses, exit codes) |
 | `GET /api/runs/{id}/logs`         | Combined logs; `?job=&step=` for one step; `?follow=1` to stream (bounded: 32 concurrent followers, 15 min per stream, 30 s per write — a saturated server answers `503` + `Retry-After`, and a stream that hits a limit ends with a marker or is dropped; reconnect to continue) |
@@ -155,7 +155,10 @@ For a real deployment keep the secrets in the systemd unit's
 
 Push and merge/pull-request events trigger runs matched against each
 workflow's `on:` filters (a GitHub/Gitee/GitCode pull/merge request normalizes to
-the same `merge_request` event, so one `.janus/ci.yml` works everywhere). Any
+the same `merge_request` event, so one `.janus/ci.yml` works everywhere). Tag
+pushes trigger runs too, but only for workflows that opt in with
+[`on.push.tags`](docs/pipeline-reference.md#tag-filters) — the release-pipeline
+case. Any
 number of repositories can share one server — each runs its own committed
 pipeline, and a hook URL's `?pipeline_path=` query parameter picks a different
 committed file. With `--data-dir`, run history and logs survive restarts. See the
@@ -171,6 +174,7 @@ setup guides:
 name: ci
 on:
   push: { branches: [main], paths: ["src/**"] }  # paths: run only when these changed
+                                        # add tags: ["v*"] to also run on tag pushes
   merge_request: { branches: [main] }   # GitLab term; normalized internally
 env: { CI: "true" }                      # also per-job and per-step
 jobs:
@@ -185,7 +189,7 @@ jobs:
 ```
 
 Variables are limited to `${{ env.VAR }}` plus `ref` / `sha` / `short_sha` /
-`branch` / `event`. See [docs/pipeline-reference.md](docs/pipeline-reference.md)
+`branch` / `tag` / `event`. See [docs/pipeline-reference.md](docs/pipeline-reference.md)
 for the full grammar and the list of rejected constructs.
 
 ## Design

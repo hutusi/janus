@@ -74,7 +74,12 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		Ref:          req.Ref,
 		PipelinePath: req.PipelinePath,
 	}
-	if ev.Branch == "" {
+	// Fill the branch from the ref when the caller named none. TrimPrefix returns
+	// its input unchanged on a miss, so a refs/tags/ ref would otherwise become a
+	// "branch" called refs/tags/v1.0.0 — which then defeats the tag derivation in
+	// Trigger and hands job-level `branches:` filters a name no branch has. A
+	// bare name (`"ref": "main"`) is still taken as a branch, as it always was.
+	if ev.Branch == "" && model.TagFromRef(req.Ref) == "" {
 		ev.Branch = strings.TrimPrefix(req.Ref, "refs/heads/")
 	}
 

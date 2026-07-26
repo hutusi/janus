@@ -32,9 +32,36 @@ var (
 	// the fetch/verify from accepting an ambiguously short prefix.
 	shaRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 	// refRe is a conservative subset of git's ref grammar: it must start
-	// alphanumeric (so it can never be read as a `-option`) and use only a
-	// safe alphabet. hasBadRefSeq below rejects the remaining forbidden runs.
-	refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@-]*$`)
+	// alphanumeric and use only a safe alphabet. hasBadRefSeq below rejects the
+	// remaining forbidden runs. It is deliberately far narrower than
+	// `git check-ref-format`, because a ref has **two** consumers and the second
+	// is the dangerous one:
+	//
+	//  1. A git argument. Guarded by the alphanumeric first character, so a ref
+	//     can never be read as a `-option` — os/exec passes an argv array, so
+	//     there is no shell here and nothing else needs escaping.
+	//
+	//  2. A shell command. `${{ ref }}` and `${{ tag }}` are interpolated into a
+	//     step's `run` string, which the engine hands to `sh -c` — the canonical
+	//     release line is `./publish.sh ${{ tag }}`. git considers `v1$(id)`,
+	//     "v1`id`" and `v1;id` all perfectly legal tag names, so widening this
+	//     alphabet to git's own would let anyone who can create a tag execute
+	//     arbitrary commands through an unmodified, reviewed pipeline — on a
+	//     host with no sandbox, and typically without the protected-branch
+	//     rights that pushing a commit would need.
+	//
+	// So this is a security boundary, not fussiness: do not widen it to match
+	// git without first quoting interpolated values at the engine boundary.
+	// The cost is that a legal-but-exotic tag (`release#1`, a Unicode name)
+	// fails its checkout with the error below; that is a loud, recorded failure
+	// rather than a silent one.
+	//
+	// `+` is in the set for SemVer build metadata (`v1.2.3+build.7`), a legal
+	// git tag release pipelines really do push. It is inert to `sh`, and safe as
+	// a git argument precisely because the first character is constrained to
+	// alphanumeric: a leading `+` is the refspec force prefix, and that is the
+	// only position where git reads it as anything but a literal.
+	refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@+-]*$`)
 )
 
 // validateTarget rejects SHAs and refs that git could parse as options (e.g.
@@ -49,11 +76,18 @@ func validateTarget(sha, ref string) error {
 	if sha != "" && !ValidSHA(sha) {
 		return fmt.Errorf("workspace: invalid SHA %q (want 7-64 hex characters)", sha)
 	}
-	if ref != "" && (!refRe.MatchString(ref) || hasBadRefSeq(ref)) {
-		return fmt.Errorf("workspace: invalid ref %q", ref)
+	if ref != "" && !ValidRefName(ref) {
+		return fmt.Errorf("workspace: invalid ref %q: %s", ref, refNameRule)
 	}
 	return nil
 }
+
+// refNameRule explains the restriction in the one place a user meets it. Git
+// itself would accept more (see refRe); saying so keeps an operator from
+// hunting for a git problem that does not exist.
+const refNameRule = "Janus allows letters, digits and . _ / @ + - and requires an " +
+	"alphanumeric first character, which is stricter than git — a ref reaches both a " +
+	"git argument and ${{ ref }}/${{ tag }} interpolation into a step's shell"
 
 // ValidSHA reports whether s is a full or abbreviated hex commit id (7-64 hex
 // characters). It is the single definition of "looks like a git object id":
@@ -61,6 +95,15 @@ func validateTarget(sha, ref string) error {
 // untrusted SHA at ingestion, before it reaches anything that embeds it in a
 // path (a URL path segment, an argument, an environment value).
 func ValidSHA(s string) bool { return shaRe.MatchString(s) }
+
+// ValidRefName reports whether s is safe to use as a ref or as the branch/tag
+// name derived from one — see refRe for the two consumers that make this a
+// security boundary rather than a style rule. Exported for the same reason as
+// ValidSHA: the runner applies it at ingestion, so a crafted value is refused
+// before a run is recorded rather than only when the checkout reaches git. That
+// matters because a caller can supply a branch or tag *without* a ref, which
+// would otherwise skip this check entirely and still reach ${{ branch }}.
+func ValidRefName(s string) bool { return refRe.MatchString(s) && !hasBadRefSeq(s) }
 
 // hasBadRefSeq flags the multi-character sequences git check-ref-format
 // forbids that refRe's alphabet alone cannot exclude.

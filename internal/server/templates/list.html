@@ -20,7 +20,7 @@
     {{else}}
     <table>
       <thead>
-        <tr><th>Run</th><th>Workflow</th><th>Status</th><th>Event</th><th>Branch</th><th>Created</th><th>Duration</th></tr>
+        <tr><th>Run</th><th>Workflow</th><th>Status</th><th>Event</th><th>Ref</th><th>Created</th><th>Duration</th></tr>
       </thead>
       <tbody>
         {{range .Runs}}
@@ -29,7 +29,7 @@
           <td>{{trunc 200 .WorkflowName}}</td>
           <td><span class="status status-{{.Status}}">{{.Status}}</span></td>
           <td>{{.Event.Kind}}</td>
-          <td>{{trunc 200 .Event.Branch}}{{if .Event.SHA}} <code class="muted">{{shortID .Event.SHA}}</code>{{end}}</td>
+          <td>{{trunc 200 .Event.Target}}{{if .Event.SHA}} <code class="muted">{{shortID .Event.SHA}}</code>{{end}}</td>
           <td class="muted">{{reltime .CreatedAt}}</td>
           <td class="muted">{{template "dur" .}}</td>
         </tr>

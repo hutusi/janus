@@ -1,7 +1,7 @@
 # Gitee webhook setup
 
-Janus triggers pipelines from Gitee (码云) **push** and **pull request**
-webhooks.
+Janus triggers pipelines from Gitee (码云) **push**, **tag push**, and **pull
+request** webhooks.
 
 ## 1. Run Janus with a secret
 
@@ -33,7 +33,8 @@ In your repository: **管理 / Manage → WebHooks → 添加 (Add)**.
 - **URL:** `https://janus.example.com/webhooks/gitee`
 - **WebHook 密码/签名密钥:** the same value passed to `--gitee-secret` (either
   mode works)
-- **事件 (Events):** check **Push** and **Pull Request**
+- **事件 (Events):** check **Push** and **Pull Request** — plus **Tag Push** if
+  any pipeline declares [`on.push.tags`](pipeline-reference.md#tag-filters)
 
 An optional `?pipeline_path=` query parameter selects a committed pipeline file
 other than the configured default, with the same relative-name rules as the
@@ -44,8 +45,9 @@ other providers.
 | Gitee event | Action |
 |-------------|--------|
 | `Push Hook` | Checks out `after` on the pushed branch; `before` is the diff base for [`paths` filters](pipeline-reference.md#path-filters). |
+| `Tag Push Hook` | Checks out `head_commit.id` — the *commit* the tag names — and records the tag. Only workflows declaring [`on.push.tags`](pipeline-reference.md#tag-filters) run; the rest ignore it. `before` is not kept: a tag push has no diff base. |
 | `Merge Request Hook` (`open`/`update`) | Checks out the PR's head commit; matched against the **target** branch. |
-| Branch deletion / tag push | Ignored. |
+| Branch/tag deletion | Ignored. |
 | Other actions / event types | Ignored. |
 
 A Gitee pull request normalizes to the same provider-neutral `merge_request`

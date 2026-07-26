@@ -488,6 +488,29 @@ func TestReportIncludesRef(t *testing.T) {
 	}
 }
 
+// GitLab's `ref` takes a branch *or* tag name, so a tag run must post the short
+// tag. TrimPrefix("refs/tags/v1.0.0", "refs/heads/") is a no-op, so without the
+// tag case the status would carry the whole ref and name nothing.
+func TestReportIncludesTagRef(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	r := newReporter(t, ts)
+
+	run := gitlabRun(model.StatusSuccess)
+	run.Event.Ref = "refs/tags/v1.0.0"
+	run.Event.Branch = ""
+	run.Event.Tag = "v1.0.0"
+	r.Report(run, model.StatusSuccess)
+	r.Close(2 * time.Second)
+
+	got := recv(t, reqs)
+	var b statusBody
+	_ = json.Unmarshal(got.body, &b)
+	if b.Ref != "v1.0.0" {
+		t.Errorf("ref = %q, want v1.0.0 (refs/tags/ stripped)", b.Ref)
+	}
+}
+
 func TestReportOmitsOverlongRef(t *testing.T) {
 	// Event refs are accepted up to 512 bytes, but GitLab caps ref at 255; an
 	// over-cap ref is omitted (not truncated to a different branch) so the status

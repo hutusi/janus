@@ -92,6 +92,7 @@ func (g GitHub) parseGitHubPush(body []byte) (*model.Event, error) {
 		Deleted    bool   `json:"deleted"`
 		Repository ghRepo `json:"repository"`
 		HeadCommit *struct {
+			ID      string `json:"id"`
 			Message string `json:"message"`
 		} `json:"head_commit"`
 	}
@@ -101,8 +102,11 @@ func (g GitHub) parseGitHubPush(body []byte) (*model.Event, error) {
 	if p.Deleted || isZeroSHA(p.After) {
 		return nil, ErrIgnoredEvent // branch/tag deletion
 	}
-	if !strings.HasPrefix(p.Ref, "refs/heads/") {
-		return nil, ErrIgnoredEvent // tag push or other non-branch ref
+	// GitHub delivers tag pushes on this same push event, distinguished only
+	// by the ref.
+	branch, tag := refTarget(p.Ref)
+	if branch == "" && tag == "" {
+		return nil, ErrIgnoredEvent // a hosting-side ref namespace, not ours
 	}
 	repo, err := g.repoURL(p.Repository)
 	if err != nil {
@@ -113,13 +117,21 @@ func (g GitHub) parseGitHubPush(body []byte) (*model.Event, error) {
 		Kind:     model.EventPush,
 		RepoURL:  repo,
 		Ref:      p.Ref,
-		Branch:   strings.TrimPrefix(p.Ref, "refs/heads/"),
+		Branch:   branch,
+		Tag:      tag,
 		SHA:      p.After,
 		RepoSlug: p.Repository.FullName,
 	}
+	// head_commit names a commit; for an annotated tag `after` is the tag
+	// object, which the workspace would reject after checkout peels it. See
+	// the same preference in gitlabFormat.parsePush.
+	if tag != "" && p.HeadCommit != nil && p.HeadCommit.ID != "" {
+		ev.SHA = p.HeadCommit.ID
+	}
 	// An all-zeros before means a newly created branch: no base to diff, so
-	// leave Before empty and let path filters fail open.
-	if !isZeroSHA(p.Before) {
+	// leave Before empty and let path filters fail open. A tag push has no
+	// meaningful base at all, so it never carries one.
+	if tag == "" && !isZeroSHA(p.Before) {
 		ev.Before = p.Before
 	}
 	if p.HeadCommit != nil {

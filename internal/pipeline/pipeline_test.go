@@ -386,6 +386,69 @@ jobs:
 			wantInErr: "`on.merge_request` cannot set both",
 		},
 		{
+			name: "tags and tags-ignore on push",
+			src: `
+name: ci
+on: { push: { tags: ["v*"], tags-ignore: ["*-rc*"] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`on.push` cannot set both `tags` and `tags-ignore`",
+		},
+		{
+			name: "tags on merge_request",
+			src: `
+name: ci
+on: { merge_request: { tags: ["v*"] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "a merge request has no tag",
+		},
+		{
+			name: "empty tags list",
+			src: `
+name: ci
+on: { push: { tags: [] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "`tags` must list at least one pattern",
+		},
+		{
+			name: "empty pattern in tags",
+			src: `
+name: ci
+on: { push: { tags: ["v*", ""] } }
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "contains an empty pattern",
+		},
+		{
+			// Tag filters are a trigger-level key: a job has no tag of its own
+			// to filter on, so the strict decode must still reject it there.
+			name: "tags on a job",
+			src: `
+name: ci
+on: { push: { tags: ["v*"] } }
+jobs:
+  a:
+    tags: ["v*"]
+    steps:
+      - run: echo hi
+`,
+			wantInErr: "tags",
+		},
+		{
 			name: "paths and paths-ignore on push",
 			src: `
 name: ci
@@ -853,6 +916,10 @@ func TestInterpolate(t *testing.T) {
 		Branch:   "main",
 		Event:    "push",
 	}
+	tagCtx := Context{Ref: "refs/tags/v1.0.0", Tag: "v1.0.0", Event: "push"}
+	if got, err := tagCtx.Interpolate("release ${{ tag }} from ${{ ref }}", 1<<20); err != nil || got != "release v1.0.0 from refs/tags/v1.0.0" {
+		t.Errorf("tag interpolation = %q, %v", got, err)
+	}
 	tests := []struct {
 		in, want string
 	}{
@@ -863,6 +930,9 @@ func TestInterpolate(t *testing.T) {
 		{"CI=${{ env.CI }} STAGE=${{ env.STAGE }}", "CI=true STAGE=build"},
 		{"undef=${{ env.NOPE }}.", "undef=."},
 		{"${{branch}}-${{short_sha}}", "main-abcdef1"}, // no inner spaces
+		// A branch push has no tag: ${{ tag }} resolves empty rather than
+		// failing, the same way an undefined env var does.
+		{"tag=[${{ tag }}]", "tag=[]"},
 	}
 	for _, tc := range tests {
 		got, err := ctx.Interpolate(tc.in, 1<<20)
@@ -923,6 +993,113 @@ jobs:
 	}
 	if wf2.On.Push.Paths != nil || wf2.Jobs["a"].PathFilter != nil {
 		t.Error("absent paths keys must leave filters nil")
+	}
+}
+
+func TestParseTagFilters(t *testing.T) {
+	wf, err := Parse([]byte(`
+name: release
+on:
+  push:
+    tags: ["v*", "release-*"]
+jobs:
+  build:
+    steps:
+      - run: echo ${{ tag }}
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	tf := wf.On.Push.Tags
+	if tf == nil || len(tf.Tags) != 2 || tf.Tags[0] != "v*" || tf.Ignore != nil {
+		t.Fatalf("on.push tags filter = %+v, want the two declared patterns", tf)
+	}
+
+	// tags-ignore alone is the denylist form.
+	wf2, err := Parse([]byte("name: ci\non: { push: { tags-ignore: [\"*-rc*\"] } }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"))
+	if err != nil {
+		t.Fatalf("parse tags-ignore: %v", err)
+	}
+	if tf := wf2.On.Push.Tags; tf == nil || tf.Tags != nil || len(tf.Ignore) != 1 {
+		t.Fatalf("on.push tags filter = %+v, want ignore-only", tf)
+	}
+
+	// The nil-ness is what makes a bare `on: push:` branches-only, so an
+	// absent key must never materialize a filter.
+	wf3, err := Parse([]byte("name: ci\non: { push: {} }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"))
+	if err != nil {
+		t.Fatalf("parse plain: %v", err)
+	}
+	if wf3.On.Push.Tags != nil {
+		t.Error("an absent tags key must leave the filter nil — that is the opt-in signal")
+	}
+}
+
+// `branches: []` stays legal, and gains a job: because the tag rule keys on the
+// branch keys being *absent*, an empty-but-present list is the only way to say
+// "every branch as well as these tags" — branch names are exact strings, so no
+// pattern spells "all". Rejecting it (as an earlier revision did) would leave
+// that combination inexpressible.
+func TestParseEmptyBranchesDeclaresAllBranches(t *testing.T) {
+	wf, err := Parse([]byte(`
+name: ci
+on:
+  push:
+    branches: []
+    tags: ["v*"]
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// Present-but-empty, not absent: the distinction the tag rule reads.
+	if wf.On.Push.Branches == nil {
+		t.Error("`branches: []` must survive as a non-nil empty slice, not decay to absent")
+	}
+	if len(wf.On.Push.Branches) != 0 {
+		t.Errorf("branches = %v, want empty", wf.On.Push.Branches)
+	}
+	if wf.On.Push.Tags == nil {
+		t.Fatal("tags filter went missing")
+	}
+	// And an empty allowlist still allows everything.
+	if !wf.On.Push.Matches("anything") {
+		t.Error("`branches: []` must match every branch")
+	}
+
+	// The denylist spelling too.
+	wf2, err := Parse([]byte("name: ci\non: { push: { branches-ignore: [] } }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"))
+	if err != nil {
+		t.Fatalf("parse branches-ignore: []: %v", err)
+	}
+	if wf2.On.Push.Ignore == nil || !wf2.On.Push.Matches("anything") {
+		t.Error("`branches-ignore: []` must parse and match every branch")
+	}
+}
+
+func TestParseTagPatternCaps(t *testing.T) {
+	pipe := func(patterns []string) string {
+		return "name: ci\non: { push: { tags: [\"" + strings.Join(patterns, "\", \"") + "\"] } }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"
+	}
+	many := func(n int) []string {
+		ps := make([]string, n)
+		for i := range ps {
+			ps[i] = fmt.Sprintf("v%d.*", i)
+		}
+		return ps
+	}
+
+	if _, err := Parse([]byte(pipe(many(maxPathPatterns)))); err != nil {
+		t.Errorf("%d patterns should be accepted: %v", maxPathPatterns, err)
+	}
+	if _, err := Parse([]byte(pipe(many(maxPathPatterns + 1)))); err == nil || !strings.Contains(err.Error(), "too many patterns") {
+		t.Errorf("%d patterns: err = %v, want too-many-patterns", maxPathPatterns+1, err)
+	}
+	if _, err := Parse([]byte(pipe([]string{strings.Repeat("v", maxPathPatternLen+1)}))); err == nil || !strings.Contains(err.Error(), "pattern is too long") {
+		t.Errorf("over-long pattern: err = %v, want pattern-too-long", err)
 	}
 }
 
