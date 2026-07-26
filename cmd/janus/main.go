@@ -515,6 +515,7 @@ func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	file := fs.String("file", ".janus/ci.yml", "pipeline file, relative to the workspace")
 	branch := fs.String("branch", "", "value for ${{ branch }}")
+	tag := fs.String("tag", "", "value for ${{ tag }}")
 	maxJobs := fs.Int("max-parallel-jobs", 4, "maximum jobs to run concurrently")
 	stepTimeout := fs.Duration("step-timeout", 0, "fail any step that runs longer than this (0 = no timeout)")
 	repo := fs.String("repo", "", "git repo URL to check out (instead of using <dir>)")
@@ -530,7 +531,7 @@ func runRun(args []string) error {
 	// run marked cancelled) rather than just dying with orphaned children.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch}
+	ev := model.Event{Provider: "manual", Kind: model.EventManual, Branch: *branch, Tag: *tag}
 
 	var dir string
 	if *repo != "" {
@@ -556,6 +557,12 @@ func runRun(args []string) error {
 		ev.RepoURL, ev.SHA, ev.Ref = *repo, *sha, *ref
 		if ws.Head != "" { // the exact commit checked out, not the abbreviation supplied
 			ev.SHA = ws.Head
+		}
+		// --ref refs/tags/v1.0.0 is how this asks for a tag, so fill ${{ tag }}
+		// from it — the same derivation the trigger API does — unless --tag
+		// already said otherwise.
+		if ev.Tag == "" {
+			ev.Tag = model.TagFromRef(*ref)
 		}
 		if ev.Branch == "" {
 			ev.Branch = strings.TrimPrefix(*ref, "refs/heads/")

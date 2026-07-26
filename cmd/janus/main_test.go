@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -332,6 +333,36 @@ func TestRunInitDefaultPath(t *testing.T) {
 	}
 	if _, err := os.Stat(config.DefaultPath); err != nil {
 		t.Errorf("expected %s to be written: %v", config.DefaultPath, err)
+	}
+}
+
+// `janus run --tag` supplies the tag a local run would otherwise have no way
+// to name, so a release pipeline can be exercised before it is pushed. The
+// step writes the value to a file rather than stdout so the assertion does not
+// depend on capturing the engine's terminal tee.
+func TestRunRunSuppliesTag(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.txt")
+	pipeline := "name: release\non: { push: { tags: [\"v*\"] } }\njobs:\n  publish:\n    steps:\n      - run: printf '%s' \"${{ tag }}/$JANUS_TAG\" > " + out + "\n"
+	if err := os.MkdirAll(filepath.Join(dir, ".janus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".janus", "ci.yml"), []byte(pipeline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runRun([]string{"--tag", "v1.2.3", dir}); err != nil {
+		t.Fatalf("runRun: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read step output: %v", err)
+	}
+	if string(got) != "v1.2.3/v1.2.3" {
+		t.Errorf("step saw %q, want v1.2.3 through both ${{ tag }} and JANUS_TAG", got)
 	}
 }
 

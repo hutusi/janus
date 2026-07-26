@@ -758,6 +758,40 @@ func TestDashboardDurations(t *testing.T) {
 	}
 }
 
+// A tag run has no branch, so the column that used to render Event.Branch
+// would be blank — the run would look like it ran against nothing. Both pages
+// render Event.Target instead.
+func TestDashboardShowsTagForTagRuns(t *testing.T) {
+	st := store.NewMemory()
+	srv := New(st, nil, "test", WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	base := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	tagRun := &model.Run{ID: "tagged", Status: model.StatusSuccess, WorkflowName: "release",
+		Event:     model.Event{Kind: model.EventPush, Tag: "v1.0.0", Ref: "refs/tags/v1.0.0"},
+		CreatedAt: base, StartedAt: base, FinishedAt: base.Add(time.Second)}
+	branchRun := &model.Run{ID: "branched", Status: model.StatusSuccess, WorkflowName: "ci",
+		Event:     model.Event{Kind: model.EventPush, Branch: "main", Ref: "refs/heads/main"},
+		CreatedAt: base, StartedAt: base, FinishedAt: base.Add(time.Second)}
+	for _, r := range []*model.Run{tagRun, branchRun} {
+		if err := st.SaveRun(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := getText(t, ts.URL+"/")
+	if !strings.Contains(list, "v1.0.0") {
+		t.Error("run list does not show the tag for a tag run")
+	}
+	if !strings.Contains(list, "main") {
+		t.Error("run list stopped showing the branch for a branch run")
+	}
+	if page := getText(t, ts.URL+"/runs/tagged"); !strings.Contains(page, "v1.0.0") {
+		t.Error("run page does not show the tag for a tag run")
+	}
+}
+
 func TestIndexPagination(t *testing.T) {
 	orig := indexPageSize
 	indexPageSize = 2

@@ -6,8 +6,20 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
+
+// TagFromRef returns the tag a git ref names, or "" when it names something
+// else. Callers that receive a bare ref rather than a parsed webhook — the
+// manual trigger API, `janus run --ref` — use it so `refs/tags/v1.0.0` fills
+// Event.Tag and ${{ tag }} is correct there too.
+func TagFromRef(ref string) string {
+	if tag, ok := strings.CutPrefix(ref, "refs/tags/"); ok {
+		return tag
+	}
+	return ""
+}
 
 // Workflow is a parsed and validated pipeline specification (.janus/ci.yml).
 // It is immutable once produced by pipeline.Parse.

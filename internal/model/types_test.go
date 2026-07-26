@@ -85,6 +85,22 @@ func TestEventTarget(t *testing.T) {
 	}
 }
 
+func TestTagFromRef(t *testing.T) {
+	tests := []struct{ ref, want string }{
+		{"refs/tags/v1.0.0", "v1.0.0"},
+		{"refs/tags/release/v1", "release/v1"},
+		{"refs/heads/main", ""},
+		{"refs/tags", ""}, // not a prefix match on a shorter string
+		{"v1.0.0", ""},    // a bare name is not a ref
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := TagFromRef(tc.ref); got != tc.want {
+			t.Errorf("TagFromRef(%q) = %q, want %q", tc.ref, got, tc.want)
+		}
+	}
+}
+
 func TestEventMarshalJSONRedactsRepoURL(t *testing.T) {
 	e := Event{
 		Provider: "gitlab",

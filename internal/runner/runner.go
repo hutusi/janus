@@ -588,9 +588,7 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 	// correct for it too, without the manual path needing a field of its own.
 	// Webhooks already set Tag, and this only fills an empty one.
 	if ev.Tag == "" && ev.Branch == "" {
-		if tag, ok := strings.CutPrefix(ev.Ref, "refs/tags/"); ok {
-			ev.Tag = tag
-		}
+		ev.Tag = model.TagFromRef(ev.Ref)
 	}
 	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
 	if err != nil {

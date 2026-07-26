@@ -9,7 +9,7 @@ module (`gopkg.in/yaml.v3`). It compiles to a static binary
 ```
 cmd/janus            CLI: serve | init | run | validate; flag parsing, wiring, shutdown
 internal/
-  model              domain types: spec (Workflow/Trigger/Job/Step + Branch/PathFilter),
+  model              domain types: spec (Workflow/Trigger/Job/Step + Branch/Tag/PathFilter),
                      Event, ChangedFiles, runtime (Run/JobRun/StepRun)
   config             janus.yml + env + flag overlay, precedence and validation
   pipeline           YAML parse + strict validation + interpolation   (pure, no I/O)
@@ -41,10 +41,13 @@ half of `engine` are pure and have the heaviest unit tests.
 
 `model.Event` is the normalized trigger (push / merge_request / manual) that
 every provider and the manual API produce, and is the source of
-`${{ ref|sha|branch|event }}`. For pushes it also carries `Before` (the
-pre-push commit), the diff base for path filters; `model.ChangedFiles` moves
-the computed set around with an explicit `Known` flag so an undeterminable
-diff is distinguishable from an empty one.
+`${{ ref|sha|branch|tag|event }}`. A push carries **either** `Branch` **or**
+`Tag`, never both — a tag is on no branch — so `Event.Target()` is the single
+answer to "what did this run run against" for grouping and display. For branch
+pushes it also carries `Before` (the pre-push commit), the diff base for path
+filters; `model.ChangedFiles` moves the computed set around with an explicit
+`Known` flag so an undeterminable diff is distinguishable from an empty one. A
+tag push never carries a base, so path filters stay inert for it.
 
 ## Pipeline parsing & strict rejection
 

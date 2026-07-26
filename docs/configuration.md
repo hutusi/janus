@@ -299,11 +299,12 @@ Runs a pipeline locally, streaming logs to the terminal.
 |------|---------|---------|
 | `--file` | `.janus/ci.yml` | Pipeline file, relative to the workspace. |
 | `--branch` | _(empty)_ | Value for `${{ branch }}`. |
+| `--tag` | _(empty)_ | Value for `${{ tag }}`, for testing a [tag pipeline](pipeline-reference.md#tag-filters) locally. |
 | `--max-parallel-jobs` | `4` | Max jobs running concurrently. |
 | `--step-timeout` | `0` | Per-step timeout. |
 | `--repo` | _(empty)_ | Git URL to check out (instead of `<dir>`). |
 | `--sha` | _(empty)_ | Commit to check out (with `--repo`). |
-| `--ref` | _(empty)_ | Ref to fetch as a fallback (with `--repo`). |
+| `--ref` | _(empty)_ | Ref to fetch as a fallback (with `--repo`). A `refs/tags/…` value fills `--tag` when it was not given. |
 | `--workspace-root` | `$TMPDIR` | Where to create the checkout (with `--repo`). |
 | `--keep-workspace` | `false` | Don't delete the checkout afterward. |
 
@@ -333,5 +334,6 @@ with a **curated** environment, not the Janus daemon's full environment:
   `TMPDIR`, plus the Windows equivalents (`SystemRoot`, `ComSpec`, `PATHEXT`,
   `USERPROFILE`, `TEMP`/`TMP`, …).
 - Injected: `CI=true`, `JANUS_RUN_ID`, `JANUS_EVENT`, `JANUS_REF`, `JANUS_SHA`,
-  `JANUS_BRANCH`.
+  `JANUS_BRANCH`, `JANUS_TAG` (exactly one of the last two is set; both are
+  always exported).
 - Overlaid (later wins): workflow `env` → job `env` → step `env`.

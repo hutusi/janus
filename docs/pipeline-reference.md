@@ -298,7 +298,7 @@ workflow env  →  job env  →  step env
 ```
 
 Janus also injects a curated base for every step (e.g. `CI=true`, `PATH`,
-`HOME`, and `JANUS_*` values for the ref/sha/branch). It does **not** pass the
+`HOME`, and `JANUS_*` values for the ref/sha/branch/tag). It does **not** pass the
 Janus daemon's full environment into jobs, so daemon configuration is not
 handed to builds via the environment. That is the extent of the guarantee:
 jobs run as the same OS user as the daemon (no isolation), so anything that

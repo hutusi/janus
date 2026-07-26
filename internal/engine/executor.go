@@ -220,6 +220,9 @@ func (e *Engine) prepare(rs *runState, job *model.Job, step model.Step) (cmdStr,
 	merged["JANUS_REF"] = rs.event.Ref
 	merged["JANUS_SHA"] = rs.event.SHA
 	merged["JANUS_BRANCH"] = rs.event.Branch
+	// Exactly one of BRANCH/TAG is set; both are always exported so a script can
+	// test either without worrying about an unset variable.
+	merged["JANUS_TAG"] = rs.event.Tag
 	for k, v := range rs.wf.Env {
 		merged[k] = v
 	}
@@ -236,6 +239,7 @@ func (e *Engine) prepare(rs *runState, job *model.Job, step model.Step) (cmdStr,
 		SHA:      rs.event.SHA,
 		ShortSHA: shortSHA(rs.event.SHA),
 		Branch:   rs.event.Branch,
+		Tag:      rs.event.Tag,
 		Event:    string(rs.event.Kind),
 	}
 
