@@ -194,16 +194,13 @@ const maxGroupExpanded = 1 << 10
 func expandGroup(wf *model.Workflow, ev model.Event) (string, error) {
 	tpl := strings.TrimSpace(wf.Concurrency.Group)
 	if tpl == "" {
-		target := ev.Branch
-		if target == "" {
-			target = ev.Ref
-		}
-		return wf.Name + "-" + target, nil
+		return wf.Name + "-" + ev.Target(), nil
 	}
 	ictx := pipeline.Context{
 		Env:    wf.Env,
 		Ref:    ev.Ref,
 		Branch: ev.Branch,
+		Tag:    ev.Tag,
 		Event:  string(ev.Kind),
 	}
 	return ictx.Interpolate(tpl, maxGroupExpanded)
@@ -515,13 +512,14 @@ var changedFilesTimeout = 2 * time.Minute
 
 // Event-field length caps. These values come from the webhook body (up to
 // 5 MiB) or the manual API, and flow into the stored run, the unauthenticated
-// dashboard, and interpolation (${{ branch }}, ${{ ref }}); bound them at the
+// dashboard, and interpolation (${{ branch }}, ${{ tag }}, ${{ ref }}); bound them at the
 // single entry point so none of those can be amplified. Generous — real values
 // are tens of bytes.
 const (
 	maxRepoURLLen      = 2 << 10
 	maxRefLen          = 512
 	maxBranchLen       = 512
+	maxTagLen          = 512
 	maxPipelinePathLen = 512
 	maxTitleLen        = 4 << 10 // commit/MR title, display only
 	maxBeforeLen       = 64      // hex commit id (sha1 or sha256)
@@ -538,6 +536,7 @@ func validateEvent(ev model.Event) error {
 		{"repo_url", ev.RepoURL, maxRepoURLLen},
 		{"ref", ev.Ref, maxRefLen},
 		{"branch", ev.Branch, maxBranchLen},
+		{"tag", ev.Tag, maxTagLen},
 		{"pipeline_path", ev.PipelinePath, maxPipelinePathLen},
 		{"title", ev.Title, maxTitleLen},
 		{"before", ev.Before, maxBeforeLen},
@@ -582,6 +581,16 @@ func (r *Runner) Trigger(ev model.Event) (Result, error) {
 	}
 	if err := validateEvent(ev); err != nil {
 		return Result{}, err
+	}
+	// A manual trigger names a ref, not a kind of ref: `{"ref":"refs/tags/v1"}`
+	// is how the API asks for a tag. Deriving Tag here — the one place every
+	// trigger passes through — makes ${{ tag }}, JANUS_TAG and the dashboard
+	// correct for it too, without the manual path needing a field of its own.
+	// Webhooks already set Tag, and this only fills an empty one.
+	if ev.Tag == "" && ev.Branch == "" {
+		if tag, ok := strings.CutPrefix(ev.Ref, "refs/tags/"); ok {
+			ev.Tag = tag
+		}
 	}
 	pipelinePath, err := pipelineFile(r.pipelinePath, ev)
 	if err != nil {
@@ -869,7 +878,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 
 	if !matches(wf, ev) {
 		abort()
-		finish(model.StatusSkipped, fmt.Sprintf("event %s on %q does not match the workflow's on:", ev.Kind, ev.Branch))
+		finish(model.StatusSkipped, fmt.Sprintf("event %s on %q does not match the workflow's on:", ev.Kind, ev.Target()))
 		return
 	}
 
@@ -878,7 +887,7 @@ func (r *Runner) runTrigger(runCtx context.Context, cancelRun context.CancelCaus
 	changed := r.changedFiles(runCtx, ws, wf, ev, run.ID)
 	if ev.Kind == model.EventPush && wf.On.Push.Paths != nil && changed.Known && !wf.On.Push.Paths.Matches(changed.Files) {
 		abort()
-		finish(model.StatusSkipped, fmt.Sprintf("push to %q changed no files matching the on.push path filter", ev.Branch))
+		finish(model.StatusSkipped, fmt.Sprintf("push to %q changed no files matching the on.push path filter", ev.Target()))
 		return
 	}
 
@@ -1057,6 +1066,14 @@ func (r *Runner) changedFiles(ctx context.Context, ws *workspace.Workspace, wf *
 	if ev.Kind != model.EventPush || !hasPathFilters(wf) {
 		return model.ChangedFiles{}
 	}
+	// A tag push has no base: the previous tag is not this tag's parent, so any
+	// diff against it would describe unrelated work. Leave the set unknown and
+	// let path filters fail open rather than skip on a meaningless comparison.
+	// (Providers already leave Before empty for tags; this states the rule
+	// where it is read, so a hand-built event cannot route around it.)
+	if ev.Tag != "" {
+		return model.ChangedFiles{}
+	}
 	if ev.Before == "" {
 		r.logger.Info("path filters fail open: push has no base commit", "run_id", runID)
 		return model.ChangedFiles{}
@@ -1088,12 +1105,26 @@ func hasPathFilters(wf *model.Workflow) bool {
 // matches reports whether the event should start the workflow. Manual triggers
 // always match; push/merge_request match when the trigger is declared and the
 // branch passes its filter.
+//
+// A tag push is the exception: it matches only a workflow that declares
+// `tags`/`tags-ignore`, so a bare `on: push:` stays branches-only. GitHub
+// Actions would run it — the divergence is deliberate. Tag pushes were dropped
+// outright before this existed, so honoring the GHA reading would mean an
+// upgrade silently starts executing every deployed pipeline against a ref it
+// has never seen, as unsandboxed host processes. Declaring the key is the
+// opt-in; see model.Trigger.Tags.
 func matches(wf *model.Workflow, ev model.Event) bool {
 	switch ev.Kind {
 	case model.EventManual:
 		return true
 	case model.EventPush:
-		return wf.On.Push != nil && wf.On.Push.Matches(ev.Branch)
+		if wf.On.Push == nil {
+			return false
+		}
+		if ev.Tag != "" {
+			return wf.On.Push.Tags != nil && wf.On.Push.Tags.Matches(ev.Tag)
+		}
+		return wf.On.Push.Matches(ev.Branch)
 	case model.EventMergeRequest:
 		return wf.On.MergeRequest != nil && wf.On.MergeRequest.Matches(ev.Branch)
 	default:

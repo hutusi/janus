@@ -638,6 +638,146 @@ func TestTriggerNonMatchingEventRecordsSkippedRun(t *testing.T) {
 	}
 }
 
+// tagPipeline runs on a v* tag and on no branch at all, the shape a release
+// pipeline takes.
+const tagPipeline = `name: release
+on: { push: { tags: ["v*"] } }
+jobs:
+  publish:
+    steps:
+      - run: echo releasing ${{ tag }}
+`
+
+// End to end over a real checkout: a tag push runs the workflow that opted in,
+// and the run records the tag rather than a blank branch.
+func TestTriggerTagPushRunsTagWorkflow(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, tagPipeline)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	res, err := r.Trigger(model.Event{
+		Kind: model.EventPush, RepoURL: repo, SHA: sha,
+		Ref: "refs/tags/v1.0.0", Tag: "v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 30*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success", run.Status, run.Reason)
+	}
+	if run.Event.Tag != "v1.0.0" || run.Event.Branch != "" {
+		t.Errorf("stored event tag/branch = %q/%q, want v1.0.0/empty", run.Event.Tag, run.Event.Branch)
+	}
+}
+
+// The counterpart, and the reason tag support is opt-in: the same tag push
+// against a pipeline that only declares branches is skipped, not run.
+func TestTriggerTagPushSkipsBranchOnlyWorkflow(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, echoPipeline) // on: { push: { branches: [main] } }
+	root := t.TempDir()
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: root, PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	res, err := r.Trigger(model.Event{
+		Kind: model.EventPush, RepoURL: repo, SHA: sha,
+		Ref: "refs/tags/v1.0.0", Tag: "v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 30*time.Second)
+	if run.Status != model.StatusSkipped {
+		t.Fatalf("run status = %s, want skipped", run.Status)
+	}
+	// The reason must name the tag: Branch is empty for a tag push, so a
+	// message built from it would read `on ""` and say nothing.
+	if !strings.Contains(run.Reason, "v1.0.0") {
+		t.Errorf("reason = %q, want it to name the tag", run.Reason)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(root, "run-*")); len(matches) != 0 {
+		t.Errorf("a skipped trigger leaked workspace dirs: %v", matches)
+	}
+}
+
+// A tag push has no base commit to diff against, so path filters must stay
+// inert rather than skip: a tag whose "changed set" was computed against the
+// previous tag would describe unrelated work. Both the trigger-level and the
+// job-level filter must fail open.
+func TestTriggerTagPushIgnoresPathFilters(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Neither filter can match: nothing under src/ or docs/ exists in the repo.
+	repo, sha := initGitRepo(t, `name: release
+on: { push: { tags: ["v*"], paths: ["src/**"] } }
+jobs:
+  publish:
+    paths: ["docs/**"]
+    steps:
+      - run: echo releasing
+`)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	res, err := r.Trigger(model.Event{
+		Kind: model.EventPush, RepoURL: repo, SHA: sha,
+		Ref: "refs/tags/v1.0.0", Tag: "v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 30*time.Second)
+	if run.Status != model.StatusSuccess {
+		t.Fatalf("run status = %s (%s), want success: path filters must fail open for a tag push", run.Status, run.Reason)
+	}
+	if len(run.Jobs) != 1 || run.Jobs[0].Status != model.StatusSuccess {
+		t.Errorf("jobs = %+v, want the job to have run despite its paths filter", run.Jobs)
+	}
+}
+
+// A manual trigger names a ref, not a kind of ref — asking for refs/tags/x is
+// how the API requests a tag, and Tag must be derived so ${{ tag }} works.
+func TestTriggerDerivesTagFromManualRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo, sha := initGitRepo(t, tagPipeline)
+	st := store.NewMemory()
+	allow, _ := allowlist.New([]string{"*"})
+	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1, Allowlist: allow})
+
+	res, err := r.Trigger(model.Event{
+		Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/tags/v2.3.4",
+	})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	run := waitRun(t, st, res.RunID, 30*time.Second)
+	if run.Event.Tag != "v2.3.4" {
+		t.Errorf("event tag = %q, want v2.3.4 derived from the ref", run.Event.Tag)
+	}
+	// A branch ref must not be mistaken for one.
+	res2, err := r.Trigger(model.Event{
+		Kind: model.EventManual, RepoURL: repo, SHA: sha, Ref: "refs/heads/main", Branch: "main",
+	})
+	if err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	if run2 := waitRun(t, st, res2.RunID, 30*time.Second); run2.Event.Tag != "" {
+		t.Errorf("branch trigger got tag %q, want empty", run2.Event.Tag)
+	}
+}
+
 func TestFinishRunRedactsReason(t *testing.T) {
 	st := store.NewMemory()
 	r := New(st, engine.New(st), Options{WSRoot: t.TempDir(), PipelinePath: ".janus/ci.yml", MaxRuns: 1})
@@ -929,6 +1069,16 @@ func TestMatches(t *testing.T) {
 	mrMain := &model.Workflow{On: model.Triggers{MergeRequest: &model.Trigger{BranchFilter: model.BranchFilter{Branches: []string{"main"}}}}}
 	pushAny := &model.Workflow{On: model.Triggers{Push: &model.Trigger{}}}
 	pushIgnoreMain := &model.Workflow{On: model.Triggers{Push: &model.Trigger{BranchFilter: model.BranchFilter{Ignore: []string{"main"}}}}}
+	pushTagsV := &model.Workflow{On: model.Triggers{Push: &model.Trigger{Tags: &model.TagFilter{Tags: []string{"v*"}}}}}
+	pushTagsIgnoreRC := &model.Workflow{On: model.Triggers{Push: &model.Trigger{Tags: &model.TagFilter{Ignore: []string{"*-rc*"}}}}}
+	pushMainAndTags := &model.Workflow{On: model.Triggers{Push: &model.Trigger{
+		BranchFilter: model.BranchFilter{Branches: []string{"main"}},
+		Tags:         &model.TagFilter{Tags: []string{"v*"}},
+	}}}
+
+	tagPush := func(tag string) model.Event {
+		return model.Event{Kind: model.EventPush, Tag: tag, Ref: "refs/tags/" + tag}
+	}
 
 	tests := []struct {
 		name string
@@ -945,6 +1095,24 @@ func TestMatches(t *testing.T) {
 		{"empty filter matches any branch", pushAny, model.Event{Kind: model.EventPush, Branch: "whatever"}, true},
 		{"push to non-ignored branch", pushIgnoreMain, model.Event{Kind: model.EventPush, Branch: "dev"}, true},
 		{"push to ignored branch", pushIgnoreMain, model.Event{Kind: model.EventPush, Branch: "main"}, false},
+
+		// Tag pushes are opt-in: this is the whole rule, and the reason it
+		// differs from GitHub Actions. A workflow that never mentions tags must
+		// not start running on them just because Janus learned to parse them.
+		{"tag push against a filterless on.push", pushAny, tagPush("v1.0.0"), false},
+		{"tag push against a branch allowlist", pushMain, tagPush("v1.0.0"), false},
+		{"tag push against a branch denylist", pushIgnoreMain, tagPush("v1.0.0"), false},
+		{"tag push matching the tag allowlist", pushTagsV, tagPush("v1.0.0"), true},
+		{"tag push missing the tag allowlist", pushTagsV, tagPush("nightly"), false},
+		{"tag push against the tag denylist", pushTagsIgnoreRC, tagPush("v1.0.0"), true},
+		{"tag push matching the tag denylist", pushTagsIgnoreRC, tagPush("v1.0.0-rc1"), false},
+		{"tag push when only MR declared", mrMain, tagPush("v1.0.0"), false},
+		// Declaring tags does not take a workflow off branches, and a branch
+		// push never consults the tag filter.
+		{"branch push on a tags-only workflow", pushTagsV, model.Event{Kind: model.EventPush, Branch: "dev"}, true},
+		{"branch push on a both-filters workflow", pushMainAndTags, model.Event{Kind: model.EventPush, Branch: "main"}, true},
+		{"other branch on a both-filters workflow", pushMainAndTags, model.Event{Kind: model.EventPush, Branch: "dev"}, false},
+		{"tag push on a both-filters workflow", pushMainAndTags, tagPush("v2.0.0"), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
