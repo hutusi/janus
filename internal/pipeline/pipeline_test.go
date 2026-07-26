@@ -386,46 +386,6 @@ jobs:
 			wantInErr: "`on.merge_request` cannot set both",
 		},
 		{
-			// `branches: []` reads as "no branches" but would match every
-			// branch — the mistake someone reaching for a tags-only trigger
-			// makes. Rejected like `tags: []` and `paths: []`.
-			name: "empty branches list on push",
-			src: `
-name: ci
-on: { push: { branches: [] } }
-jobs:
-  a:
-    steps:
-      - run: echo hi
-`,
-			wantInErr: "`branches` must list at least one branch",
-		},
-		{
-			name: "empty branches-ignore list on push",
-			src: `
-name: ci
-on: { push: { branches-ignore: [] } }
-jobs:
-  a:
-    steps:
-      - run: echo hi
-`,
-			wantInErr: "`branches-ignore` must list at least one branch",
-		},
-		{
-			name: "empty branches list on a job",
-			src: `
-name: ci
-on: { push: {} }
-jobs:
-  a:
-    branches: []
-    steps:
-      - run: echo hi
-`,
-			wantInErr: "`branches` must list at least one branch",
-		},
-		{
 			name: "tags and tags-ignore on push",
 			src: `
 name: ci
@@ -1072,6 +1032,51 @@ jobs:
 	}
 	if wf3.On.Push.Tags != nil {
 		t.Error("an absent tags key must leave the filter nil — that is the opt-in signal")
+	}
+}
+
+// `branches: []` stays legal, and gains a job: because the tag rule keys on the
+// branch keys being *absent*, an empty-but-present list is the only way to say
+// "every branch as well as these tags" — branch names are exact strings, so no
+// pattern spells "all". Rejecting it (as an earlier revision did) would leave
+// that combination inexpressible.
+func TestParseEmptyBranchesDeclaresAllBranches(t *testing.T) {
+	wf, err := Parse([]byte(`
+name: ci
+on:
+  push:
+    branches: []
+    tags: ["v*"]
+jobs:
+  a:
+    steps:
+      - run: echo hi
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// Present-but-empty, not absent: the distinction the tag rule reads.
+	if wf.On.Push.Branches == nil {
+		t.Error("`branches: []` must survive as a non-nil empty slice, not decay to absent")
+	}
+	if len(wf.On.Push.Branches) != 0 {
+		t.Errorf("branches = %v, want empty", wf.On.Push.Branches)
+	}
+	if wf.On.Push.Tags == nil {
+		t.Fatal("tags filter went missing")
+	}
+	// And an empty allowlist still allows everything.
+	if !wf.On.Push.Matches("anything") {
+		t.Error("`branches: []` must match every branch")
+	}
+
+	// The denylist spelling too.
+	wf2, err := Parse([]byte("name: ci\non: { push: { branches-ignore: [] } }\njobs:\n  a:\n    steps:\n      - run: echo hi\n"))
+	if err != nil {
+		t.Fatalf("parse branches-ignore: []: %v", err)
+	}
+	if wf2.On.Push.Ignore == nil || !wf2.On.Push.Matches("anything") {
+		t.Error("`branches-ignore: []` must parse and match every branch")
 	}
 }
 

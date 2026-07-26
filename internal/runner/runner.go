@@ -555,6 +555,17 @@ func validateEvent(ev model.Event) error {
 	if ev.SHA != "" && !workspace.ValidSHA(ev.SHA) {
 		return fmt.Errorf("sha is not a hex commit id (want 7-64 hex characters)")
 	}
+	// Branch and Tag get the same shape check the ref does. The checkout already
+	// validates Ref, but a caller can name a branch or a tag *without* one
+	// (`{"branch":"x","sha":"…"}`), and then nothing bounded the string before it
+	// reached ${{ branch }} / ${{ tag }} — which the engine interpolates into a
+	// step's `run` and hands to `sh -c`. Checked here so the guard holds for
+	// whatever combination of fields a caller supplies.
+	for _, f := range []struct{ name, value string }{{"branch", ev.Branch}, {"tag", ev.Tag}} {
+		if f.value != "" && !workspace.ValidRefName(f.value) {
+			return fmt.Errorf("%s %q is not a valid git ref name", f.name, f.value)
+		}
+	}
 	// ProjectID only ever becomes digits in a status-API URL path; an int64 is
 	// already bounded, so a negative is the only nonsensical value to reject.
 	if ev.ProjectID < 0 {

@@ -143,7 +143,20 @@ each matched by its own filter:
 | both | per the branch filter | per the tag filter |
 
 So the release example above runs on `v*` tags and on nothing else — a tags-only
-workflow is not also a branch workflow. To build on both, declare both.
+workflow is not also a branch workflow. To build on both, declare both; for
+**every** branch plus some tags, declare an empty branch list:
+
+```yaml
+on:
+  push:
+    branches: []        # every branch (declared, so branch pushes still match)
+    tags: ["v*"]
+```
+
+`branches: []` is allowed for exactly this reason — branch names are exact
+strings, so no pattern spells "all", and the table above keys on whether the
+branch keys are *present*. `tags: []` is a validation error instead, because
+`tags: ["**"]` already says "every tag".
 
 **Tag pushes are opt-in**, the one row that departs from GitHub Actions: a bare
 `on: push:` with no filters at all stays branches-only, where GHA would fire on
@@ -182,6 +195,15 @@ A tag push carries no branch: `${{ branch }}` and `JANUS_BRANCH` are **empty**,
 
 Tag **deletions** are ignored, like branch deletions. `on.merge_request` rejects
 `tags`/`tags-ignore` at validation: a merge request has no tag.
+
+**Tag and branch names are restricted** to letters, digits and `. _ / @ + - `,
+starting with a letter or digit. That is narrower than git, which also accepts
+`#`, `$`, backticks, `;` and Unicode: a run for such a ref is refused with a
+message naming the rule rather than checked out. The reason is that
+`${{ tag }}` and `${{ ref }}` are substituted into a step's `run` command, which
+is then executed by a shell — a tag named ``v1`id` `` is perfectly legal to git,
+and a release pipeline's `./publish.sh ${{ tag }}` would run it. `v1.2.3+build.7`
+and other SemVer build metadata work fine.
 
 ### Path filters
 
@@ -320,9 +342,9 @@ user can read remains reachable — see the security model in the README.
 These produce a clear validation error rather than running:
 
 - `branches` together with `branches-ignore` on the same trigger or job — pick
-  an allowlist or a denylist; an empty `branches: []` (it reads as "no branches"
-  but would match **every** branch — omit the key, or see the
-  [tag filter table](#tag-filters) for how to run on tags only).
+  an allowlist or a denylist. (An empty `branches: []` is **allowed** and means
+  every branch — see [tag filters](#tag-filters), where it is what pairs "every
+  branch" with a tag filter.)
 - `paths` together with `paths-ignore` on the same trigger or job (same rule);
   `paths` on `on.merge_request` (push-only — see
   [path filters](#path-filters)); an empty `paths: []` (it would match nothing

@@ -49,24 +49,21 @@ func validatePathFilter(where string, f *model.PathFilter) error {
 }
 
 // validateBranchFilter checks one `branches`/`branches-ignore` declaration
-// (trigger or job level). Branch names are exact strings rather than globs, so
-// there are no patterns to bound — but an empty list is rejected for the same
-// reason `tags: []` and `paths: []` are: `branches: []` reads as "no branches"
-// and means "every branch", which is precisely the mistake someone reaching for
-// a tags-only trigger would make.
+// (trigger or job level).
+//
+// An empty list is deliberately *allowed* here, unlike `tags: []` and
+// `paths: []`. `branches: []` declares the key while allowing every branch, and
+// since the tag rule keys on whether the branch keys are absent (see
+// runner.matches), that is the only way to say "every branch *and* these tags" —
+// branch names are exact strings, so no pattern spells "all". The other two
+// have no such gap: `tags: ["**"]` already means every tag, and an empty
+// `paths` would match nothing at all rather than everything.
 func validateBranchFilter(where string, f *model.BranchFilter) error {
 	if f == nil {
 		return nil
 	}
-	// Checked first so a declaration that is both empty and doubled still
-	// reports the more fundamental problem.
 	if f.Branches != nil && f.Ignore != nil {
 		return fmt.Errorf("%s cannot set both `branches` and `branches-ignore`", where)
-	}
-	for key, names := range map[string][]string{"branches": f.Branches, "branches-ignore": f.Ignore} {
-		if names != nil && len(names) == 0 {
-			return fmt.Errorf("%s `%s` must list at least one branch", where, key)
-		}
 	}
 	return nil
 }

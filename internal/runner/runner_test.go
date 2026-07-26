@@ -968,6 +968,42 @@ func TestValidateEventRejectsBranchWithTag(t *testing.T) {
 	}
 }
 
+// A branch or tag name reaches ${{ branch }} / ${{ tag }}, which the engine
+// interpolates into a step's `run` and hands to `sh -c`. The checkout validates
+// Ref, but a caller can name a branch or tag *without* a ref — so the shape
+// check has to live at ingestion too, or a crafted name would sail past it.
+func TestValidateEventBoundsBranchAndTagNames(t *testing.T) {
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	// All legal git ref names; all shell metacharacters.
+	for _, bad := range []string{"x$(id)", "v1;id", "v1&&id", "x|y", "-oops", "a b"} {
+		if err := validateEvent(model.Event{
+			Kind: model.EventManual, RepoURL: "/repo", SHA: sha, Branch: bad,
+		}); err == nil {
+			t.Errorf("validateEvent accepted branch %q, want an error", bad)
+		}
+		if err := validateEvent(model.Event{
+			Kind: model.EventPush, RepoURL: "/repo", SHA: sha, Tag: bad,
+		}); err == nil {
+			t.Errorf("validateEvent accepted tag %q, want an error", bad)
+		}
+	}
+	// Ordinary names keep working, SemVer build metadata included.
+	for _, ok := range []string{"main", "feature/x-y_z", "release@2026"} {
+		if err := validateEvent(model.Event{
+			Kind: model.EventManual, RepoURL: "/repo", SHA: sha, Branch: ok,
+		}); err != nil {
+			t.Errorf("validateEvent rejected branch %q: %v", ok, err)
+		}
+	}
+	for _, ok := range []string{"v1.0.0", "v1.2.3+build.7", "release/v1"} {
+		if err := validateEvent(model.Event{
+			Kind: model.EventPush, RepoURL: "/repo", SHA: sha, Tag: ok,
+		}); err != nil {
+			t.Errorf("validateEvent rejected tag %q: %v", ok, err)
+		}
+	}
+}
+
 func TestShutdownRejectsNewTriggers(t *testing.T) {
 	st := store.NewMemory()
 	allow, _ := allowlist.New([]string{"*"})
@@ -1138,6 +1174,13 @@ func TestMatches(t *testing.T) {
 		BranchFilter: model.BranchFilter{Branches: []string{"main"}},
 		Tags:         &model.TagFilter{Tags: []string{"v*"}},
 	}}}
+	// `branches: []` — declared but empty. The tag rule keys on the branch keys
+	// being absent, so this is how a pipeline says "every branch as well as
+	// these tags"; there is no other spelling, since branch names are exact.
+	pushAllBranchesAndTags := &model.Workflow{On: model.Triggers{Push: &model.Trigger{
+		BranchFilter: model.BranchFilter{Branches: []string{}},
+		Tags:         &model.TagFilter{Tags: []string{"v*"}},
+	}}}
 
 	tagPush := func(tag string) model.Event {
 		return model.Event{Kind: model.EventPush, Tag: tag, Ref: "refs/tags/" + tag}
@@ -1182,6 +1225,11 @@ func TestMatches(t *testing.T) {
 		{"branch push on a both-filters workflow", pushMainAndTags, model.Event{Kind: model.EventPush, Branch: "main"}, true},
 		{"other branch on a both-filters workflow", pushMainAndTags, model.Event{Kind: model.EventPush, Branch: "dev"}, false},
 		{"tag push on a both-filters workflow", pushMainAndTags, tagPush("v2.0.0"), true},
+		// The "all branches + these tags" combination, which is only
+		// expressible because `branches: []` is legal.
+		{"any branch on an empty-branches + tags workflow", pushAllBranchesAndTags, model.Event{Kind: model.EventPush, Branch: "anything"}, true},
+		{"matching tag on an empty-branches + tags workflow", pushAllBranchesAndTags, tagPush("v1.0.0"), true},
+		{"other tag on an empty-branches + tags workflow", pushAllBranchesAndTags, tagPush("nightly"), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

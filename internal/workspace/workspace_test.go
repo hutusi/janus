@@ -444,6 +444,36 @@ func TestValidateTarget(t *testing.T) {
 	}
 }
 
+// ValidRefName is the exported half of validateTarget's ref rule, used by the
+// runner to bound a branch or tag supplied without a ref. The rejections below
+// are all names `git check-ref-format` accepts — they are refused because
+// ${{ ref }} / ${{ tag }} are interpolated into a step's shell command, not
+// because git would object.
+func TestValidRefName(t *testing.T) {
+	valid := []string{
+		"main", "feature/x-y_z", "v1.0.0", "release@2026",
+		"v1.2.3+build.7", // SemVer build metadata
+		"refs/tags/v1.0.0", "refs/heads/main",
+	}
+	for _, s := range valid {
+		if !ValidRefName(s) {
+			t.Errorf("ValidRefName(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{
+		"", // no name at all
+		// Legal in git, shell metacharacters — the reason this is narrow.
+		"v1$(id)", "v1`id`", "v1;id", "v1&&id", "x|y", "a>b", "release#1", "版本-1",
+		// Rejected by git too.
+		"-oops", "a b", "a~1", "a^1", "a:b", "a?b", "a*b", "a..b", "a@{0}", "a/", "a.lock",
+	}
+	for _, s := range invalid {
+		if ValidRefName(s) {
+			t.Errorf("ValidRefName(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestGitEnv(t *testing.T) {
 	// last returns the final entry for key; exec.Cmd uses the last duplicate.
 	last := func(env []string, key string) (string, bool) {

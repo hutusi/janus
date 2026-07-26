@@ -189,7 +189,7 @@ jobs:
 ```
 
 Variables are limited to `${{ env.VAR }}` plus `ref` / `sha` / `short_sha` /
-`branch` / `event`. See [docs/pipeline-reference.md](docs/pipeline-reference.md)
+`branch` / `tag` / `event`. See [docs/pipeline-reference.md](docs/pipeline-reference.md)
 for the full grammar and the list of rejected constructs.
 
 ## Design
