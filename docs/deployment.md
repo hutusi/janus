@@ -84,7 +84,7 @@ details):
 curl -fsSL -o /tmp/janus \
   https://github.com/hutusi/janus/releases/latest/download/janus-linux-amd64
 sudo install -m755 /tmp/janus /usr/local/bin/janus
-janus version   # janus v0.2.0 (f97e513)
+janus version   # janus v0.4.0 (0210cb6)
 ```
 
 ## 2. Create the service user
@@ -155,7 +155,7 @@ sudo systemctl enable --now janus
 ```sh
 systemctl status janus
 journalctl -u janus -f          # follow logs
-curl -s localhost:8080/healthz  # {"status":"ok","version":"v0.2.0 (f97e513)"}
+curl -s localhost:8080/healthz  # {"status":"ok","version":"v0.4.0 (0210cb6)"}
 ```
 
 `/healthz` returns `200 {"status":"ok"}` normally. It returns
