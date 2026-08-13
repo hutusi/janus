@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI supply-chain hardening** — every GitHub Action in `ci.yml` is now pinned by commit SHA (with the version in a trailing comment), as `release.yml` already was: a tag like `@v8` is mutable, so a compromised action repo could re-point it at malicious code with `contents: read` access to this one. A new `dependabot.yml` (weekly, `github-actions` + `gomod`) is what moves those pins forward, so pinning doesn't mean rotting. A new `govulncheck` workflow scans the module against the Go vulnerability database on pushes, PRs, **and a weekly schedule** — the schedule is the point: a vulnerability disclosed while the repo is quiet should surface without waiting for the next push. Every job now carries `timeout-minutes: 15` (runs take ~2), so a hung runner is reclaimed instead of billing six hours, and `ci.yml` gains a coverage gate that fails below 83% of statements (measured total at introduction: 85.5%) — ordinary churn passes, a swath of untested code does not.
+
 ### Fixed
 
 - **A notification arriving during shutdown is dropped instead of risking a crash** — `Notifier.Notify` registered each delivery on the shutdown-drain `sync.WaitGroup` without checking whether `Close` had already begun waiting on it, and an `Add` concurrent with `Wait` is a WaitGroup misuse panic. The runner's shutdown ordering (runs settle, *then* the notifier closes) kept the window shut in practice — which is also why bounding that wait was unsafe — but the notifier itself now enforces it, the way the commit-status reporter always has: `Close` marks the notifier closed under a mutex before draining, and a `Notify` after that point logs a drop and delivers nothing.

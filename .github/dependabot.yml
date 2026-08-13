@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Actions are pinned by commit SHA (with a version comment); dependabot is
+  # what moves those pins, so a stale SHA doesn't quietly rot forever.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # One direct dependency (gopkg.in/yaml.v3) by design — this exists so its
+  # security releases surface without anyone watching for them.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly

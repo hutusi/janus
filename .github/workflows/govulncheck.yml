@@ -1,0 +1,28 @@
+name: govulncheck
+
+# The schedule is the point: a vulnerability disclosed while the repo is quiet
+# should surface without waiting for the next push. Push/PR runs are the cheap
+# extra — they catch a dependency change that introduces a known-vulnerable
+# version at review time.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '17 6 * * 1' # weekly, Monday 06:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        with:
+          # go-version-input defaults to "stable", and setup-go prefers a
+          # version over a version file — blank it so go.mod decides.
+          go-version-input: ''
+          go-version-file: go.mod
