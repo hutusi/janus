@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A notification arriving during shutdown is dropped instead of risking a crash** — `Notifier.Notify` registered each delivery on the shutdown-drain `sync.WaitGroup` without checking whether `Close` had already begun waiting on it, and an `Add` concurrent with `Wait` is a WaitGroup misuse panic. The runner's shutdown ordering (runs settle, *then* the notifier closes) kept the window shut in practice — which is also why bounding that wait was unsafe — but the notifier itself now enforces it, the way the commit-status reporter always has: `Close` marks the notifier closed under a mutex before draining, and a `Notify` after that point logs a drop and delivers nothing.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added
@@ -155,7 +161,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The example config now defaults `data_dir`/`workspace_root` to a cwd-relative `./janus-data` (created on demand, no sudo) instead of `/var/lib/janus`.
 
-[unreleased]: https://github.com/hutusi/janus/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hutusi/janus/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/hutusi/janus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hutusi/janus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hutusi/janus/compare/v0.1.0...v0.2.0

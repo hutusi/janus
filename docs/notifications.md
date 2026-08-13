@@ -115,7 +115,8 @@ Notes:
   per-target, so a slow endpoint never blocks or starves the others.
 - **Drained on shutdown.** On `SIGINT`/`SIGTERM`, after in-flight runs settle,
   Janus waits briefly for pending deliveries to flush before exiting, so a run
-  that finishes just before shutdown still gets to notify.
+  that finishes just before shutdown still gets to notify. Once that drain has
+  begun, a late notification is dropped and logged rather than delivered.
 - **Daemon-only.** Local `janus run` executes directly and does **not** notify.
   Crash-recovery bookkeeping (runs marked `cancelled` at startup after a hard
   kill) does not notify either — only live completions do.

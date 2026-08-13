@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -306,6 +307,47 @@ func TestCloseDrainsInFlightDelivery(t *testing.T) {
 	default:
 		t.Error("delivery never reached the server")
 	}
+}
+
+func TestNotifyAfterCloseDeliversNothing(t *testing.T) {
+	reqs := make(chan captured, 1)
+	ts := recordingServer(t, reqs)
+	n := newNotifier(t, []Target{{URL: ts.URL, On: []string{"failed"}}})
+
+	n.Close(time.Second)
+	n.Notify(failedRun()) // must be dropped, not handed to a drained WaitGroup
+
+	select {
+	case <-reqs:
+		t.Error("a delivery landed after Close")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A Notify racing Close must be delivered or dropped — never a WaitGroup
+// misuse panic (wg.Add concurrent with Close's wg.Wait). The runner shuts down
+// before the notifier precisely to avoid this window, but the notifier must
+// not turn an ordering slip elsewhere into a crash.
+func TestNotifyRacingCloseNeverPanics(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(ts.Close)
+	n := newNotifier(t, []Target{{URL: ts.URL, On: []string{"failed"}}})
+
+	var callers sync.WaitGroup
+	start := make(chan struct{})
+	for range 8 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			<-start
+			for range 25 {
+				n.Notify(failedRun())
+			}
+		}()
+	}
+	close(start)
+	n.Close(2 * time.Second)
+	callers.Wait()
 }
 
 func TestCloseTimeoutCancelsHungDelivery(t *testing.T) {
