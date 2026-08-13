@@ -202,6 +202,14 @@ func TestBuildServeWarnings(t *testing.T) {
 		{"empty allowlist", nil, "no repos allowed"},
 		{"wildcard allowlist", []string{"--allow-repos", "*"}, "allowing ALL repositories"},
 		{"no provider secret", []string{"--allow-repos", "*"}, "no webhook provider secret set"},
+		// A '*' allowlist plus a derived API base means the commit-status token
+		// follows whatever host a webhook's clone URL names.
+		{"wildcard steers gitlab status token",
+			[]string{"--allow-repos", "*", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
+			"scope allow_repos or set gitlab_url"},
+		{"wildcard steers github status token",
+			[]string{"--allow-repos", "*", "--github-secret", "s", "--github-api-token", "tok"},
+			"scope allow_repos or set github_url"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
