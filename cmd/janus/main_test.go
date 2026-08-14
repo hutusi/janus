@@ -195,21 +195,33 @@ func TestBuildServeStoreSelection(t *testing.T) {
 // 403 on every trigger — that has to be said out loud at startup.
 func TestBuildServeWarnings(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want string
+		name       string
+		args       []string
+		want       string
+		wantAbsent string
 	}{
-		{"empty allowlist", nil, "no repos allowed"},
-		{"wildcard allowlist", []string{"--allow-repos", "*"}, "allowing ALL repositories"},
-		{"no provider secret", []string{"--allow-repos", "*"}, "no webhook provider secret set"},
+		{name: "empty allowlist", want: "no repos allowed"},
+		{name: "wildcard allowlist", args: []string{"--allow-repos", "*"}, want: "allowing ALL repositories"},
+		{name: "no provider secret", args: []string{"--allow-repos", "*"}, want: "no webhook provider secret set"},
 		// A '*' allowlist plus a derived API base means the commit-status token
 		// follows whatever host a webhook's clone URL names.
-		{"wildcard steers gitlab status token",
-			[]string{"--allow-repos", "*", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
-			"scope allow_repos or set gitlab_url"},
-		{"wildcard steers github status token",
-			[]string{"--allow-repos", "*", "--github-secret", "s", "--github-api-token", "tok"},
-			"scope allow_repos or set github_url"},
+		{name: "wildcard steers gitlab status token",
+			args: []string{"--allow-repos", "*", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
+			want: "scope allow_repos or set gitlab_url"},
+		{name: "wildcard steers github status token",
+			args: []string{"--allow-repos", "*", "--github-secret", "s", "--github-api-token", "tok"},
+			want: "scope allow_repos or set github_url"},
+		// Without the inbound secret the provider accepts no webhooks, so no
+		// status can be posted and there is nothing to steer — the steering
+		// warning would only contradict the "no statuses" one.
+		{name: "no gitlab webhooks means no steering warning",
+			args:       []string{"--allow-repos", "*", "--gitlab-api-token", "tok"},
+			want:       "no statuses will be reported",
+			wantAbsent: "scope allow_repos or set gitlab_url"},
+		{name: "no github webhooks means no steering warning",
+			args:       []string{"--allow-repos", "*", "--github-api-token", "tok"},
+			want:       "no statuses will be reported",
+			wantAbsent: "scope allow_repos or set github_url"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,6 +231,9 @@ func TestBuildServeWarnings(t *testing.T) {
 			}
 			if !strings.Contains(logs.String(), tc.want) {
 				t.Errorf("logs = %q, want them to mention %q", logs.String(), tc.want)
+			}
+			if tc.wantAbsent != "" && strings.Contains(logs.String(), tc.wantAbsent) {
+				t.Errorf("logs = %q, want no mention of %q", logs.String(), tc.wantAbsent)
 			}
 		})
 	}
