@@ -78,10 +78,14 @@ type Notifier struct {
 	// cancelled only by Close — never tied to a run or the runner, so a
 	// shutdown/cancel of the run being reported can never abort its own
 	// completion notification. wg tracks every in-flight delivery (across all
-	// targets) so Close can drain them.
+	// targets) so Close can drain them; closed (under mu) stops Notify adding to
+	// it once Close has begun waiting — wg.Add concurrent with wg.Wait is a
+	// WaitGroup misuse panic.
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	mu     sync.Mutex // guards closed and the wg.Add in acquire
+	closed bool
 }
 
 // Option configures a Notifier.
@@ -286,7 +290,11 @@ func (n *Notifier) Notify(run *model.Run) {
 		// on to drain.
 		select {
 		case t.sem <- struct{}{}:
-			n.wg.Add(1)
+			if !n.acquire() {
+				<-t.sem
+				n.logger.Warn("notification dropped: notifier already closed", "run_id", runID, "target", t.label)
+				return
+			}
 			go func(t target) {
 				defer func() { <-t.sem; n.wg.Done() }()
 				n.deliver(t, runID, body)
@@ -295,6 +303,20 @@ func (n *Notifier) Notify(run *model.Run) {
 			n.logger.Warn("notification dropped: too many deliveries in flight for this target", "run_id", runID, "target", t.label)
 		}
 	}
+}
+
+// acquire registers one delivery on the drain WaitGroup, refusing once Close
+// has run. The mutex is what makes the refusal sound: Close marks closed under
+// it before waiting, so an Add can only happen strictly before the Wait — never
+// concurrently with it, which the WaitGroup forbids.
+func (n *Notifier) acquire() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return false
+	}
+	n.wg.Add(1)
+	return true
 }
 
 func (n *Notifier) deliver(t target, runID string, body []byte) {
@@ -345,10 +367,15 @@ func safeError(err error) string {
 	return err.Error()
 }
 
-// Close drains in-flight deliveries, waiting up to timeout, then cancels any
-// that remain (aborting their POSTs). Call it after the runner has shut down, so
-// every terminal run has already handed its notification off.
+// Close stops accepting deliveries, drains those in flight up to timeout, then
+// cancels any that remain (aborting their POSTs). Call it after the runner has
+// shut down, so every terminal run has already handed its notification off; a
+// Notify that races Close anyway is dropped, not a WaitGroup panic.
 func (n *Notifier) Close(timeout time.Duration) {
+	n.mu.Lock()
+	n.closed = true
+	n.mu.Unlock()
+
 	done := make(chan struct{})
 	go func() { n.wg.Wait(); close(done) }()
 	select {

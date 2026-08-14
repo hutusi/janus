@@ -143,3 +143,10 @@ and Janus posts to `…/api/v3`. With `clone_url: "ssh"` an scp-style URL has no
 derivable API base, so `github_url` is required (set it to `https://github.com`
 for github.com over SSH). Reporting is best-effort — a slow or failing GitHub
 never fails or blocks a run.
+
+A derived base means the *webhook payload* names the host the token-bearing
+request goes to, and `allow_repos` is the gate that keeps that host one you
+chose. With a wildcard (`"*"`) entry and no `github_url`, any host that can
+deliver an accepted webhook can receive the token — Janus warns about this
+combination at startup. Scope `allow_repos`, or pin the instance with
+`github_url`.

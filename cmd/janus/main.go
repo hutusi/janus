@@ -290,6 +290,14 @@ func buildServe(args []string, logw io.Writer) (*serveComponents, error) {
 			if cfg.CloneURL == "ssh" && cfg.GitLabURL == "" {
 				logger.Warn("gitlab commit status with clone_url \"ssh\" needs gitlab_url set (an ssh clone URL has no derivable API base); statuses will be skipped")
 			}
+			// Without an explicit instance URL the API base is derived from each
+			// webhook's clone URL, and a '*' allowlist accepts any host — so any
+			// host that can deliver an accepted webhook can receive the token.
+			// Statuses only originate from this provider's webhook runs, so with
+			// no inbound secret the endpoint is disabled and nothing can steer.
+			if cfg.GitLabSecret != "" && cfg.GitLabURL == "" && cfg.CloneURL != "ssh" && containsWildcard(allow) {
+				logger.Warn("gitlab commit status with allow_repos '*' and no gitlab_url posts the API token to whichever host a webhook's clone URL names — scope allow_repos or set gitlab_url")
+			}
 		}
 		if cfg.GitHubAPIToken != "" {
 			logger.Info("github commit-status reporting enabled")
@@ -298,6 +306,11 @@ func buildServe(args []string, logw io.Writer) (*serveComponents, error) {
 			}
 			if cfg.CloneURL == "ssh" && cfg.GitHubURL == "" {
 				logger.Warn("github commit status with clone_url \"ssh\" needs github_url set (an ssh clone URL has no derivable API base); statuses will be skipped")
+			}
+			// Same exposure as GitLab's: a derived API base plus an allow-all
+			// allowlist lets any webhook-reachable host receive the token.
+			if cfg.GitHubSecret != "" && cfg.GitHubURL == "" && cfg.CloneURL != "ssh" && containsWildcard(allow) {
+				logger.Warn("github commit status with allow_repos '*' and no github_url posts the API token to whichever host a webhook's clone URL names — scope allow_repos or set github_url")
 			}
 		}
 	}

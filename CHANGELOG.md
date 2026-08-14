@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Builds are pinned to a patched Go toolchain** — the 2026-08-13 Go security release fixes six standard-library vulnerabilities that govulncheck reports as reachable from Janus code (GO-2026-5026, GO-2026-5972, GO-2026-6089, GO-2026-6090, GO-2026-6091, GO-2026-6218 — `net/http`, `crypto/tls`, `html/template`, `encoding/asn1` among them), affecting every release line: fixed in go1.25.13 and go1.26.6. This was the new govulncheck workflow's first catch, on its first pull request. `go.mod` now carries the pair `go 1.25.13` + `toolchain go1.26.6`: the `go` directive alone is only a *floor*, so a newer-but-vulnerable installed toolchain (go1.26.5, say) satisfies it and is silently selected under `GOTOOLCHAIN=auto` — the `toolchain` directive is what forces every build (CI, the release workflow, local) onto go1.26.6 or newer, downloading it when the local install is older. Only an explicit `GOTOOLCHAIN=local` opts out. ⚠️ The published **v0.4.0 binaries were built with go1.25.12** and carry the affected stdlib; upgrade to the next release once it is cut.
+
+### Changed
+
+- **CI supply-chain hardening** — every GitHub Action in `ci.yml` is now pinned by commit SHA (with the version in a trailing comment), as `release.yml` already was: a tag like `@v8` is mutable, so a compromised action repo could re-point it at malicious code with `contents: read` access to this one. A new `dependabot.yml` (weekly, `github-actions` + `gomod`) is what moves those pins forward, so pinning doesn't mean rotting. A new `govulncheck` workflow scans the module against the Go vulnerability database on pushes, PRs, **and a weekly schedule** — the schedule is the point: a vulnerability disclosed while the repo is quiet should surface without waiting for the next push. Every job now carries `timeout-minutes: 15` (runs take ~2), so a hung runner is reclaimed instead of billing six hours, and `ci.yml` gains a coverage gate that fails below 83% of statements (measured total at introduction: 85.5%) — ordinary churn passes, a swath of untested code does not.
+
+### Fixed
+
+- **Startup warns when a wildcard allowlist can steer a commit-status token** — with `gitlab_api_token`/`github_api_token` set alongside that provider's webhook secret, no explicit `gitlab_url`/`github_url`, and `allow_repos: ["*"]`, the host the token-bearing status POST goes to is derived from each webhook's clone URL — so any host that can deliver an accepted webhook can receive the token. That combination now gets a startup warning naming the fix (scope `allow_repos`, or pin the instance URL); the docs for both providers carry the same caveat. Without the inbound secret the provider accepts no webhooks — statuses only originate from a provider's webhook runs, so there is nothing to steer and only the existing "no statuses will be reported" warning fires.
+
+- **A notification arriving during shutdown is dropped instead of risking a crash** — `Notifier.Notify` registered each delivery on the shutdown-drain `sync.WaitGroup` without checking whether `Close` had already begun waiting on it, and an `Add` concurrent with `Wait` is a WaitGroup misuse panic. The runner's shutdown ordering (runs settle, *then* the notifier closes) kept the window shut in practice — which is also why bounding that wait was unsafe — but the notifier itself now enforces it, the way the commit-status reporter always has: `Close` marks the notifier closed under a mutex before draining, and a `Notify` after that point logs a drop and delivers nothing.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added
@@ -155,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The example config now defaults `data_dir`/`workspace_root` to a cwd-relative `./janus-data` (created on demand, no sudo) instead of `/var/lib/janus`.
 
-[unreleased]: https://github.com/hutusi/janus/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hutusi/janus/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/hutusi/janus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hutusi/janus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hutusi/janus/compare/v0.1.0...v0.2.0

@@ -54,6 +54,13 @@ The API base (`<base>/api/v4/…`) is resolved as:
   authority, so `gitlab_url` is **required** in ssh mode — without it, statuses
   are skipped (with a startup warning).
 
+A derived base means the *webhook payload* names the host the token-bearing
+request goes to, and `allow_repos` is the gate that keeps that host one you
+chose. With a wildcard (`"*"`) entry and no `gitlab_url`, any host that can
+deliver an accepted webhook can receive the token — Janus warns about this
+combination at startup. Scope `allow_repos`, or pin the instance with
+`gitlab_url`.
+
 ## What is reported
 
 One status row per commit (context **`janus`**), updated across the run:

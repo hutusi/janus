@@ -195,22 +195,68 @@ func TestBuildServeStoreSelection(t *testing.T) {
 // 403 on every trigger — that has to be said out loud at startup.
 func TestBuildServeWarnings(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want string
+		name       string
+		args       []string
+		cfg        string // extra config-file YAML appended to the base
+		want       string
+		wantAbsent string
 	}{
-		{"empty allowlist", nil, "no repos allowed"},
-		{"wildcard allowlist", []string{"--allow-repos", "*"}, "allowing ALL repositories"},
-		{"no provider secret", []string{"--allow-repos", "*"}, "no webhook provider secret set"},
+		{name: "empty allowlist", want: "no repos allowed"},
+		{name: "wildcard allowlist", args: []string{"--allow-repos", "*"}, want: "allowing ALL repositories"},
+		{name: "no provider secret", args: []string{"--allow-repos", "*"}, want: "no webhook provider secret set"},
+		// A '*' allowlist plus a derived API base means the commit-status token
+		// follows whatever host a webhook's clone URL names.
+		{name: "wildcard steers gitlab status token",
+			args: []string{"--allow-repos", "*", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
+			want: "scope allow_repos or set gitlab_url"},
+		{name: "wildcard steers github status token",
+			args: []string{"--allow-repos", "*", "--github-secret", "s", "--github-api-token", "tok"},
+			want: "scope allow_repos or set github_url"},
+		// Without the inbound secret the provider accepts no webhooks, so no
+		// status can be posted and there is nothing to steer — the steering
+		// warning would only contradict the "no statuses" one.
+		{name: "no gitlab webhooks means no steering warning",
+			args:       []string{"--allow-repos", "*", "--gitlab-api-token", "tok"},
+			want:       "no statuses will be reported",
+			wantAbsent: "scope allow_repos or set gitlab_url"},
+		{name: "no github webhooks means no steering warning",
+			args:       []string{"--allow-repos", "*", "--github-api-token", "tok"},
+			want:       "no statuses will be reported",
+			wantAbsent: "scope allow_repos or set github_url"},
+		// The three safe legs of the steering condition, each of which must
+		// keep the warning silent: a scoped allowlist (the derived host is one
+		// the operator chose), an explicit instance URL (nothing is derived),
+		// and ssh mode (statuses are already skipped, with their own warning).
+		{name: "scoped allowlist means no steering warning",
+			args:       []string{"--allow-repos", "git@gitlab.example.com:acme", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
+			want:       "gitlab commit-status reporting enabled",
+			wantAbsent: "scope allow_repos or set gitlab_url"},
+		{name: "explicit gitlab_url means no steering warning",
+			args:       []string{"--allow-repos", "*", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
+			cfg:        "gitlab_url: \"https://gitlab.example.com\"\n",
+			want:       "gitlab commit-status reporting enabled",
+			wantAbsent: "scope allow_repos or set gitlab_url"},
+		{name: "explicit github_url means no steering warning",
+			args:       []string{"--allow-repos", "*", "--github-secret", "s", "--github-api-token", "tok"},
+			cfg:        "github_url: \"https://github.example.com\"\n",
+			want:       "github commit-status reporting enabled",
+			wantAbsent: "scope allow_repos or set github_url"},
+		{name: "ssh clone mode means no steering warning",
+			args:       []string{"--allow-repos", "*", "--clone-url", "ssh", "--github-secret", "s", "--github-api-token", "tok"},
+			want:       "needs github_url set",
+			wantAbsent: "scope allow_repos or set github_url"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			if _, err := buildServe(buildServeArgs(t, writeConfig(t, "addr: \":0\"\n"), tc.args...), &logs); err != nil {
+			if _, err := buildServe(buildServeArgs(t, writeConfig(t, "addr: \":0\"\n"+tc.cfg), tc.args...), &logs); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(logs.String(), tc.want) {
 				t.Errorf("logs = %q, want them to mention %q", logs.String(), tc.want)
+			}
+			if tc.wantAbsent != "" && strings.Contains(logs.String(), tc.wantAbsent) {
+				t.Errorf("logs = %q, want no mention of %q", logs.String(), tc.wantAbsent)
 			}
 		})
 	}

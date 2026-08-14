@@ -12,12 +12,13 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -33,12 +34,21 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
 
       - name: test (race + coverage)
         run: go test -race -coverprofile=coverage.out ./...
+
+      # Floor set a couple of points under the measured total (85.5% at the
+      # time), so ordinary churn passes but a change that lands a swath of
+      # untested code does not. Raise it as the total grows.
+      - name: coverage gate
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{sub(/%/, "", $NF); print $NF}')
+          echo "total coverage: ${total}% (floor: 83.0%)"
+          awk -v t="$total" 'BEGIN { if (t < 83.0) { print "coverage is below the floor"; exit 1 } }'
 
       - name: build
         run: CGO_ENABLED=0 go build ./cmd/janus
@@ -74,12 +84,13 @@ jobs:
   # the ubuntu job for now (broadening them to Windows is a follow-up).
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
