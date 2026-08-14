@@ -197,6 +197,7 @@ func TestBuildServeWarnings(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       []string
+		cfg        string // extra config-file YAML appended to the base
 		want       string
 		wantAbsent string
 	}{
@@ -222,11 +223,33 @@ func TestBuildServeWarnings(t *testing.T) {
 			args:       []string{"--allow-repos", "*", "--github-api-token", "tok"},
 			want:       "no statuses will be reported",
 			wantAbsent: "scope allow_repos or set github_url"},
+		// The three safe legs of the steering condition, each of which must
+		// keep the warning silent: a scoped allowlist (the derived host is one
+		// the operator chose), an explicit instance URL (nothing is derived),
+		// and ssh mode (statuses are already skipped, with their own warning).
+		{name: "scoped allowlist means no steering warning",
+			args:       []string{"--allow-repos", "git@gitlab.example.com:acme", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
+			want:       "gitlab commit-status reporting enabled",
+			wantAbsent: "scope allow_repos or set gitlab_url"},
+		{name: "explicit gitlab_url means no steering warning",
+			args:       []string{"--allow-repos", "*", "--gitlab-secret", "s", "--gitlab-api-token", "tok"},
+			cfg:        "gitlab_url: \"https://gitlab.example.com\"\n",
+			want:       "gitlab commit-status reporting enabled",
+			wantAbsent: "scope allow_repos or set gitlab_url"},
+		{name: "explicit github_url means no steering warning",
+			args:       []string{"--allow-repos", "*", "--github-secret", "s", "--github-api-token", "tok"},
+			cfg:        "github_url: \"https://github.example.com\"\n",
+			want:       "github commit-status reporting enabled",
+			wantAbsent: "scope allow_repos or set github_url"},
+		{name: "ssh clone mode means no steering warning",
+			args:       []string{"--allow-repos", "*", "--clone-url", "ssh", "--github-secret", "s", "--github-api-token", "tok"},
+			want:       "needs github_url set",
+			wantAbsent: "scope allow_repos or set github_url"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			if _, err := buildServe(buildServeArgs(t, writeConfig(t, "addr: \":0\"\n"), tc.args...), &logs); err != nil {
+			if _, err := buildServe(buildServeArgs(t, writeConfig(t, "addr: \":0\"\n"+tc.cfg), tc.args...), &logs); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(logs.String(), tc.want) {
