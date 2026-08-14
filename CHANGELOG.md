@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Builds require Go 1.25.13** — the 2026-08-13 Go security release fixes six standard-library vulnerabilities that govulncheck reports as reachable from Janus code (GO-2026-5026, GO-2026-5972, GO-2026-6089, GO-2026-6090, GO-2026-6091, GO-2026-6218 — `net/http`, `crypto/tls`, `html/template`, `encoding/asn1` among them). The `go` directive now names the patched toolchain, so CI, the release workflow, and local builds (via `GOTOOLCHAIN=auto`) all pick it up rather than whatever older patch a version manifest still serves — this was the new govulncheck workflow's first catch, on its first pull request. ⚠️ The published **v0.4.0 binaries were built with go1.25.12** and carry the affected stdlib; upgrade to the next release once it is cut.
+
 ### Changed
 
 - **CI supply-chain hardening** — every GitHub Action in `ci.yml` is now pinned by commit SHA (with the version in a trailing comment), as `release.yml` already was: a tag like `@v8` is mutable, so a compromised action repo could re-point it at malicious code with `contents: read` access to this one. A new `dependabot.yml` (weekly, `github-actions` + `gomod`) is what moves those pins forward, so pinning doesn't mean rotting. A new `govulncheck` workflow scans the module against the Go vulnerability database on pushes, PRs, **and a weekly schedule** — the schedule is the point: a vulnerability disclosed while the repo is quiet should surface without waiting for the next push. Every job now carries `timeout-minutes: 15` (runs take ~2), so a hung runner is reclaimed instead of billing six hours, and `ci.yml` gains a coverage gate that fails below 83% of statements (measured total at introduction: 85.5%) — ordinary churn passes, a swath of untested code does not.
