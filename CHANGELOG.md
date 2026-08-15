@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The CI coverage floor rises from 83% to 86%** — closing `cmd/janus`'s gap (69% → 93.5%) lifted the measured total from 85.8% to 88.2%, and the gate's own rule is to sit a couple of points under the total. The untested surface was the CLI itself: the command dispatch (`main` is now `os.Exit(dispatch(…))`, splitting the usage/exit-code/stream contract out where tests can reach it — behavior unchanged), the serve lifecycle (a taken address surfaces the bind error; a real SIGTERM drives the graceful path to the exit 0 that `systemctl stop` trusts), and `janus validate`, which had no tests at all.
+
 - **CI supply-chain hardening** — every GitHub Action in `ci.yml` is now pinned by commit SHA (with the version in a trailing comment), as `release.yml` already was: a tag like `@v8` is mutable, so a compromised action repo could re-point it at malicious code with `contents: read` access to this one. A new `dependabot.yml` (weekly, `github-actions` + `gomod`) is what moves those pins forward, so pinning doesn't mean rotting. A new `govulncheck` workflow scans the module against the Go vulnerability database on pushes, PRs, **and a weekly schedule** — the schedule is the point: a vulnerability disclosed while the repo is quiet should surface without waiting for the next push. Every job now carries `timeout-minutes: 15` (runs take ~2), so a hung runner is reclaimed instead of billing six hours, and `ci.yml` gains a coverage gate that fails below 83% of statements (measured total at introduction: 85.5%) — ordinary churn passes, a swath of untested code does not.
 
 ### Fixed
