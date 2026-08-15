@@ -487,6 +487,15 @@ func TestVersionString(t *testing.T) {
 	if got := versionString(); got != "dev (f97e513-dirty)" {
 		t.Errorf("versionString tagless = %q, want dev (f97e513-dirty)", got)
 	}
+
+	// A plain build with no ldflags falls back to the toolchain's embedded
+	// build info. What that holds depends on how the test binary was built
+	// (a `go test` binary usually has no VCS stamp), so only the shape is
+	// asserted: never empty, never a panic.
+	version, commit = "dev", ""
+	if got := versionString(); got == "" {
+		t.Error(`versionString fell back to ""`)
+	}
 }
 
 func TestFromBuildInfo(t *testing.T) {
@@ -517,5 +526,297 @@ func TestFromBuildInfo(t *testing.T) {
 		if v != c.wantV || rev != c.wantC {
 			t.Errorf("%s: fromBuildInfo = (%q, %q), want (%q, %q)", c.name, v, rev, c.wantV, c.wantC)
 		}
+	}
+}
+
+// runValidate is the round-trip a pipeline author lives in: a valid file says
+// ok, a rejected one names the file, and the argument shape is enforced.
+func TestRunValidate(t *testing.T) {
+	valid := "name: ci\non: { push: { tags: [\"v*\"] } }\njobs:\n  build:\n    steps:\n      - run: echo ok\n"
+	// `if:` is deliberately not a feature; validation must refuse it.
+	rejected := "name: ci\non: { push: { tags: [\"v*\"] } }\njobs:\n  build:\n    steps:\n      - run: echo ok\n        if: always()\n"
+
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "ci.yml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("valid file", func(t *testing.T) {
+		if err := runValidate([]string{write(t, valid)}); err != nil {
+			t.Errorf("runValidate = %v, want nil", err)
+		}
+	})
+	t.Run("rejected pipeline names the file", func(t *testing.T) {
+		path := write(t, rejected)
+		err := runValidate([]string{path})
+		if err == nil || !strings.Contains(err.Error(), path) {
+			t.Errorf("err = %v, want it to name %s", err, path)
+		}
+	})
+	t.Run("missing file", func(t *testing.T) {
+		if err := runValidate([]string{filepath.Join(t.TempDir(), "absent.yml")}); err == nil {
+			t.Error("a missing file validated, want an error")
+		}
+	})
+	t.Run("no argument is a usage error", func(t *testing.T) {
+		err := runValidate(nil)
+		if err == nil || !strings.Contains(err.Error(), "usage:") {
+			t.Errorf("err = %v, want a usage error", err)
+		}
+	})
+	t.Run("two arguments is a usage error", func(t *testing.T) {
+		if err := runValidate([]string{"a.yml", "b.yml"}); err == nil {
+			t.Error("two files validated, want a usage error")
+		}
+	})
+	t.Run("unknown flag", func(t *testing.T) {
+		if err := runValidate([]string{"--no-such-flag"}); err == nil {
+			t.Error("an unknown flag was accepted, want an error")
+		}
+	})
+}
+
+// serve's listener-error leg, driven through runServe: when the address is
+// already taken, ListenAndServe fails and the error propagates out (after the
+// deferred drain) instead of hanging the process.
+func TestRunServeReturnsListenError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	err = runServe(buildServeArgs(t, writeConfig(t, ""), "--addr", ln.Addr().String()))
+	if err == nil || !strings.Contains(err.Error(), "address already in use") {
+		t.Errorf("err = %v, want the bind failure", err)
+	}
+}
+
+// runServe surfaces a buildServe failure as its own error rather than serving.
+func TestRunServeReportsBuildError(t *testing.T) {
+	err := runServe([]string{"--config", filepath.Join(t.TempDir(), "absent.yml")})
+	if err == nil || !strings.Contains(err.Error(), "read config") {
+		t.Errorf("err = %v, want the config read failure", err)
+	}
+}
+
+// Every buildServe failure must be a named startup error, not a panic or a
+// half-built server.
+func TestBuildServeErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args func(t *testing.T) []string
+		want string // error substring
+	}{
+		{name: "missing config file",
+			args: func(t *testing.T) []string {
+				return []string{"--config", filepath.Join(t.TempDir(), "absent.yml")}
+			},
+			want: "read config"},
+		{name: "unknown config key",
+			args: func(t *testing.T) []string {
+				return buildServeArgs(t, writeConfig(t, "no_such_key: 1\n"))
+			},
+			want: "no_such_key"},
+		{name: "invalid clone_url",
+			args: func(t *testing.T) []string {
+				return buildServeArgs(t, writeConfig(t, ""), "--clone-url", "bogus")
+			},
+			want: "clone_url"},
+		{name: "invalid allow_repos entry",
+			args: func(t *testing.T) []string {
+				return buildServeArgs(t, writeConfig(t, ""), "--allow-repos", "gitlab.com/acme")
+			},
+			want: "allow_repos"},
+		{name: "data_dir is a regular file",
+			args: func(t *testing.T) []string {
+				file := filepath.Join(t.TempDir(), "not-a-dir")
+				if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return []string{
+					"--config", writeConfig(t, ""),
+					"--data-dir", file,
+					"--workspace-root", t.TempDir(),
+				}
+			},
+			want: "data-dir"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildServe(tc.args(t), io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The non-hermetic (persistent) and cache-backed (mirror) strategies announce
+// themselves at startup — an operator reading the log must be able to tell
+// which reuse semantics their builds run under.
+func TestBuildServeStrategyNotes(t *testing.T) {
+	for strategy, want := range map[string]string{
+		"persistent": "persistent workspaces enabled",
+		"mirror":     "mirror workspaces enabled",
+	} {
+		t.Run(strategy, func(t *testing.T) {
+			var logs bytes.Buffer
+			if _, err := buildServe(buildServeArgs(t, writeConfig(t, ""), "--workspace-strategy", strategy), &logs); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), want) {
+				t.Errorf("logs = %q, want them to mention %q", logs.String(), want)
+			}
+		})
+	}
+}
+
+func TestRunInitErrors(t *testing.T) {
+	t.Run("unknown flag", func(t *testing.T) {
+		if err := runInit([]string{"--no-such-flag"}); err == nil {
+			t.Error("an unknown flag was accepted, want an error")
+		}
+	})
+	t.Run("unwritable path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "no-such-dir", "janus.yml")
+		if err := runInit([]string{"--config", path}); err == nil {
+			t.Error("writing under a nonexistent directory succeeded, want an error")
+		}
+	})
+}
+
+func TestRunRunArgumentErrors(t *testing.T) {
+	t.Run("dir with --repo", func(t *testing.T) {
+		err := runRun([]string{"--repo", "https://example.com/r.git", t.TempDir()})
+		if err == nil || !strings.Contains(err.Error(), "not both") {
+			t.Errorf("err = %v, want the either/or usage error", err)
+		}
+	})
+	t.Run("no dir and no --repo", func(t *testing.T) {
+		err := runRun(nil)
+		if err == nil || !strings.Contains(err.Error(), "usage:") {
+			t.Errorf("err = %v, want a usage error", err)
+		}
+	})
+	t.Run("missing pipeline file", func(t *testing.T) {
+		if err := runRun([]string{t.TempDir()}); err == nil {
+			t.Error("a dir without a pipeline ran, want an error")
+		}
+	})
+	t.Run("rejected pipeline names the file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".janus"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".janus", "ci.yml"), []byte("jobs: []\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := runRun([]string{dir})
+		if err == nil || !strings.Contains(err.Error(), ".janus/ci.yml") {
+			t.Errorf("err = %v, want it to name the pipeline file", err)
+		}
+	})
+}
+
+// A checkout that fails must surface git's error, not a run summary.
+func TestRunRunCheckoutFailure(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	err := runRun([]string{
+		"--repo", filepath.Join(t.TempDir(), "absent-repo"),
+		"--workspace-root", t.TempDir(),
+	})
+	if err == nil {
+		t.Error("checking out a nonexistent repo succeeded, want an error")
+	}
+}
+
+// A pipeline whose step fails must make `janus run` itself fail, carrying the
+// run's terminal status — that exit code is what a script wraps.
+func TestRunRunFailedRun(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	pipeline := "name: ci\non: { push: { tags: [\"v*\"] } }\njobs:\n  build:\n    steps:\n      - run: exit 7\n"
+	if err := os.MkdirAll(filepath.Join(dir, ".janus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".janus", "ci.yml"), []byte(pipeline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := runRun([]string{dir})
+	if err == nil || !strings.Contains(err.Error(), "failed") {
+		t.Errorf("err = %v, want the run's failed status", err)
+	}
+}
+
+// dispatch is the CLI contract: which exit code each path returns and which
+// stream it speaks on. Exercised directly — main itself can only os.Exit.
+func TestDispatch(t *testing.T) {
+	// wantStdout/wantStderr are matched against the *injected* writers, which
+	// carry only dispatch's own output — usage, the unknown-command and
+	// version lines, and the final "janus: <err>" line. Subcommands print
+	// their results to the process streams, which these buffers deliberately
+	// do not see; an empty want asserts dispatch itself stayed silent, not
+	// that the command produced no output.
+	tests := []struct {
+		name       string
+		argv       []string
+		wantCode   int
+		wantStdout string // substring; empty means dispatch wrote nothing here
+		wantStderr string // substring; empty means dispatch wrote nothing here
+	}{
+		{name: "no command is usage on stderr",
+			argv: []string{"janus"}, wantCode: 2, wantStderr: "Usage:"},
+		{name: "unknown command is named on stderr",
+			argv: []string{"janus", "frobnicate"}, wantCode: 2, wantStderr: `unknown command "frobnicate"`},
+		{name: "help is usage on stdout",
+			argv: []string{"janus", "help"}, wantCode: 0, wantStdout: "Usage:"},
+		{name: "-h is usage on stdout",
+			argv: []string{"janus", "-h"}, wantCode: 0, wantStdout: "Usage:"},
+		{name: "version prints one line on stdout",
+			argv: []string{"janus", "version"}, wantCode: 0, wantStdout: "janus "},
+		{name: "a failing subcommand exits 1 with the error on stderr",
+			argv:     []string{"janus", "validate", filepath.Join(t.TempDir(), "absent.yml")},
+			wantCode: 1, wantStderr: "janus:"},
+		// One routing check per remaining subcommand — each command's own
+		// behavior has its focused tests; here only the arm and exit code
+		// (init's "wrote …" success line lands on the real os.Stdout, which
+		// is exactly why its row expects the injected buffers empty).
+		{name: "init routes",
+			argv:     []string{"janus", "init", "--config", filepath.Join(t.TempDir(), "janus.yml")},
+			wantCode: 0},
+		{name: "run routes",
+			argv: []string{"janus", "run"}, wantCode: 1, wantStderr: "usage:"},
+		{name: "serve routes",
+			argv:     []string{"janus", "serve", "--config", filepath.Join(t.TempDir(), "absent.yml")},
+			wantCode: 1, wantStderr: "read config"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := dispatch(tc.argv, &stdout, &stderr); code != tc.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			if !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout = %q, want it to contain %q", stdout.String(), tc.wantStdout)
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tc.wantStderr)
+			}
+			if tc.wantStdout == "" && stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want nothing on it", stdout.String())
+			}
+			if tc.wantStderr == "" && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing on it", stderr.String())
+			}
+		})
 	}
 }

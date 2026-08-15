@@ -102,14 +102,22 @@ func fromBuildInfo(bi *debug.BuildInfo) (string, string) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		usage(os.Stderr)
-		os.Exit(2)
+	os.Exit(dispatch(os.Args, os.Stdout, os.Stderr))
+}
+
+// dispatch is main's body — the subcommand switch, usage, and the exit code —
+// split out so it can be exercised in tests, the way serve's wiring is split
+// into buildServe: main itself can only os.Exit. argv has the os.Args shape
+// (argv[0] is the program name).
+func dispatch(argv []string, stdout, stderr io.Writer) int {
+	if len(argv) < 2 {
+		usage(stderr)
+		return 2
 	}
 
-	args := os.Args[2:]
+	args := argv[2:]
 	var err error
-	switch os.Args[1] {
+	switch argv[1] {
 	case "serve":
 		err = runServe(args)
 	case "init":
@@ -119,19 +127,20 @@ func main() {
 	case "run":
 		err = runRun(args)
 	case "version", "-version", "--version":
-		fmt.Println("janus", versionString())
+		_, _ = fmt.Fprintln(stdout, "janus", versionString())
 	case "help", "-h", "--help":
-		usage(os.Stdout)
+		usage(stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "janus: unknown command %q\n\n", os.Args[1])
-		usage(os.Stderr)
-		os.Exit(2)
+		_, _ = fmt.Fprintf(stderr, "janus: unknown command %q\n\n", argv[1])
+		usage(stderr)
+		return 2
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "janus:", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintln(stderr, "janus:", err)
+		return 1
 	}
+	return 0
 }
 
 func usage(w io.Writer) {
