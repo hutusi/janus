@@ -519,3 +519,49 @@ func TestFromBuildInfo(t *testing.T) {
 		}
 	}
 }
+
+// dispatch is the CLI contract: which exit code each path returns and which
+// stream it speaks on. Exercised directly — main itself can only os.Exit.
+func TestDispatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		argv       []string
+		wantCode   int
+		wantStdout string // substring; empty means "must be empty"
+		wantStderr string // substring; empty means "must be empty"
+	}{
+		{name: "no command is usage on stderr",
+			argv: []string{"janus"}, wantCode: 2, wantStderr: "Usage:"},
+		{name: "unknown command is named on stderr",
+			argv: []string{"janus", "frobnicate"}, wantCode: 2, wantStderr: `unknown command "frobnicate"`},
+		{name: "help is usage on stdout",
+			argv: []string{"janus", "help"}, wantCode: 0, wantStdout: "Usage:"},
+		{name: "-h is usage on stdout",
+			argv: []string{"janus", "-h"}, wantCode: 0, wantStdout: "Usage:"},
+		{name: "version prints one line on stdout",
+			argv: []string{"janus", "version"}, wantCode: 0, wantStdout: "janus "},
+		{name: "a failing subcommand exits 1 with the error on stderr",
+			argv:     []string{"janus", "validate", filepath.Join(t.TempDir(), "absent.yml")},
+			wantCode: 1, wantStderr: "janus:"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := dispatch(tc.argv, &stdout, &stderr); code != tc.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			if !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout = %q, want it to contain %q", stdout.String(), tc.wantStdout)
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tc.wantStderr)
+			}
+			if tc.wantStdout == "" && stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want nothing on it", stdout.String())
+			}
+			if tc.wantStderr == "" && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing on it", stderr.String())
+			}
+		})
+	}
+}
