@@ -38,10 +38,14 @@ func TestServeShutsDownOnSignal(t *testing.T) {
 
 	// The signal handler is installed before the listener starts, so once
 	// /healthz answers, a SIGTERM cannot race serve's setup — and cannot kill
-	// the test process either.
+	// the test process either. The probe carries its own timeout: the deadline
+	// below only bounds the retry loop, and if something else took the
+	// released port and accepts without answering, a default-client Get would
+	// block forever and turn a clean failure into a test-binary timeout.
+	probe := &http.Client{Timeout: 250 * time.Millisecond}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		resp, err := http.Get("http://" + addr + "/healthz")
+		resp, err := probe.Get("http://" + addr + "/healthz")
 		if err == nil {
 			_ = resp.Body.Close()
 			break

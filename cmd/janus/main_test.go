@@ -760,12 +760,18 @@ func TestRunRunFailedRun(t *testing.T) {
 // dispatch is the CLI contract: which exit code each path returns and which
 // stream it speaks on. Exercised directly — main itself can only os.Exit.
 func TestDispatch(t *testing.T) {
+	// wantStdout/wantStderr are matched against the *injected* writers, which
+	// carry only dispatch's own output — usage, the unknown-command and
+	// version lines, and the final "janus: <err>" line. Subcommands print
+	// their results to the process streams, which these buffers deliberately
+	// do not see; an empty want asserts dispatch itself stayed silent, not
+	// that the command produced no output.
 	tests := []struct {
 		name       string
 		argv       []string
 		wantCode   int
-		wantStdout string // substring; empty means "must be empty"
-		wantStderr string // substring; empty means "must be empty"
+		wantStdout string // substring; empty means dispatch wrote nothing here
+		wantStderr string // substring; empty means dispatch wrote nothing here
 	}{
 		{name: "no command is usage on stderr",
 			argv: []string{"janus"}, wantCode: 2, wantStderr: "Usage:"},
@@ -781,7 +787,9 @@ func TestDispatch(t *testing.T) {
 			argv:     []string{"janus", "validate", filepath.Join(t.TempDir(), "absent.yml")},
 			wantCode: 1, wantStderr: "janus:"},
 		// One routing check per remaining subcommand — each command's own
-		// behavior has its focused tests; here only the arm and exit code.
+		// behavior has its focused tests; here only the arm and exit code
+		// (init's "wrote …" success line lands on the real os.Stdout, which
+		// is exactly why its row expects the injected buffers empty).
 		{name: "init routes",
 			argv:     []string{"janus", "init", "--config", filepath.Join(t.TempDir(), "janus.yml")},
 			wantCode: 0},
