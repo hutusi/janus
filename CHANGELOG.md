@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   These are fixed across go1.26.9, go1.26.10 and go1.26.11. go1.26.11 and go1.27.4 both scan clean.
 
-  The scheduled govulncheck workflow flagged the first eleven in October, but nobody saw it. GitHub had disabled the workflow for repository inactivity: it turns off scheduled workflows after 60 days without pushes, and a disabled workflow also skips its push and pull-request triggers. Re-enable it with `gh workflow enable govulncheck.yml` whenever the repository has been quiet.
+  The scheduled govulncheck workflow flagged the first eleven in October, but nobody saw it. GitHub had disabled the workflow for repository inactivity: it turns off scheduled workflows after 60 days without pushes, and a disabled workflow also skips its push and pull-request triggers. Re-enable it with `gh workflow enable govulncheck.yml` whenever the repository has been quiet, then run it right away with `gh workflow run govulncheck.yml`; the workflow now accepts manual runs.
 
   The `go 1.25.13` floor is unchanged, but it no longer gives any protection. Go 1.25 is end-of-life, and go1.25.14 still carries all 13.
 

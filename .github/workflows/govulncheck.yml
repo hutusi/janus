@@ -11,6 +11,11 @@ on:
     branches: [main]
   schedule:
     - cron: '17 6 * * 1' # weekly, Monday 06:17 UTC
+  # On demand: GitHub disables scheduled workflows after 60 days without
+  # pushes. After re-enabling (`gh workflow enable govulncheck.yml`), run
+  # `gh workflow run govulncheck.yml` to see the current state right away
+  # instead of waiting for Monday.
+  workflow_dispatch:
 
 permissions:
   contents: read
