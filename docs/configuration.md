@@ -241,13 +241,17 @@ With `clone_url: "ssh"`, `janus serve` checks at startup that the service
 account's `~/.ssh` exists and that ssh can read `known_hosts` inside it. If
 not, it logs a warning naming the directory. That puts a sandbox hiding the
 account's home, or a `.ssh` the account doesn't own, in the journal before the
-first webhook fails. Like ssh, the check takes the home from the account
-database (`getent passwd`), never `$HOME`. It is skipped when the account
-can't be looked up, or when `GIT_SSH_COMMAND`, `GIT_SSH`, or a system or global
-`core.sshCommand` is set, since a custom ssh command may keep its key and
-`known_hosts` elsewhere. A `core.sshCommand` scoped to checkouts with
-`includeIf "gitdir:"` can't be seen at startup, so the warning says it may not
-apply.
+first webhook fails. The warning reports what was found, not a prediction:
+ssh can still succeed through an agent (`SSH_AUTH_SOCK`), the global
+`/etc/ssh/ssh_known_hosts`, or a `core.sshCommand` scoped with
+`includeIf "gitdir:"`, none of which the check can see. Like ssh, it takes the
+home from the account database, never from `$HOME`: through `getent passwd` on
+Linux, and the native lookup on macOS. It is skipped on Windows, where which
+home ssh reads depends on which ssh git runs. It is also skipped when the
+account can't be looked up, and when `GIT_SSH_COMMAND`, `GIT_SSH`, or a system
+or global `core.sshCommand` is set, since a custom ssh command may keep its key
+and `known_hosts` elsewhere. It never delays startup by more than a few
+seconds, even on a hung network home.
 
 If the platform omits `git_ssh_url` from its payload, the delivery fails with
 `400` naming the missing field rather than quietly cloning over HTTPS.

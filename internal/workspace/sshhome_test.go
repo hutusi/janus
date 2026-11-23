@@ -9,118 +9,153 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestSSHHomeWarning(t *testing.T) {
-	dirInfo, err := os.Stat(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+// fakeInfo is a FileInfo of a given mode.
+type fakeInfo fs.FileMode
+
+func (f fakeInfo) Name() string       { return "" }
+func (f fakeInfo) Size() int64        { return 0 }
+func (f fakeInfo) Mode() fs.FileMode  { return fs.FileMode(f) }
+func (f fakeInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeInfo) IsDir() bool        { return fs.FileMode(f).IsDir() }
+func (f fakeInfo) Sys() any           { return nil }
+
+// fakeEntry is one path of a fakeFS: what stat returns, and what open returns
+// for it.
+type fakeEntry struct {
+	info             fs.FileInfo
+	statErr, openErr error
+}
+
+// fakeFS serves stat and open from a map, recording every path opened.
+type fakeFS struct {
+	entries map[string]fakeEntry
+	opened  []string
+}
+
+func (f *fakeFS) stat(p string) (fs.FileInfo, error) {
+	e, ok := f.entries[p]
+	switch {
+	case !ok:
+		return nil, &fs.PathError{Op: "stat", Path: p, Err: fs.ErrNotExist}
+	case e.statErr != nil:
+		return nil, &fs.PathError{Op: "stat", Path: p, Err: e.statErr}
 	}
-	file := filepath.Join(t.TempDir(), "f")
-	if err := os.WriteFile(file, nil, 0o600); err != nil {
-		t.Fatal(err)
+	return e.info, nil
+}
+
+func (f *fakeFS) open(p string) error {
+	f.opened = append(f.opened, p)
+	if e := f.entries[p]; e.openErr != nil {
+		return &fs.PathError{Op: "open", Path: p, Err: e.openErr}
 	}
-	fileInfo, err := os.Stat(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statAs := func(info fs.FileInfo, err error) func(string) (fs.FileInfo, error) {
-		return func(p string) (fs.FileInfo, error) {
-			if err != nil {
-				return nil, &fs.PathError{Op: "stat", Path: p, Err: err}
-			}
-			return info, nil
-		}
-	}
-	openAs := func(err error) func(string) error {
-		return func(p string) error {
-			if err != nil {
-				return &fs.PathError{Op: "open", Path: p, Err: err}
-			}
-			return nil
-		}
-	}
+	return nil
+}
+
+func TestSSHHomeProbe(t *testing.T) {
 	home := filepath.FromSlash("/home/janus")
-	sshDir := filepath.Join(home, ".ssh")
-	inaccessible := []string{"cannot read its ~/.ssh", "passwd home, not $HOME", "Host key verification failed", "usermod -d /var/lib/janus janus", "make janus own"}
+	dir := filepath.Join(home, ".ssh")
+	kh := filepath.Join(dir, "known_hosts")
+	sshDir := fakeEntry{info: fakeInfo(fs.ModeDir | 0o700)}
+	readable := fakeEntry{info: fakeInfo(0o600)}
+	inaccessible := []string{"cannot read its ~/.ssh", "passwd home, not $HOME", "checkouts that rely on a key or known_hosts there will fail", "Host key verification failed"}
 
 	tests := []struct {
-		name      string
-		env       []string
-		stat      func(string) (fs.FileInfo, error)
-		open      func(string) error
-		gitSSH    bool
-		want      []string // substrings of the message; nil means no warning
-		wantAttrs []string
+		name       string
+		entries    map[string]fakeEntry
+		env        []string
+		gitSSH     bool
+		want       []string // substrings of the message; nil means no warning
+		wantAttrs  []string
+		wantOpened []string
 	}{
-		{name: "readable known_hosts is silent", stat: statAs(dirInfo, nil), open: openAs(nil)},
+		{name: "readable known_hosts is silent", entries: map[string]fakeEntry{dir: sshDir, kh: readable}, wantOpened: []string{kh}},
 		// /etc/ssh/ssh_known_hosts may hold the key; not this probe's call.
-		{name: "missing known_hosts is silent", stat: statAs(dirInfo, nil), open: openAs(fs.ErrNotExist)},
+		{name: "missing known_hosts is silent", entries: map[string]fakeEntry{dir: sshDir}},
 		{
-			name: "ProtectHome-style permission denied",
-			stat: statAs(nil, fs.ErrPermission), open: openAs(nil),
-			want: inaccessible, wantAttrs: []string{"dir", "err"},
+			name:      "missing ~/.ssh is reported",
+			entries:   map[string]fakeEntry{},
+			want:      []string{"has no ~/.ssh", "passwd home, not $HOME", "checkouts that rely on a key or known_hosts there will fail"},
+			wantAttrs: []string{"dir"},
 		},
 		{
-			// stat succeeds with search permission on the parents alone; ssh
-			// still cannot enter a root-owned 0700 ~/.ssh.
-			name: "no search permission on ~/.ssh",
-			stat: statAs(dirInfo, nil), open: openAs(fs.ErrPermission),
-			want: inaccessible, wantAttrs: []string{"dir", "err"},
+			name:      "ProtectHome-style permission denied",
+			entries:   map[string]fakeEntry{dir: {statErr: fs.ErrPermission}},
+			want:      inaccessible,
+			wantAttrs: []string{"dir", "err"},
 		},
 		{
-			name: "~/.ssh is a regular file",
-			stat: statAs(fileInfo, nil), open: openAs(nil),
-			want: inaccessible, wantAttrs: []string{"dir", "err"},
+			// stat of the directory needs search permission only on the
+			// parents; ssh must also enter it — a root-owned 0700 .ssh.
+			name:      "no search permission on ~/.ssh",
+			entries:   map[string]fakeEntry{dir: sshDir, kh: {statErr: fs.ErrPermission}},
+			want:      inaccessible,
+			wantAttrs: []string{"dir", "err"},
 		},
 		{
-			name: "missing ~/.ssh asks for provisioning",
-			stat: statAs(nil, fs.ErrNotExist), open: openAs(nil),
-			want: []string{"has no ~/.ssh", "provisioned there", "includeIf-scoped core.sshCommand"}, wantAttrs: []string{"dir"},
+			name:       "unreadable known_hosts",
+			entries:    map[string]fakeEntry{dir: sshDir, kh: {info: fakeInfo(0o600), openErr: fs.ErrPermission}},
+			want:       inaccessible,
+			wantAttrs:  []string{"dir", "err"},
+			wantOpened: []string{kh},
+		},
+		{
+			name:      "~/.ssh is a regular file",
+			entries:   map[string]fakeEntry{dir: readable},
+			want:      inaccessible,
+			wantAttrs: []string{"dir", "err"},
+		},
+		{
+			// Opening a FIFO with no writer blocks: never open special files.
+			name:    "FIFO known_hosts is not opened",
+			entries: map[string]fakeEntry{dir: sshDir, kh: {info: fakeInfo(fs.ModeNamedPipe | 0o600)}},
 		},
 		{
 			// The trap itself: an operator points $HOME elsewhere and
 			// provisions keys there, but ssh still looks in the passwd home.
-			name: "HOME disagreeing with the passwd home is shown",
-			env:  []string{"HOME=/var/lib/janus"},
-			stat: statAs(nil, fs.ErrPermission), open: openAs(nil),
-			want: inaccessible, wantAttrs: []string{"dir", "HOME", "err"},
+			name:      "HOME disagreeing with the passwd home is shown",
+			entries:   map[string]fakeEntry{dir: {statErr: fs.ErrPermission}},
+			env:       []string{"HOME=/var/lib/janus"},
+			want:      inaccessible,
+			wantAttrs: []string{"dir", "HOME", "err"},
 		},
-		{name: "HOME matching the passwd home is not shown", env: []string{"HOME=" + home + "/"},
-			stat: statAs(nil, fs.ErrPermission), open: openAs(nil),
-			want: inaccessible, wantAttrs: []string{"dir", "err"}},
-		{name: "GIT_SSH_COMMAND takes over the transport", env: []string{"GIT_SSH_COMMAND=ssh -i /k"},
-			stat: statAs(nil, fs.ErrPermission), open: openAs(nil)},
-		{name: "GIT_SSH takes over the transport", env: []string{"GIT_SSH=/usr/bin/plink"},
-			stat: statAs(nil, fs.ErrNotExist), open: openAs(nil)},
-		{name: "core.sshCommand takes over the transport", gitSSH: true,
-			stat: statAs(nil, fs.ErrPermission), open: openAs(nil)},
+		{
+			name:      "HOME matching the passwd home is not shown",
+			entries:   map[string]fakeEntry{dir: {statErr: fs.ErrPermission}},
+			env:       []string{"HOME=" + home + string(filepath.Separator)},
+			want:      inaccessible,
+			wantAttrs: []string{"dir", "err"},
+		},
+		{
+			name:    "core.sshCommand takes over the transport",
+			entries: map[string]fakeEntry{dir: {statErr: fs.ErrPermission}},
+			gitSSH:  true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var statted, opened string
+			fsys := &fakeFS{entries: tc.entries}
 			gitProbed := false
 			p := sshHomeProbe{
 				username: "janus", home: home, env: tc.env,
-				stat:             func(s string) (fs.FileInfo, error) { statted = s; return tc.stat(s) },
-				open:             func(s string) error { opened = s; return tc.open(s) },
+				stat: fsys.stat, open: fsys.open,
 				gitSSHConfigured: func() bool { gitProbed = true; return tc.gitSSH },
+				systemdHint:      true,
 			}
 			msg, attrs := p.warning()
-			if statted != sshDir {
-				t.Errorf("stat(%q), want stat(%q): the passwd home, not $HOME", statted, sshDir)
-			}
-			if opened != "" && opened != filepath.Join(sshDir, "known_hosts") {
-				t.Errorf("opened %q, want ~/.ssh/known_hosts", opened)
+			if strings.Join(fsys.opened, ",") != strings.Join(tc.wantOpened, ",") {
+				t.Errorf("opened %v, want %v", fsys.opened, tc.wantOpened)
 			}
 			if tc.want == nil {
 				if msg != "" {
 					t.Fatalf("got warning %q, want none", msg)
 				}
+				if gitProbed && !tc.gitSSH {
+					t.Error("git probed although there was nothing to report")
+				}
 				return
-			}
-			if !gitProbed {
-				t.Error("warning issued without consulting core.sshCommand")
 			}
 			for _, w := range tc.want {
 				if !strings.Contains(msg, w) {
@@ -134,28 +169,60 @@ func TestSSHHomeWarning(t *testing.T) {
 			if strings.Join(keys, ",") != strings.Join(tc.wantAttrs, ",") {
 				t.Errorf("attr keys = %v, want %v", keys, tc.wantAttrs)
 			}
-			if attrs[1] != sshDir {
-				t.Errorf("dir attr = %v, want %q", attrs[1], sshDir)
+			if attrs[1] != dir {
+				t.Errorf("dir attr = %v, want %q", attrs[1], dir)
 			}
 		})
 	}
 }
 
-// A healthy host must not spawn git at startup just to learn that nothing
-// needs reporting.
-func TestSSHHomeWarningSkipsGitProbeWhenHealthy(t *testing.T) {
-	info, err := os.Stat(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+// The ProtectHome remedy is systemd advice: Linux only. Elsewhere the message
+// keeps only the ownership hint.
+func TestSSHHomeProbeRemedy(t *testing.T) {
+	for _, systemd := range []bool{true, false} {
+		fsys := &fakeFS{entries: map[string]fakeEntry{filepath.FromSlash("/h/.ssh"): {statErr: fs.ErrPermission}}}
+		p := sshHomeProbe{username: "janus", home: filepath.FromSlash("/h"), stat: fsys.stat, open: fsys.open,
+			gitSSHConfigured: func() bool { return false }, systemdHint: systemd}
+		msg, _ := p.warning()
+		if got := strings.Contains(msg, "usermod -d /var/lib/janus janus"); got != systemd {
+			t.Errorf("systemdHint=%v: usermod remedy present = %v in %q", systemd, got, msg)
+		}
+		if !strings.Contains(strings.ToLower(msg), "make sure janus owns the directory") {
+			t.Errorf("systemdHint=%v: ownership hint missing from %q", systemd, msg)
+		}
 	}
-	p := sshHomeProbe{
-		username: "janus", home: "/home/janus",
-		stat:             func(string) (fs.FileInfo, error) { return info, nil },
-		open:             func(string) error { return nil },
-		gitSSHConfigured: func() bool { t.Error("git probed on a healthy host"); return false },
+}
+
+// Environment overrides are decided before any lookup or filesystem call.
+func TestSSHHomeWarningEnvOverridesComeFirst(t *testing.T) {
+	for _, env := range [][]string{{"GIT_SSH_COMMAND=ssh -i /k"}, {"GIT_SSH=/usr/bin/plink"}} {
+		lookup := func(context.Context) (string, string, bool) {
+			t.Errorf("%v: account looked up despite the override", env)
+			return "", "", false
+		}
+		if msg, _ := sshHomeWarning(context.Background(), env, lookup); msg != "" {
+			t.Errorf("%v: got warning %q", env, msg)
+		}
 	}
-	if msg, _ := p.warning(); msg != "" {
-		t.Fatalf("got warning %q, want none", msg)
+}
+
+// A diagnostic must never hold up startup: whatever the probe blocks on, the
+// caller gets an answer when its context ends.
+func TestSSHHomeWarningNeverBlocksStartup(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	lookup := func(context.Context) (string, string, bool) {
+		<-release // a hung network home or directory service
+		return "", "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if msg, _ := sshHomeWarning(ctx, nil, lookup); msg != "" {
+		t.Errorf("got warning %q from a probe that never finished", msg)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("returned after %v; want it bounded by the context", d)
 	}
 }
 
@@ -177,8 +244,8 @@ func stubGetent(t *testing.T, home string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// End to end through the real lookup and filesystem: a home with no ~/.ssh
-// warns, and each operator-configured transport silences it.
+// End to end through getent, the real filesystem, and real git: a home with
+// no ~/.ssh is reported, and core.sshCommand silences it.
 func TestSSHHomeWarningEndToEnd(t *testing.T) {
 	home := t.TempDir() // exists, but has no .ssh
 	stubGetent(t, home)
@@ -186,36 +253,58 @@ func TestSSHHomeWarningEndToEnd(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	ctx := context.Background()
 
-	msg, attrs := SSHHomeWarning(ctx, nil)
+	msg, attrs := sshHomeWarning(ctx, nil, getentAccount)
 	if !strings.Contains(msg, "has no ~/.ssh") {
-		t.Fatalf("message = %q, want the missing-~/.ssh warning", msg)
+		t.Fatalf("message = %q, want the missing-~/.ssh report", msg)
 	}
 	if want := filepath.Join(home, ".ssh"); len(attrs) < 2 || attrs[1] != want {
 		t.Errorf("attrs = %v, want dir %q", attrs, want)
-	}
-	if msg, _ := SSHHomeWarning(ctx, []string{"GIT_SSH_COMMAND=ssh"}); msg != "" {
-		t.Errorf("got warning %q with GIT_SSH_COMMAND set", msg)
 	}
 	cfg := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(cfg, []byte("[core]\n\tsshCommand = ssh -i /k\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
-	if msg, _ := SSHHomeWarning(ctx, nil); msg != "" {
+	if msg, _ := sshHomeWarning(ctx, nil, getentAccount); msg != "" {
 		t.Errorf("got warning %q with core.sshCommand in the global gitconfig", msg)
 	}
 }
 
-// The account comes from the account database (getent, so NSS), never from
-// $HOME, which is the variable ssh ignores. user.Current breaks this in
-// cgo-less builds; reproduce with `go test -tags osusergo`.
-func TestPasswdAccountIgnoresHOME(t *testing.T) {
+// On Linux the account comes from getent (NSS), never from $HOME, which is
+// the variable ssh ignores. user.Current breaks this in cgo-less Linux builds
+// for accounts missing from /etc/passwd; reproduce that failure mode with
+// `go test -tags osusergo`.
+func TestGetentAccountUsesNSS(t *testing.T) {
 	stubGetent(t, "/srv/from-nss")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USER", "not-the-account")
-	name, home, ok := passwdAccount(context.Background())
+	name, home, ok := getentAccount(context.Background())
 	if !ok || name != "svc" || home != "/srv/from-nss" {
-		t.Fatalf("passwdAccount = %q, %q, %v; want svc, /srv/from-nss from getent", name, home, ok)
+		t.Fatalf("getentAccount = %q, %q, %v; want svc, /srv/from-nss from getent", name, home, ok)
+	}
+}
+
+// Per platform: the native lookup on macOS ignores $HOME, Windows is skipped
+// (see passwdAccount), and everything else goes through getent.
+func TestPasswdAccountPerPlatform(t *testing.T) {
+	ctx := context.Background()
+	fake := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		if _, _, ok := passwdAccount(ctx); ok {
+			t.Fatal("passwdAccount resolved an account on Windows; the check is meant to be skipped there")
+		}
+	case "darwin":
+		t.Setenv("HOME", fake)
+		if _, home, ok := passwdAccount(ctx); !ok || filepath.Clean(home) == filepath.Clean(fake) {
+			t.Fatalf("passwdAccount = %q, %v; want the account's real home, not $HOME", home, ok)
+		}
+	default:
+		stubGetent(t, "/srv/from-nss")
+		t.Setenv("HOME", fake)
+		if _, home, ok := passwdAccount(ctx); !ok || home != "/srv/from-nss" {
+			t.Fatalf("passwdAccount = %q, %v; want /srv/from-nss from getent", home, ok)
+		}
 	}
 }
 
