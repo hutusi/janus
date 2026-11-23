@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CI tool pins bumped: golangci-lint v2.12.2 → v2.15.0, govulncheck v1.7.0 → v1.10.0.** Dependabot moves the SHA-pinned actions but not these version strings, so they drift unless bumped by hand. govulncheck v1.10.0 needs Go 1.26 or newer to build, which the toolchain pin guarantees.
+
 - **`ssh://` clone URLs keep their username in logs, the runs API, the dashboard, and notifications** — credential redaction used to drop *all* userinfo, so a run triggered from `ssh://git@host:2222/group/app.git` was logged as `ssh://host:2222/group/app.git`. That made a correct clone URL look like the cause of an unrelated SSH failure, since git connects as a different account without the `git@`. SSH authenticates with keys, so the username of an `ssh`/`git+ssh`/`ssh+git` URL is now kept. A password on such a URL (`ssh://git:pw@host/…`) still drops the whole userinfo, and every other scheme still loses even a bare username, because over HTTP(S) that slot can hold a token (`https://oauth2@…`, `https://<token>@…`).
 
 - **The CI coverage floor rises from 83% to 86%** — closing `cmd/janus`'s gap (69% → 93.5%) lifted the measured total from 85.8% to 88.2%, and the gate's own rule is to sit a couple of points under the total. The untested surface was the CLI itself: the command dispatch (`main` is now `os.Exit(dispatch(…))`, splitting the usage/exit-code/stream contract out where tests can reach it — behavior unchanged), the serve lifecycle (a taken address surfaces the bind error; a real SIGTERM drives the graceful path to the exit 0 that `systemctl stop` trusts), and `janus validate`, which had no tests at all.
