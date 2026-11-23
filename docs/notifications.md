@@ -75,7 +75,9 @@ Notes:
   a clean success.
 - **`repo_url`** and **`reason`** have any embedded credentials
   (`https://user:token@host/…`) stripped before they are sent — a checkout
-  failure can otherwise echo a credential-bearing clone URL into `reason`.
+  failure can otherwise echo a credential-bearing clone URL into `reason`. The
+  username of an `ssh://` URL (`ssh://git@host/…`) is kept: SSH authenticates
+  with keys, so it is the account git connects as, not a secret.
 
   > **Upgrading:** this stripping applies to records written and served *after*
   > this version. A `run.json` written by an earlier version can still hold a
