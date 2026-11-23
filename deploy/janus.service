@@ -47,7 +47,9 @@ StateDirectoryMode=0700
 NoNewPrivileges=true
 # /usr, /boot, /etc mounted read-only:
 ProtectSystem=full
-# hide /home, /root, /run/user (HOME is /var/lib/janus):
+# hide /home, /root, /run/user. The janus account's home must therefore be
+# /var/lib/janus: ssh reads ~/.ssh from the passwd home, not $HOME, and cannot
+# reach one under /home (see docs/deployment.md, Troubleshooting).
 ProtectHome=true
 # private /tmp and /var/tmp for the service:
 PrivateTmp=true

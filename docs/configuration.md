@@ -184,8 +184,15 @@ design.
 
 Janus still manages no credentials. The **service user** needs a passphrase-less
 key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
-trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
-`$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Janus enforces
+trust prompt) in the `.ssh/` of the account's **passwd home**
+(`getent passwd janus`, sixth field). With the packaged unit that home must be
+`/var/lib/janus`, so the files go in `/var/lib/janus/.ssh/`. ssh resolves `~`
+from the passwd entry, not `$HOME`, so setting `HOME` does not move them. An
+account whose home is under `/home` cannot clone over SSH at all, because the
+unit's `ProtectHome` hides it. See
+[deployment › Troubleshooting](deployment.md#ssh-clone-fails-known_hosts-permission-denied).
+On a non-default SSH port the `known_hosts` entry is keyed `[host]:port`, so
+scan with the port: `ssh-keyscan -p 2222 git.example.com`. Janus enforces
 this: checkout git runs with `GIT_TERMINAL_PROMPT=0` and, when the operator
 has configured **nothing** for the transport (no `GIT_SSH_COMMAND`/`GIT_SSH`
 in the service environment, no `core.sshCommand` in the service user's
@@ -209,10 +216,14 @@ Host keys are deliberately still verified; nothing is auto-accepted. Anything
 you configure yourself — `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
 `core.sshCommand`, `core.askpass` — is respected verbatim and must itself be
 non-interactive (include `-o BatchMode=yes` in a custom ssh command). Verify
-as the service user, with the SSH URL — that is what Janus will now clone:
+as the service user, with the SSH URL (that is what Janus will now clone), and
+**inside the service's sandbox**. `sudo -u janus` applies no `ProtectHome`,
+so it passes on a host where the service still fails:
 
 ```sh
-sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git
+sudo systemd-run --wait --pipe -p User=janus -p ProtectHome=true -p PrivateTmp=true \
+  -E GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
+  git ls-remote git@gitlab.example.com:acme/app.git
 ```
 
 With `clone_url: "ssh"`, `janus serve` checks at startup that the service
