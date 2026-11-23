@@ -212,8 +212,8 @@ check_user_home() {
 	*) return 0 ;;
 	esac
 	warn "user '$USER_NAME' has home $user_home, which the unit's ProtectHome=true hides from the service."
-	warn "ssh reads its key and known_hosts from the passwd home (not \$HOME), so SSH clones will fail with 'Host key verification failed'."
-	warn "fix: systemctl stop janus; usermod -d $STATE_DIR $USER_NAME; move $user_home/.ssh (and .gitconfig) into $STATE_DIR. See docs/deployment.md#troubleshooting."
+	warn "ssh reads its key and known_hosts from the passwd home (not \$HOME), so SSH clones that rely on files in $user_home/.ssh will fail with 'Host key verification failed'."
+	warn "if yours do: systemctl stop janus; usermod -d $STATE_DIR $USER_NAME; move $user_home/.ssh (and .gitconfig) into $STATE_DIR. See docs/deployment.md#troubleshooting."
 }
 
 # Emit the allow_repos YAML block from the collected --allow-repo values, or a

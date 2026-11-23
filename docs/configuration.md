@@ -187,9 +187,11 @@ key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
 trust prompt) in the `.ssh/` of the account's **passwd home**
 (`getent passwd janus`, sixth field). With the packaged unit that home must be
 `/var/lib/janus`, so the files go in `/var/lib/janus/.ssh/`. ssh resolves `~`
-from the passwd entry, not `$HOME`, so setting `HOME` does not move them. An
-account whose home is under `/home` cannot clone over SSH at all, because the
-unit's `ProtectHome` hides it. See
+from the passwd entry, not `$HOME`, so setting `HOME` does not move them. If
+the account's home is under `/home`, the unit's `ProtectHome` hides it, and SSH
+clones that rely on a key or `known_hosts` there fail. (One configured to use
+files elsewhere, through a custom `core.sshCommand` or `GIT_SSH_COMMAND`, is
+unaffected.) See
 [deployment › Troubleshooting](deployment.md#ssh-clone-fails-known_hosts-permission-denied).
 On a non-default SSH port the `known_hosts` entry is keyed `[host]:port`, so
 scan with the port: `ssh-keyscan -p 2222 git.example.com`. Janus enforces

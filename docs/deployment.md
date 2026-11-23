@@ -100,8 +100,9 @@ sudo useradd --system --home-dir /var/lib/janus --shell /usr/sbin/nologin janus
 `StateDirectory=janus` — no manual `mkdir`/`chown` needed.
 
 If a `janus` account already exists (one made with `useradd -m`, say), check its
-home with `getent passwd janus`. It must be `/var/lib/janus`, because the unit
-hides `/home` and SSH clones would fail. See
+home with `getent passwd janus`. It should be `/var/lib/janus`, because the
+unit hides `/home`, and SSH clones that rely on the account's `~/.ssh` would
+fail. See
 [Troubleshooting](#ssh-clone-fails-known_hosts-permission-denied).
 `deploy/install.sh` warns about this on install and upgrade.
 
@@ -353,8 +354,9 @@ mind:
 - **The service account's home must be `/var/lib/janus`**, which stays writable
   under the sandbox, so tool caches, `git config`, and ssh's `~/.ssh` work.
   `/home` and `/root` are hidden. Because ssh resolves `~/.ssh` from the passwd
-  entry rather than `$HOME`, an account whose home is under `/home` cannot
-  clone over SSH ([Troubleshooting](#ssh-clone-fails-known_hosts-permission-denied)).
+  entry rather than `$HOME`, an account whose home is under `/home` can't use
+  a key or `known_hosts` there for SSH clones
+  ([Troubleshooting](#ssh-clone-fails-known_hosts-permission-denied)).
 - **Stay behind the loopback bind + proxy** from step 3 so the unprotected
   dashboard and read `/api` endpoints are not exposed directly.
 - **The `allow_repos` allowlist is your last line of defence** if a webhook
