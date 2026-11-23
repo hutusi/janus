@@ -70,7 +70,9 @@ Options:
   --binary <path>      install this local binary and make no network access at all
                        (build it first with 'make build'); skips --version
   --version <vX.Y.Z>   install a specific release (default: latest)
-  --addr <host:port>   listen address (default: 127.0.0.1:8080)
+  --addr <host:port>   listen address written to a new janus.yml, and the address
+                       the health check probes (default: 127.0.0.1:8080); pass it
+                       on upgrade too if your janus.yml uses a different addr
   --prefix <dir>       install the binary here (default: /usr/local/bin)
   --no-gen-secrets     do not auto-generate secrets; leave janus.env blank
   --purge              with uninstall: also remove config/secrets, run history,
@@ -78,9 +80,12 @@ Options:
   --dry-run            print the planned actions without changing anything
   -h, --help           show this help
 
-install (default)      full provision: binary, user, config, secrets, unit, start
-upgrade                re-download + checksum-verify the binary, then restart
-                       (leaves the user, config and secrets untouched)
+install (default)      full provision: binary, user, config, secrets, unit, start.
+                       A service that is already running is NOT restarted (it
+                       says so); use upgrade to load a new binary or unit
+upgrade                replace the binary (re-download + checksum-verify, or
+                       --binary <path> for a local build), reinstall the unit,
+                       restart; leaves the user, config and secrets untouched
 uninstall              stop + disable the service, remove the unit and binary;
                        keeps $CONFIG_DIR, $STATE_DIR and the user unless --purge
 
@@ -310,6 +315,28 @@ install_unit() {
 	run systemctl daemon-reload
 }
 
+# health_url: the /healthz URL for $ADDR. A wildcard listen host isn't a URL
+# host: `:9090`, the form Janus's own example config uses, would make
+# http://:9090/healthz, which curl rejects. A wildcard bind accepts
+# loopback, so use that.
+health_url() {
+	probe="$ADDR"
+	case "$probe" in
+	:*) probe="127.0.0.1$probe" ;;
+	0.0.0.0:*) probe="127.0.0.1:${probe#0.0.0.0:}" ;;
+	"[::]:"*) probe="[::1]:${probe#"[::]:"}" ;;
+	esac
+	printf 'http://%s/healthz' "$probe"
+}
+
+# health_check_cmd: the manual health check, ready to paste into any shell.
+# The URL is quoted (zsh treats an IPv6 [::1] as a glob) and, like the
+# probe, bypasses any proxy. Every printed check comes from here, so they
+# can't drift apart.
+health_check_cmd() {
+	printf "curl -s --noproxy '*' '%s'" "$(health_url)"
+}
+
 verify_service() {
 	log "verifying service"
 	# An inactive service is an install failure regardless of what the HTTP
@@ -318,16 +345,16 @@ verify_service() {
 	if ! run systemctl is-active janus; then
 		err "janus.service is not active — inspect with: journalctl -u janus -e"
 	fi
-	url="http://$ADDR/healthz"
+	url=$(health_url)
 	if [ "$DRY_RUN" -eq 1 ]; then
-		printf "+ curl -fsS --noproxy '*' %s\n" "$url"
+		printf "+ curl -fsS --noproxy '*' '%s'\n" "$url"
 		return
 	fi
 	# curl is optional for a --binary (offline) install, so it may be absent.
 	# is-active above already gates on the service state; skip the HTTP probe
 	# rather than loop for 10s and warn misleadingly.
 	if ! command -v curl >/dev/null 2>&1; then
-		log "curl not present — skipping the HTTP health check; verify once up with: curl -s $url"
+		log "curl not present — skipping the HTTP health check; verify once up with: $(health_check_cmd)"
 		return 0
 	fi
 	# --noproxy '*': the bind is loopback, so never route the check through an
@@ -343,7 +370,7 @@ verify_service() {
 	done
 	# curl is present but the service never answered in 10s — it is active but
 	# not serving. Fail the install rather than let the summary claim success.
-	err "healthz did not respond at $url after 10s — the service is active but not serving; inspect with: journalctl -u janus -e"
+	err "healthz did not respond at $url after 10s — the service is active but not serving there. If janus.yml sets a different addr, re-run with --addr <host:port> (make: INSTALL_FLAGS=\"--addr <host:port>\"); otherwise inspect with: journalctl -u janus -e"
 }
 
 # Reverse of install: stop and remove the service and binary. Keeps the config
@@ -393,7 +420,7 @@ Next steps (not automated — see docs/deployment.md):
 Handy commands:
   systemctl status janus
   journalctl -u janus -f
-  curl -s http://$ADDR/healthz
+  $(health_check_cmd)
 EOF
 }
 
@@ -484,6 +511,25 @@ run install -d -m755 "$CONFIG_DIR"
 install_config
 install_env
 install_unit
+# `enable --now` starts a stopped service but leaves a running one alone, and
+# install mode deliberately doesn't restart it: a restart cancels runs that
+# outlast the 30s drain, and loading a new build is upgrade's job, which
+# always restarts. But say so. Otherwise a re-run over a live service with a
+# new binary looks like it took effect while the old process still serves.
+# The check is read-only, so --dry-run reports it too.
+was_active=0
+if systemctl is-active --quiet janus 2>/dev/null; then
+	was_active=1
+fi
 run systemctl enable --now janus
+# Warn before verifying: a failing health check exits, and the warning
+# matters most when the old process is the one failing. Suggest only a
+# restart, which activates exactly what this run installed, whether from
+# --binary, --version, or a download. A make target would copy the
+# checkout's ./janus instead.
+if [ "$was_active" -eq 1 ]; then
+	warn "janus was already running and was NOT restarted: it still runs the binary and unit it started with."
+	warn "To run what was just installed: sudo systemctl restart janus"
+fi
 verify_service
 print_summary
