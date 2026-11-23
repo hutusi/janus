@@ -217,14 +217,20 @@ you configure yourself — `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
 `core.sshCommand`, `core.askpass` — is respected verbatim and must itself be
 non-interactive (include `-o BatchMode=yes` in a custom ssh command). Verify
 as the service user, with the SSH URL (that is what Janus will now clone), and
-**inside the service's sandbox**. `sudo -u janus` applies no `ProtectHome`,
-so it passes on a host where the service still fails:
+**inside the service's sandbox and environment**. `sudo -u janus` applies no
+`ProtectHome`, so it passes on a host where the service still fails:
 
 ```sh
 sudo systemd-run --wait --pipe -p User=janus -p ProtectHome=true -p PrivateTmp=true \
-  -E GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
-  git ls-remote git@gitlab.example.com:acme/app.git
+  -p EnvironmentFile=-/etc/janus/janus.env -E GIT_TERMINAL_PROMPT=0 \
+  git ls-remote git@gitlab.example.com:acme/app.git </dev/null
 ```
+
+The command loads the service's environment file and doesn't override the ssh
+transport. ssh therefore runs the way a checkout would: with a
+`GIT_SSH_COMMAND` set in `janus.env`, or a `core.sshCommand` in the account's
+gitconfig, if you configured one. A transient unit has no terminal, and stdin
+is `/dev/null`, so a missing `known_hosts` entry fails instead of prompting.
 
 With `clone_url: "ssh"`, `janus serve` checks at startup that the service
 account's `~/.ssh` exists and that ssh can read `known_hosts` inside it. If

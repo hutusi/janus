@@ -288,15 +288,21 @@ sudo install -d -m700 -o janus -g janus /var/lib/janus/.ssh
 sudo cp -a /home/janus/.ssh/. /var/lib/janus/.ssh/
 sudo chown -R janus:janus /var/lib/janus/.ssh
 # also carry over /home/janus/.gitconfig (safe.directory etc.) if there is one
-sudo systemctl start janus
 ```
 
-Make sure `known_hosts` has the git server's key. On a non-default SSH port the
-entry is keyed `[host]:port`, so scan with the port and check the fingerprint
-against the one your git server publishes:
+Before starting the service again, make sure `known_hosts` has the git
+server's key, and that you have **verified** the key: once a key is in that
+file, every checkout trusts it. Scan into a scratch file, compare the
+fingerprints with the ones your git server publishes (its admin docs or admin),
+and append only after they match. On a non-default SSH port the entry is keyed
+`[host]:port`, so scan with the port:
 
 ```sh
-ssh-keyscan -p 2222 git.example.com | sudo -u janus tee -a /var/lib/janus/.ssh/known_hosts
+ssh-keyscan -p 2222 git.example.com > /tmp/git-host-keys
+ssh-keygen -lf /tmp/git-host-keys         # compare every fingerprint before going on
+sudo -u janus tee -a /var/lib/janus/.ssh/known_hosts < /tmp/git-host-keys >/dev/null
+rm /tmp/git-host-keys
+sudo systemctl start janus
 ```
 
 Then verify inside the sandbox, as described in
