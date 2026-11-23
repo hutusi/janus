@@ -45,7 +45,14 @@ command — see the [deployment guide](docs/deployment.md#quick-install-scripted
 
 ### Build from source
 
-Requires Go (see [`go.mod`](go.mod)). The version is baked in from the git tag:
+Requires Go (see [`go.mod`](go.mod)). Its `toolchain` line is only a *minimum*.
+An older Go is switched up to it automatically, but a newer one is used
+as-is, standard library included. So build with the latest patch release of
+whichever Go line you have: `go1.26.11`+ or `go1.27.4`+ as of this writing.
+Releases after v0.4.0 are built with exactly the pinned toolchain. v0.4.0
+predates the pin: it was built with go1.25.12 and carries the standard-library
+vulnerabilities listed in the [changelog](CHANGELOG.md), so upgrade from it.
+The version is baked in from the git tag:
 
 ```sh
 make build   # produces ./janus

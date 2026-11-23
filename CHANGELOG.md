@@ -14,9 +14,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Clone-URL redaction no longer leaks the tail of a password containing a raw `@`** — redaction stopped at the *first* `@` of the userinfo, but URL parsers and git split at the *last*. So `https://user:pa@ss@host/…`, where the password holds an unencoded `@`, came out of a single pass as `https://ss@host/…`, exposing the end of the password. The runner's checkout-failure log line redacts only once. Redaction now runs to the last `@` of the authority, and an `ssh://` username is kept only when it is one plain name (no `:`, no further `@`). The authority now also ends at `?` and `#`, which fixes a second, cosmetic bug: an `@` in a query or fragment (`https://host?x=a@b`) was mistaken for userinfo and took the host with it.
 
-- **Builds are pinned to a patched Go toolchain** — the 2026-08-13 Go security release fixes six standard-library vulnerabilities that govulncheck reports as reachable from Janus code (GO-2026-5026, GO-2026-5972, GO-2026-6089, GO-2026-6090, GO-2026-6091, GO-2026-6218 — `net/http`, `crypto/tls`, `html/template`, `encoding/asn1` among them), affecting every release line: fixed in go1.25.13 and go1.26.6. This was the new govulncheck workflow's first catch, on its first pull request. `go.mod` now carries the pair `go 1.25.13` + `toolchain go1.26.6`: the `go` directive alone is only a *floor*, so a newer-but-vulnerable installed toolchain (go1.26.5, say) satisfies it and is silently selected under `GOTOOLCHAIN=auto` — the `toolchain` directive is what forces every build (CI, the release workflow, local) onto go1.26.6 or newer, downloading it when the local install is older. Only an explicit `GOTOOLCHAIN=local` opts out. ⚠️ The published **v0.4.0 binaries were built with go1.25.12** and carry the affected stdlib; upgrade to the next release once it is cut.
+- **The Go toolchain pin moves to go1.26.11, fixing 13 more reachable standard-library vulnerabilities** — govulncheck reports these as reachable from Janus code in the previous pin, go1.26.6:
+  - `net/http`: GO-2026-6603, -6605, -6610, -6611, -6612, -6613, -6617, -6859
+  - `html/template`: GO-2026-6599, -6600
+  - `crypto/tls`: GO-2026-6607
+  - `net/textproto`: GO-2026-6608
+  - `crypto/x509`: GO-2026-6809
+
+  These are fixed across go1.26.9, go1.26.10 and go1.26.11. go1.26.11 and go1.27.4 both scan clean.
+
+  The scheduled govulncheck workflow flagged the first eleven in October, but nobody saw it. GitHub had disabled the workflow for repository inactivity: it turns off scheduled workflows after 60 days without pushes, and a disabled workflow also skips its push and pull-request triggers. Re-enable it with `gh workflow enable govulncheck.yml` whenever the repository has been quiet, then run it right away with `gh workflow run govulncheck.yml`; the workflow now accepts manual runs.
+
+  The `go 1.25.13` floor is unchanged, but it no longer gives any protection. Go 1.25 is end-of-life, and go1.25.14 still carries all 13.
+
+  The `toolchain` directive keeps **CI and release builds** patched, because setup-go installs exactly the pinned go1.26.11. For **local builds the pin is only a minimum**. Under the default `GOTOOLCHAIN=auto`, an older installed Go is switched up to go1.26.11, but a *newer* one is used as-is, along with its standard library. If you build from source, use **go1.26.11+ on the 1.26 line or go1.27.4+ on the 1.27 line**: go1.27.0 carries all 13, and go1.27.3 still carries GO-2026-6859.
+
+  ⚠️ The **v0.4.0 binaries** were built with go1.25.12 and carry these too.
+
+- **Builds are pinned to a patched Go toolchain** (pin since raised to go1.26.11, above) — the 2026-08-13 Go security release fixes six standard-library vulnerabilities that govulncheck reports as reachable from Janus code (GO-2026-5026, GO-2026-5972, GO-2026-6089, GO-2026-6090, GO-2026-6091, GO-2026-6218 — `net/http`, `crypto/tls`, `html/template`, `encoding/asn1` among them), affecting every release line: fixed in go1.25.13 and go1.26.6. This was the new govulncheck workflow's first catch, on its first pull request. `go.mod` now carries the pair `go 1.25.13` + `toolchain go1.26.6`: the `go` directive alone is only a *floor*, so a newer-but-vulnerable installed toolchain (go1.26.5, say) satisfies it and is silently selected under `GOTOOLCHAIN=auto` — the `toolchain` directive is what forces every build (CI, the release workflow, local) onto go1.26.6 or newer, downloading it when the local install is older. Only an explicit `GOTOOLCHAIN=local` opts out. ⚠️ The published **v0.4.0 binaries were built with go1.25.12** and carry the affected stdlib; upgrade to the next release once it is cut.
 
 ### Changed
+
+- **CI tool pins bumped: golangci-lint v2.12.2 → v2.15.0, govulncheck v1.7.0 → v1.10.0.** Dependabot moves the SHA-pinned actions but not these version strings, so they drift unless bumped by hand. govulncheck v1.10.0 needs Go 1.26 or newer to build, which the toolchain pin guarantees.
 
 - **`ssh://` clone URLs keep their username in logs, the runs API, the dashboard, and notifications** — credential redaction used to drop *all* userinfo, so a run triggered from `ssh://git@host:2222/group/app.git` was logged as `ssh://host:2222/group/app.git`. That made a correct clone URL look like the cause of an unrelated SSH failure, since git connects as a different account without the `git@`. SSH authenticates with keys, so the username of an `ssh`/`git+ssh`/`ssh+git` URL is now kept. A password on such a URL (`ssh://git:pw@host/…`) still drops the whole userinfo, and every other scheme still loses even a bare username, because over HTTP(S) that slot can hold a token (`https://oauth2@…`, `https://<token>@…`).
 
