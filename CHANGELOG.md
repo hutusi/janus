@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Startup warning when ssh cannot reach the service account's `~/.ssh`** — with `clone_url: "ssh"`, `janus serve` now checks the account's `~/.ssh` and logs a warning naming the directory when it is missing or inaccessible. The [SSH clone URLs](docs/configuration.md#ssh-clone-urls) failure it targets used to show up only on the first webhook, as a `Host key verification failed` from a mirror sync or checkout. The cause was a `janus` account created with its home under `/home` (`useradd -m`), which the packaged unit's `ProtectHome=true` hides. OpenSSH resolves `~/.ssh` from the passwd entry, not `$HOME`, so the home the service sees can't be fixed with `HOME=`. The check follows ssh: it looks in the passwd home, shows `$HOME` alongside when the two differ, and stays quiet when `GIT_SSH_COMMAND`/`GIT_SSH` is set, since that command may keep its key elsewhere.
+
 ### Security
 
 - **Builds are pinned to a patched Go toolchain** — the 2026-08-13 Go security release fixes six standard-library vulnerabilities that govulncheck reports as reachable from Janus code (GO-2026-5026, GO-2026-5972, GO-2026-6089, GO-2026-6090, GO-2026-6091, GO-2026-6218 — `net/http`, `crypto/tls`, `html/template`, `encoding/asn1` among them), affecting every release line: fixed in go1.25.13 and go1.26.6. This was the new govulncheck workflow's first catch, on its first pull request. `go.mod` now carries the pair `go 1.25.13` + `toolchain go1.26.6`: the `go` directive alone is only a *floor*, so a newer-but-vulnerable installed toolchain (go1.26.5, say) satisfies it and is silently selected under `GOTOOLCHAIN=auto` — the `toolchain` directive is what forces every build (CI, the release workflow, local) onto go1.26.6 or newer, downloading it when the local install is older. Only an explicit `GOTOOLCHAIN=local` opts out. ⚠️ The published **v0.4.0 binaries were built with go1.25.12** and carry the affected stdlib; upgrade to the next release once it is cut.

@@ -215,6 +215,13 @@ as the service user, with the SSH URL — that is what Janus will now clone:
 sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git
 ```
 
+With `clone_url: "ssh"`, `janus serve` checks at startup that the service
+account's `~/.ssh` exists and is reachable, and if not, it logs a warning that
+names the directory. That surfaces a sandbox hiding the account's home in the
+journal before the first webhook fails. The check is skipped when
+`GIT_SSH_COMMAND` or `GIT_SSH` is set, because a custom ssh command may keep
+its key and `known_hosts` elsewhere.
+
 If the platform omits `git_ssh_url` from its payload, the delivery fails with
 `400` naming the missing field rather than quietly cloning over HTTPS.
 
