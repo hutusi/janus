@@ -108,6 +108,14 @@ func TestSSHHomeProbe(t *testing.T) {
 			wantAttrs: []string{"dir", "err"},
 		},
 		{
+			// ssh can't load host keys from a directory; the mode says so
+			// without opening anything.
+			name:      "directory at known_hosts",
+			entries:   map[string]fakeEntry{dir: sshDir, kh: sshDir},
+			want:      inaccessible,
+			wantAttrs: []string{"dir", "err"},
+		},
+		{
 			// Opening a FIFO with no writer blocks: never open special files.
 			name:    "FIFO known_hosts is not opened",
 			entries: map[string]fakeEntry{dir: sshDir, kh: {info: fakeInfo(fs.ModeNamedPipe | 0o600)}},

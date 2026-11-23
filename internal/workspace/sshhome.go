@@ -189,9 +189,10 @@ func (p sshHomeProbe) diagnose() (string, []any) {
 
 // knownHostsReadable reports whether ssh could read path. Stat comes first:
 // it fails with a permission error when the directory can't be searched,
-// which a stat of the directory itself does not catch. Only a regular file is
-// then opened to test read permission. Opening a FIFO with no writer would
-// block, so special files aren't opened. A missing known_hosts is fine:
+// which a stat of the directory itself does not catch. A directory is
+// reported from its mode. Only a regular file is opened, to test read
+// permission. Opening a FIFO with no writer would block, so other special
+// files are let through unopened. A missing known_hosts is fine:
 // /etc/ssh/ssh_known_hosts may hold the host key.
 func (p sshHomeProbe) knownHostsReadable(path string) error {
 	info, err := p.stat(path)
@@ -200,6 +201,10 @@ func (p sshHomeProbe) knownHostsReadable(path string) error {
 		return nil
 	case err != nil:
 		return err
+	case info.IsDir():
+		// ssh can't load host keys from a directory. Stat alone says so,
+		// with no blocking open needed.
+		return fmt.Errorf("%s is a directory", path)
 	case !info.Mode().IsRegular():
 		return nil
 	}
