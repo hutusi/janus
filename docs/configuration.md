@@ -223,13 +223,18 @@ as the service user, with the SSH URL (that is what Janus will now clone), and
 `ProtectHome`, so it passes on a host where the service still fails:
 
 ```sh
-sudo systemd-run --wait --pipe -p User=janus -p ProtectHome=true -p PrivateTmp=true \
+sudo systemd-run --wait --pipe -p User=janus \
+  -p ProtectHome=true -p ProtectSystem=full -p PrivateTmp=true -p NoNewPrivileges=true \
   -p EnvironmentFile=-/etc/janus/janus.env -E GIT_TERMINAL_PROMPT=0 \
   git ls-remote git@gitlab.example.com:acme/app.git </dev/null
 ```
 
 This checks the **sandbox and credentials**: the home ssh can see, the key,
-and `known_hosts`. The command loads the service's environment file and
+and `known_hosts`. It applies the packaged unit's filesystem and privilege
+restrictions (`ProtectHome`, `ProtectSystem`, `PrivateTmp`,
+`NoNewPrivileges`), so a custom ssh wrapper that writes somewhere the unit
+makes read-only fails here too. Adjust the list if you changed the unit. The
+command loads the service's environment file and
 doesn't override the ssh transport, so a `GIT_SSH_COMMAND` in `janus.env` or a
 `core.sshCommand` in the account's gitconfig is used if you configured one. A
 transient unit has no terminal, and stdin is `/dev/null`, so a missing

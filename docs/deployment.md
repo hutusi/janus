@@ -285,11 +285,18 @@ on install and upgrade. Move the home to the state directory:
 getent passwd janus                       # sixth field: /home/janus
 sudo systemctl stop janus
 sudo usermod -d /var/lib/janus janus
+# The copy below overwrites same-named files (id_ed25519, known_hosts). If
+# /var/lib/janus/.ssh already exists, perhaps provisioned per these docs, back it up:
+sudo test -d /var/lib/janus/.ssh && sudo cp -a /var/lib/janus/.ssh "/var/lib/janus/ssh.bak.$(date +%Y%m%d%H%M%S)"
 sudo install -d -m700 -o janus -g janus /var/lib/janus/.ssh
 sudo cp -a /home/janus/.ssh/. /var/lib/janus/.ssh/
 sudo chown -R janus:janus /var/lib/janus/.ssh
 # also carry over /home/janus/.gitconfig (safe.directory etc.) if there is one
 ```
+
+If a backup was made, compare it with the copied files and merge back anything
+you still need, such as `known_hosts` lines for other hosts, or a different key
+the service actually used.
 
 Before starting the service again, make sure `known_hosts` has the git
 server's key, and that you have **verified** the key: once a key is in that
