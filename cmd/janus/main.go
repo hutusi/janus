@@ -254,7 +254,12 @@ func buildServe(args []string, logw io.Writer) (*serveComponents, error) {
 	// otherwise only surfaces as "Host key verification failed" on the first
 	// webhook. Say so now.
 	if cfg.CloneURL == "ssh" {
-		if msg, attrs := sshHomeCheck(os.Environ()); msg != "" {
+		// The probe may ask git about core.sshCommand; never let a wedged git
+		// delay startup.
+		pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		msg, attrs := sshHomeCheck(pctx, os.Environ())
+		pcancel()
+		if msg != "" {
 			logger.Warn(msg, attrs...)
 		}
 	}

@@ -274,7 +274,7 @@ func TestBuildServeSSHHomeCheck(t *testing.T) {
 	}{{"ssh", true}, {"http", false}} {
 		t.Run(tc.cloneURL, func(t *testing.T) {
 			called := false
-			sshHomeCheck = func([]string) (string, []any) {
+			sshHomeCheck = func(context.Context, []string) (string, []any) {
 				called = true
 				return "stub ssh home warning", []any{"dir", "/home/x/.ssh"}
 			}

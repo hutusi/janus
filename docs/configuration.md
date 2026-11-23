@@ -227,11 +227,16 @@ sudo systemd-run --wait --pipe -p User=janus -p ProtectHome=true -p PrivateTmp=t
 ```
 
 With `clone_url: "ssh"`, `janus serve` checks at startup that the service
-account's `~/.ssh` exists and is reachable, and if not, it logs a warning that
-names the directory. That surfaces a sandbox hiding the account's home in the
-journal before the first webhook fails. The check is skipped when
-`GIT_SSH_COMMAND` or `GIT_SSH` is set, because a custom ssh command may keep
-its key and `known_hosts` elsewhere.
+account's `~/.ssh` exists and that ssh can read `known_hosts` inside it. If
+not, it logs a warning naming the directory. That puts a sandbox hiding the
+account's home, or a `.ssh` the account doesn't own, in the journal before the
+first webhook fails. Like ssh, the check takes the home from the account
+database (`getent passwd`), never `$HOME`. It is skipped when the account
+can't be looked up, or when `GIT_SSH_COMMAND`, `GIT_SSH`, or a system or global
+`core.sshCommand` is set, since a custom ssh command may keep its key and
+`known_hosts` elsewhere. A `core.sshCommand` scoped to checkouts with
+`includeIf "gitdir:"` can't be seen at startup, so the warning says it may not
+apply.
 
 If the platform omits `git_ssh_url` from its payload, the delivery fails with
 `400` naming the missing field rather than quietly cloning over HTTPS.
