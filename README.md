@@ -23,7 +23,7 @@ Download the static binary for your platform from the
 curl -fsSL -o janus \
   https://github.com/hutusi/janus/releases/latest/download/janus-linux-amd64
 chmod +x janus
-./janus version   # janus v0.4.0 (0210cb6)
+./janus version   # janus v0.4.1 (157ce52)
 ```
 
 Verify the download against `checksums.txt` from the same release (integrity, not
@@ -88,7 +88,7 @@ make build
 
 # In another shell
 curl -s localhost:8080/healthz
-# {"status":"ok","version":"v0.4.0 (0210cb6)"}
+# {"status":"ok","version":"v0.4.1 (157ce52)"}
 # Open the dashboard at http://localhost:8080/
 ```
 
