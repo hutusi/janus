@@ -294,9 +294,11 @@ sudo chown -R janus:janus /var/lib/janus/.ssh
 # also carry over /home/janus/.gitconfig (safe.directory etc.) if there is one
 ```
 
-If a backup was made, compare it with the copied files and merge back anything
-you still need, such as `known_hosts` lines for other hosts, or a different key
-the service actually used.
+If a backup was made, resolve any conflicts **before starting the service**
+again. Compare the backup with the copied files and merge back anything you
+still need, such as `known_hosts` lines for other hosts, or a different key the
+service actually used. The service stays stopped until the last step below, so
+nothing runs with a half-merged `~/.ssh`.
 
 Before starting the service again, make sure `known_hosts` has the git
 server's key, and that you have **verified** the key: once a key is in that
