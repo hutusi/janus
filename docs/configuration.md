@@ -226,11 +226,16 @@ sudo systemd-run --wait --pipe -p User=janus -p ProtectHome=true -p PrivateTmp=t
   git ls-remote git@gitlab.example.com:acme/app.git </dev/null
 ```
 
-The command loads the service's environment file and doesn't override the ssh
-transport. ssh therefore runs the way a checkout would: with a
-`GIT_SSH_COMMAND` set in `janus.env`, or a `core.sshCommand` in the account's
-gitconfig, if you configured one. A transient unit has no terminal, and stdin
-is `/dev/null`, so a missing `known_hosts` entry fails instead of prompting.
+This checks the **sandbox and credentials**: the home ssh can see, the key,
+and `known_hosts`. The command loads the service's environment file and
+doesn't override the ssh transport, so a `GIT_SSH_COMMAND` in `janus.env` or a
+`core.sshCommand` in the account's gitconfig is used if you configured one. A
+transient unit has no terminal, and stdin is `/dev/null`, so a missing
+`known_hosts` entry fails instead of prompting. It does **not** reproduce
+Janus's network bounds. When no transport is configured, Janus adds
+`BatchMode=yes`, a 10 s connect timeout, and keepalives; this command uses
+plain ssh. So an unreachable host takes the system TCP timeout to fail here,
+where a checkout fails in about 10 s.
 
 With `clone_url: "ssh"`, `janus serve` checks at startup that the service
 account's `~/.ssh` exists and that ssh can read `known_hosts` inside it. If

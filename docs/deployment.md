@@ -298,10 +298,11 @@ and append only after they match. On a non-default SSH port the entry is keyed
 `[host]:port`, so scan with the port:
 
 ```sh
-ssh-keyscan -p 2222 git.example.com > /tmp/git-host-keys
-ssh-keygen -lf /tmp/git-host-keys         # compare every fingerprint before going on
-sudo -u janus tee -a /var/lib/janus/.ssh/known_hosts < /tmp/git-host-keys >/dev/null
-rm /tmp/git-host-keys
+hk=$(mktemp)                              # private (0600), unpredictable name
+ssh-keyscan -p 2222 git.example.com > "$hk"
+ssh-keygen -lf "$hk"                      # compare every fingerprint before going on
+sudo -u janus tee -a /var/lib/janus/.ssh/known_hosts < "$hk" >/dev/null
+rm -f "$hk"
 sudo systemctl start janus
 ```
 
