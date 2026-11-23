@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The scheduled govulncheck workflow flagged the first eleven in October, but nobody saw it. GitHub had disabled the workflow for repository inactivity: it turns off scheduled workflows after 60 days without pushes, and a disabled workflow also skips its push and pull-request triggers. Re-enable it with `gh workflow enable govulncheck.yml` whenever the repository has been quiet.
 
-  The `go 1.25.13` floor is unchanged, but it no longer gives any protection. Go 1.25 is end-of-life, and go1.25.14 still carries all 13. The `toolchain` directive is what keeps builds patched.
+  The `go 1.25.13` floor is unchanged, but it no longer gives any protection. Go 1.25 is end-of-life, and go1.25.14 still carries all 13.
+
+  The `toolchain` directive keeps **CI and release builds** patched, because setup-go installs exactly the pinned go1.26.11. For **local builds the pin is only a minimum**. Under the default `GOTOOLCHAIN=auto`, an older installed Go is switched up to go1.26.11, but a *newer* one is used as-is, along with its standard library. If you build from source, use **go1.26.11+ on the 1.26 line or go1.27.4+ on the 1.27 line**: go1.27.0 carries all 13, and go1.27.3 still carries GO-2026-6859.
 
   ⚠️ The **v0.4.0 binaries** were built with go1.25.12 and carry these too.
 
