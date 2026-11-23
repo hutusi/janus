@@ -70,7 +70,9 @@ Options:
   --binary <path>      install this local binary and make no network access at all
                        (build it first with 'make build'); skips --version
   --version <vX.Y.Z>   install a specific release (default: latest)
-  --addr <host:port>   listen address (default: 127.0.0.1:8080)
+  --addr <host:port>   listen address written to a new janus.yml, and the address
+                       the health check probes (default: 127.0.0.1:8080); pass it
+                       on upgrade too if your janus.yml uses a different addr
   --prefix <dir>       install the binary here (default: /usr/local/bin)
   --no-gen-secrets     do not auto-generate secrets; leave janus.env blank
   --purge              with uninstall: also remove config/secrets, run history,
@@ -313,6 +315,20 @@ install_unit() {
 	run systemctl daemon-reload
 }
 
+# health_url: the /healthz URL for $ADDR. A wildcard listen host isn't a URL
+# host: `:9090`, the form Janus's own example config uses, would make
+# http://:9090/healthz, which curl rejects. A wildcard bind accepts
+# loopback, so use that.
+health_url() {
+	probe="$ADDR"
+	case "$probe" in
+	:*) probe="127.0.0.1$probe" ;;
+	0.0.0.0:*) probe="127.0.0.1:${probe#0.0.0.0:}" ;;
+	"[::]:"*) probe="[::1]:${probe#"[::]:"}" ;;
+	esac
+	printf 'http://%s/healthz' "$probe"
+}
+
 verify_service() {
 	log "verifying service"
 	# An inactive service is an install failure regardless of what the HTTP
@@ -321,7 +337,7 @@ verify_service() {
 	if ! run systemctl is-active janus; then
 		err "janus.service is not active — inspect with: journalctl -u janus -e"
 	fi
-	url="http://$ADDR/healthz"
+	url=$(health_url)
 	if [ "$DRY_RUN" -eq 1 ]; then
 		printf "+ curl -fsS --noproxy '*' %s\n" "$url"
 		return
@@ -346,7 +362,7 @@ verify_service() {
 	done
 	# curl is present but the service never answered in 10s — it is active but
 	# not serving. Fail the install rather than let the summary claim success.
-	err "healthz did not respond at $url after 10s — the service is active but not serving; inspect with: journalctl -u janus -e"
+	err "healthz did not respond at $url after 10s — the service is active but not serving there. If janus.yml sets a different addr, re-run with --addr <host:port> (make: INSTALL_FLAGS=\"--addr <host:port>\"); otherwise inspect with: journalctl -u janus -e"
 }
 
 # Reverse of install: stop and remove the service and binary. Keeps the config
@@ -396,7 +412,7 @@ Next steps (not automated — see docs/deployment.md):
 Handy commands:
   systemctl status janus
   journalctl -u janus -f
-  curl -s http://$ADDR/healthz
+  curl -s $(health_url)
 EOF
 }
 

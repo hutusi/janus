@@ -276,7 +276,9 @@ The health check probes `127.0.0.1:8080` unless told otherwise, and the
 installer doesn't read your `janus.yml`. If you changed `addr`, pass it, or the
 probe reports a failed upgrade, or answers from whatever else holds that port:
 `make upgrade-service INSTALL_FLAGS="--addr 127.0.0.1:9090"` (or `--addr` to
-`install.sh`). Give a host the probe can reach (not `:9090`). The probe prints
+`install.sh`). Give a host the probe can reach. The installer from this
+checkout also turns a wildcard host (`:9090`, `0.0.0.0:9090`, `[::]:9090`) into
+loopback, but the installers in v0.4.1 and earlier do not. The probe prints
 the `/healthz` body. Check that it names the new version.
 
 **Check the Go version you built with.** For a source build, the `toolchain`

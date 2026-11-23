@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Re-running the installer over a running service no longer looks like an upgrade.** Install mode ends with `systemctl enable --now janus`, which starts a stopped service but leaves a running one alone. Repeating `make build && make install-service` to upgrade therefore replaced the binary on disk while the old process kept serving, and the run still ended in a success summary. Install mode still doesn't restart a running service: a restart cancels builds that outlast the 30 s drain, and loading a new build is `upgrade`'s job, which always restarts. But it now ends with a warning that Janus was already running and was **not** restarted, naming `make upgrade-service` and `systemctl restart janus`. An earlier draft that decided automatically whether to restart was dropped. Its edge cases (re-runs, interrupted and concurrent runs) kept multiplying, and an explicit command has none.
 
+- **The installer's health check accepts a wildcard `--addr`.** `--addr :9090`, the form Janus's own example config uses, made the probe URL `http://:9090/healthz`, which curl rejects, so a healthy service was reported as failed. A wildcard host (`:port`, `0.0.0.0:port`, `[::]:port`) is now probed over loopback, and the closing summary prints the same usable URL. The failure message also suggests `--addr` when the service listens elsewhere.
+
 ## [0.4.1] - 2026-11-23
 
 **Security release — upgrade from v0.4.0.** The published v0.4.0 binaries were built with go1.25.12, and govulncheck finds 21 known Go standard-library vulnerabilities in them. This release is built with go1.26.11, which has none. It also fixes a credential-redaction leak, below.
