@@ -192,9 +192,28 @@ download_binary() {
 create_user() {
 	if id "$USER_NAME" >/dev/null 2>&1; then
 		log "user '$USER_NAME' already exists"
+		check_user_home
 		return
 	fi
 	run useradd --system --home-dir "$STATE_DIR" --shell /usr/sbin/nologin "$USER_NAME"
+}
+
+# check_user_home: warn when an existing service account's home is one the
+# unit's ProtectHome=true hides (an account made earlier with `useradd -m`).
+# ssh resolves ~/.ssh from the passwd entry, not $HOME, so inside the service
+# it cannot read its own key or known_hosts, and every SSH checkout fails with
+# "Host key verification failed". Read-only: re-homing an account is the
+# operator's call, so this only says how.
+check_user_home() {
+	command -v getent >/dev/null 2>&1 || return 0
+	user_home=$(getent passwd "$USER_NAME" | cut -d: -f6)
+	case "$user_home" in
+	/home | /home/* | /root | /root/* | /run/user | /run/user/*) ;;
+	*) return 0 ;;
+	esac
+	warn "user '$USER_NAME' has home $user_home, which the unit's ProtectHome=true hides from the service."
+	warn "ssh reads its key and known_hosts from the passwd home (not \$HOME), so SSH clones that rely on files in $user_home/.ssh will fail with 'Host key verification failed'."
+	warn "if yours do: systemctl stop janus; usermod -d $STATE_DIR $USER_NAME; move $user_home/.ssh (and .gitconfig) into $STATE_DIR. See docs/deployment.md#troubleshooting."
 }
 
 # Emit the allow_repos YAML block from the collected --allow-repo values, or a
@@ -452,6 +471,7 @@ fi
 provision_binary
 
 if [ "$MODE" = "upgrade" ]; then
+	check_user_home
 	install_unit
 	run systemctl restart janus
 	verify_service

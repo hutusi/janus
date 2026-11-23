@@ -184,8 +184,17 @@ design.
 
 Janus still manages no credentials. The **service user** needs a passphrase-less
 key and a pre-seeded `known_hosts` (a background service cannot answer SSH's
-trust prompt) — with the packaged unit that is `/var/lib/janus/.ssh/`, since
-`$HOME` is `/var/lib/janus`. See [deployment](deployment.md). Janus enforces
+trust prompt) in the `.ssh/` of the account's **passwd home**
+(`getent passwd janus`, sixth field). With the packaged unit that home must be
+`/var/lib/janus`, so the files go in `/var/lib/janus/.ssh/`. ssh resolves `~`
+from the passwd entry, not `$HOME`, so setting `HOME` does not move them. If
+the account's home is under `/home`, the unit's `ProtectHome` hides it, and SSH
+clones that rely on a key or `known_hosts` there fail. (One configured to use
+files elsewhere, through a custom `core.sshCommand` or `GIT_SSH_COMMAND`, is
+unaffected.) See
+[deployment › Troubleshooting](deployment.md#ssh-clone-fails-known_hosts-permission-denied).
+On a non-default SSH port the `known_hosts` entry is keyed `[host]:port`, so
+scan with the port: `ssh-keyscan -p 2222 git.example.com`. Janus enforces
 this: checkout git runs with `GIT_TERMINAL_PROMPT=0` and, when the operator
 has configured **nothing** for the transport (no `GIT_SSH_COMMAND`/`GIT_SSH`
 in the service environment, no `core.sshCommand` in the service user's
@@ -209,11 +218,47 @@ Host keys are deliberately still verified; nothing is auto-accepted. Anything
 you configure yourself — `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
 `core.sshCommand`, `core.askpass` — is respected verbatim and must itself be
 non-interactive (include `-o BatchMode=yes` in a custom ssh command). Verify
-as the service user, with the SSH URL — that is what Janus will now clone:
+as the service user, with the SSH URL (that is what Janus will now clone), and
+**inside the service's sandbox and environment**. `sudo -u janus` applies no
+`ProtectHome`, so it passes on a host where the service still fails:
 
 ```sh
-sudo -u janus env HOME=/var/lib/janus git ls-remote git@gitlab.example.com:acme/app.git
+sudo systemd-run --wait --pipe -p User=janus \
+  -p ProtectHome=true -p ProtectSystem=full -p PrivateTmp=true -p NoNewPrivileges=true \
+  -p EnvironmentFile=-/etc/janus/janus.env -E GIT_TERMINAL_PROMPT=0 \
+  git ls-remote git@gitlab.example.com:acme/app.git </dev/null
 ```
+
+This checks the **sandbox and credentials**: the home ssh can see, the key,
+and `known_hosts`. It applies the packaged unit's filesystem and privilege
+restrictions (`ProtectHome`, `ProtectSystem`, `PrivateTmp`,
+`NoNewPrivileges`), so a custom ssh wrapper that writes somewhere the unit
+makes read-only fails here too. Adjust the list if you changed the unit. The
+command loads the service's environment file and
+doesn't override the ssh transport, so a `GIT_SSH_COMMAND` in `janus.env` or a
+`core.sshCommand` in the account's gitconfig is used if you configured one. A
+transient unit has no terminal, and stdin is `/dev/null`, so a missing
+`known_hosts` entry fails instead of prompting. It does **not** reproduce
+Janus's network bounds. When no transport is configured, Janus adds
+`BatchMode=yes`, a 10 s connect timeout, and keepalives; this command uses
+plain ssh. So an unreachable host takes the system TCP timeout to fail here,
+where a checkout fails in about 10 s.
+
+With `clone_url: "ssh"`, `janus serve` checks at startup that the service
+account's `~/.ssh` exists and that ssh can read `known_hosts` inside it. If
+not, it logs a warning naming the directory. That puts a sandbox hiding the
+account's home, or a `.ssh` the account doesn't own, in the journal before the
+first webhook fails. The warning reports what was found, not a prediction:
+ssh can still succeed through an agent (`SSH_AUTH_SOCK`), the global
+`/etc/ssh/ssh_known_hosts`, or a `core.sshCommand` scoped with
+`includeIf "gitdir:"`, none of which the check can see. Like ssh, it takes the
+home from the account database, never from `$HOME`: through `getent passwd` on
+Linux, and the native lookup on macOS. It is skipped on Windows, where which
+home ssh reads depends on which ssh git runs. It is also skipped when the
+account can't be looked up, and when `GIT_SSH_COMMAND`, `GIT_SSH`, or a system
+or global `core.sshCommand` is set, since a custom ssh command may keep its key
+and `known_hosts` elsewhere. It never delays startup by more than a few
+seconds, even on a hung network home.
 
 If the platform omits `git_ssh_url` from its payload, the delivery fails with
 `400` naming the missing field rather than quietly cloning over HTTPS.

@@ -99,6 +99,13 @@ sudo useradd --system --home-dir /var/lib/janus --shell /usr/sbin/nologin janus
 `/var/lib/janus` itself is created and owned automatically by the unit's
 `StateDirectory=janus` — no manual `mkdir`/`chown` needed.
 
+If a `janus` account already exists (one made with `useradd -m`, say), check its
+home with `getent passwd janus`. It should be `/var/lib/janus`, because the
+unit hides `/home`, and SSH clones that rely on the account's `~/.ssh` would
+fail. See
+[Troubleshooting](#ssh-clone-fails-known_hosts-permission-denied).
+`deploy/install.sh` warns about this on install and upgrade.
+
 ## 3. Configure
 
 Create the config directory and write `/etc/janus/janus.yml`. Start from
@@ -257,6 +264,63 @@ Both variants support `--dry-run` to preview every action first.
 
 ## Troubleshooting
 
+### SSH clone fails: known_hosts Permission denied
+
+With `clone_url: "ssh"`, every checkout fails (a mirror sync logs
+`mirror sync failed; using direct checkout`, then the direct checkout fails
+too) with:
+
+```
+hostkeys_find_by_key_hostfile: hostkeys_foreach failed for /home/janus/.ssh/known_hosts: Permission denied
+Host key verification failed.
+```
+
+The `janus` account's home is under `/home`, which the unit's
+`ProtectHome=true` hides from the service. ssh takes `~/.ssh` from the passwd
+entry, not `$HOME`, so it cannot open its own `known_hosts`. At startup,
+`janus serve` logs a warning naming the directory, and `deploy/install.sh` warns
+on install and upgrade. Move the home to the state directory:
+
+```sh
+getent passwd janus                       # sixth field: /home/janus
+sudo systemctl stop janus
+sudo usermod -d /var/lib/janus janus
+# The copy below overwrites same-named files (id_ed25519, known_hosts). If
+# /var/lib/janus/.ssh already exists, perhaps provisioned per these docs, back it up:
+sudo test -d /var/lib/janus/.ssh && sudo cp -a /var/lib/janus/.ssh "/var/lib/janus/ssh.bak.$(date +%Y%m%d%H%M%S)"
+sudo install -d -m700 -o janus -g janus /var/lib/janus/.ssh
+sudo cp -a /home/janus/.ssh/. /var/lib/janus/.ssh/
+sudo chown -R janus:janus /var/lib/janus/.ssh
+# also carry over /home/janus/.gitconfig (safe.directory etc.) if there is one
+```
+
+If a backup was made, resolve any conflicts **before starting the service**
+again. Compare the backup with the copied files and merge back anything you
+still need, such as `known_hosts` lines for other hosts, or a different key the
+service actually used. The service stays stopped until the last step below, so
+nothing runs with a half-merged `~/.ssh`.
+
+Before starting the service again, make sure `known_hosts` has the git
+server's key, and that you have **verified** the key: once a key is in that
+file, every checkout trusts it. Scan into a scratch file, compare the
+fingerprints with the ones your git server publishes (its admin docs or admin),
+and append only after they match. On a non-default SSH port the entry is keyed
+`[host]:port`, so scan with the port:
+
+```sh
+hk=$(mktemp)                              # private (0600), unpredictable name
+ssh-keyscan -p 2222 git.example.com > "$hk"
+ssh-keygen -lf "$hk"                      # compare every fingerprint before going on
+sudo -u janus tee -a /var/lib/janus/.ssh/known_hosts < "$hk" >/dev/null
+rm -f "$hk"
+sudo systemctl start janus
+```
+
+Then verify inside the sandbox, as described in
+[SSH clone URLs](configuration.md#ssh-clone-urls) (`systemd-run … -p ProtectHome=true
+git ls-remote …`). Don't relax the unit to `ProtectHome=read-only` instead: that
+re-exposes every user's home to pipeline steps and leaves `$HOME` unwritable.
+
 ### git "dubious ownership" when triggering a local repository
 
 A trigger whose `repo_url` is a **local path** can fail with:
@@ -296,9 +360,12 @@ mind:
 - **`NoNewPrivileges=true` blocks `sudo`** inside pipeline steps. That is
   intentional — a CI job should not escalate. Drop it only if a trusted pipeline
   genuinely needs it.
-- **`$HOME` is `/var/lib/janus`** (the service user's home), which stays writable
-  under the sandbox, so tool caches and `git config` work. `/home` and `/root`
-  are hidden.
+- **The service account's home must be `/var/lib/janus`**, which stays writable
+  under the sandbox, so tool caches, `git config`, and ssh's `~/.ssh` work.
+  `/home` and `/root` are hidden. Because ssh resolves `~/.ssh` from the passwd
+  entry rather than `$HOME`, an account whose home is under `/home` can't use
+  a key or `known_hosts` there for SSH clones
+  ([Troubleshooting](#ssh-clone-fails-known_hosts-permission-denied)).
 - **Stay behind the loopback bind + proxy** from step 3 so the unprotected
   dashboard and read `/api` endpoints are not exposed directly.
 - **The `allow_repos` allowlist is your last line of defence** if a webhook

@@ -48,6 +48,11 @@ var (
 	commit  = ""
 )
 
+// sshHomeCheck is the startup probe for clone_url "ssh". It is a variable so
+// tests can stub it: the real check reads the machine's account database and
+// filesystem, which no test controls.
+var sshHomeCheck = workspace.SSHHomeWarning
+
 // versionString is the human-facing form, e.g. "v0.2.0 (f97e513)" — shown by
 // `janus version`, the dashboard header, and /healthz. Builds that bypass the
 // Makefile/release ldflags (plain go build/install) fall back to the metadata
@@ -244,6 +249,19 @@ func buildServe(args []string, logw io.Writer) (*serveComponents, error) {
 		logger.Warn("allowing ALL repositories (allow_repos contains '*')")
 	default:
 		logger.Info("repo allowlist active", "entries", len(allow))
+	}
+	// SSH checkouts need the account's ~/.ssh, and a sandbox that hides it
+	// otherwise only surfaces as "Host key verification failed" on the first
+	// webhook. Say so now.
+	if cfg.CloneURL == "ssh" {
+		// The probe may ask git about core.sshCommand; never let a wedged git
+		// delay startup.
+		pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		msg, attrs := sshHomeCheck(pctx, os.Environ())
+		pcancel()
+		if msg != "" {
+			logger.Warn(msg, attrs...)
+		}
 	}
 
 	var st store.Store

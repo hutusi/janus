@@ -262,6 +262,38 @@ func TestBuildServeWarnings(t *testing.T) {
 	}
 }
 
+// The ~/.ssh probe runs only in ssh clone mode — over http it has nothing to
+// say — and whatever it reports reaches the journal as a warning with its
+// attributes.
+func TestBuildServeSSHHomeCheck(t *testing.T) {
+	orig := sshHomeCheck
+	t.Cleanup(func() { sshHomeCheck = orig })
+	for _, tc := range []struct {
+		cloneURL string
+		want     bool
+	}{{"ssh", true}, {"http", false}} {
+		t.Run(tc.cloneURL, func(t *testing.T) {
+			called := false
+			sshHomeCheck = func(context.Context, []string) (string, []any) {
+				called = true
+				return "stub ssh home warning", []any{"dir", "/home/x/.ssh"}
+			}
+			var logs bytes.Buffer
+			args := buildServeArgs(t, writeConfig(t, "addr: \":0\"\n"), "--allow-repos", "*", "--clone-url", tc.cloneURL)
+			if _, err := buildServe(args, &logs); err != nil {
+				t.Fatal(err)
+			}
+			if called != tc.want {
+				t.Errorf("check called = %v, want %v", called, tc.want)
+			}
+			got := strings.Contains(logs.String(), `level=WARN msg="stub ssh home warning" dir=/home/x/.ssh`)
+			if got != tc.want {
+				t.Errorf("logs = %q; want the stub warning logged: %v", logs.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An unreadable run record must not leave the daemon degraded at startup —
 // the end-to-end form of the reconciliation fix.
 func TestBuildServeStartupSurvivesUnreadableRecord(t *testing.T) {
