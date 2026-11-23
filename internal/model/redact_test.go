@@ -16,6 +16,16 @@ func TestRedactURL(t *testing.T) {
 		{"ssh+git://git@host/a.git", "ssh+git://git@host/a.git"},
 		// ...but a password on an SSH URL is still a secret: drop the whole userinfo.
 		{"ssh://git:hunter2@host/a.git", "ssh://host/a.git"},
+		// A raw "@" inside a password: the userinfo runs to the LAST "@", so no
+		// tail of the password survives, on one pass or two.
+		{"ssh://git:pa@ss@host/a.git", "ssh://host/a.git"},
+		{"https://u:pa@ss@host/a.git", "https://host/a.git"},
+		{"ssh://a@b@host:2222/x.git", "ssh://host:2222/x.git"}, // not one plain username
+		// "@" after the authority is not userinfo: path, query, fragment.
+		{"https://host/a@b", "https://host/a@b"},
+		{"https://host?x=a@b", "https://host?x=a@b"},
+		{"https://host#a@b", "https://host#a@b"},
+		{"https://u:p@host/team@corp/repo.git", "https://host/team@corp/repo.git"},
 		{"ssh://host/a.git", "ssh://host/a.git"},
 		// A scheme that merely contains "ssh" is not an SSH scheme.
 		{"sshx://user@host/a.git", "sshx://host/a.git"},
@@ -35,6 +45,12 @@ func TestRedactURL(t *testing.T) {
 		{
 			"git clone ssh://git@h:2222/a.git: exit status 128, then https://t@h/a.git",
 			"git clone ssh://git@h:2222/a.git: exit status 128, then https://h/a.git",
+		},
+		// The greedy userinfo stops at whitespace, so an address later in
+		// the message is not swallowed into a URL's authority.
+		{
+			"clone https://h failed; contact ops@example.com",
+			"clone https://h failed; contact ops@example.com",
 		},
 	}
 	for _, tc := range cases {

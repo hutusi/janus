@@ -7,10 +7,14 @@ import (
 
 // urlUserinfoRe matches the userinfo@ segment of a scheme://-style URL,
 // capturing the scheme (group 1, without "://") and the userinfo (group 2).
-// The userinfo of a valid URL cannot contain an unencoded "/", "@", or
-// whitespace, so the match can never spill past the authority into the path
-// or across separate words of a longer message.
-var urlUserinfoRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*)://([^@/\s]+)@`)
+//
+// The userinfo runs to the LAST "@" of the authority, as URL parsers and git
+// read it, not the first. A valid URL percent-encodes "@" inside a password,
+// but a hand-written https://user:p@ss@host is common, and stopping at the
+// first "@" would leave the password's tail ("ss@") behind. The authority
+// ends at "/", "?", "#" or whitespace, so the greedy match can't spill into
+// the path, the query, or the next word of a longer message.
+var urlUserinfoRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*)://([^/?#\s]*)@`)
 
 // RedactURL strips credentials from every scheme://-style URL occurrence in s
 // — a clone URL may carry embedded credentials (https://user:token@host/...),
@@ -30,7 +34,9 @@ func RedactURL(s string) string {
 	return urlUserinfoRe.ReplaceAllStringFunc(s, func(m string) string {
 		sub := urlUserinfoRe.FindStringSubmatch(m)
 		scheme, userinfo := sub[1], sub[2]
-		if isSSHScheme(scheme) && !strings.Contains(userinfo, ":") {
+		// A bare username only: a ":" means a password. A further "@" means
+		// the userinfo isn't one plain name, so it may hold a password's tail.
+		if isSSHScheme(scheme) && !strings.ContainsAny(userinfo, ":@") {
 			return m
 		}
 		return scheme + "://"
