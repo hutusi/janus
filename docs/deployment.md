@@ -44,6 +44,9 @@ is kept, never overwritten — so it is safe to re-run. Useful flags:
 - `--no-gen-secrets` — leave `janus.env` blank to fill in yourself.
 - `sudo ./deploy/install.sh upgrade` — re-download + verify the binary and
   restart, leaving the user, config and secrets untouched (see [step 8](#8-upgrading)).
+  With `--binary ./janus` (or `make upgrade-service`) it installs a local build
+  instead. A plain install re-run over a running service does **not** restart
+  it, and it says so. Use `upgrade` to load a new build.
 
 Run `./deploy/install.sh --help` for the full list. The script stops at a running
 service; **TLS (step 6) and the webhook (step 7) remain manual**. Prefer to
@@ -69,7 +72,8 @@ sudo ./deploy/install.sh --binary ./janus \
 (For just the binary on PATH with no service, use `make install`.)
 
 `upgrade` takes it too — rebuild, then
-`sudo ./deploy/install.sh upgrade --binary ./janus`. If the target has no Go,
+`sudo ./deploy/install.sh upgrade --binary ./janus`, or `make upgrade-service`
+(see [Upgrading from a source checkout](#from-a-source-checkout)). If the target has no Go,
 cross-compile on a connected box with `GOOS=linux GOARCH=amd64 make build` (use
 `GOARCH=arm64` for aarch64 hosts) and copy the resulting `janus` plus the `deploy/`
 directory over before running the installer.
@@ -244,6 +248,47 @@ sudo install -m755 /tmp/janus /usr/local/bin/janus
 sudo systemctl restart janus
 janus version
 ```
+
+### From a source checkout
+
+If you installed from a checkout (`make install-service`, or `install.sh
+--binary`), upgrade the same way:
+
+```sh
+git fetch --tags && git checkout vX.Y.Z   # or `git pull` to track main
+make build
+go version ./janus                        # the Go the binary was built with (see below)
+make upgrade-service                      # = sudo ./deploy/install.sh upgrade --binary ./janus
+```
+
+`upgrade` installs the binary and the packaged unit, reloads systemd, restarts
+Janus, and checks `/healthz`. The user, config, secrets and run history are
+untouched. It **replaces** `/etc/systemd/system/janus.service` with the
+checkout's copy, so keep any local unit changes in a drop-in
+(`sudo systemctl edit janus`), which survives.
+
+`make upgrade-service` comes from the checkout you just switched to, and tags up to
+v0.4.1 predate it. When upgrading *to* such a tag, run the installer directly:
+`sudo ./deploy/install.sh upgrade --binary ./janus`. Every release since v0.2.0,
+where the installer first shipped, supports that.
+
+The health check probes `127.0.0.1:8080` unless told otherwise, and the
+installer doesn't read your `janus.yml`. If you changed `addr`, pass it, or the
+probe reports a failed upgrade, or answers from whatever else holds that port:
+`make upgrade-service INSTALL_FLAGS="--addr 127.0.0.1:9090"` (or `--addr` to
+`install.sh`). Give a host the probe can reach (not `:9090`). The probe prints
+the `/healthz` body. Check that it names the new version.
+
+**Check the Go version you built with.** For a source build, the `toolchain`
+line in `go.mod` is only a minimum. An older Go is switched up to it
+automatically by downloading it from the Go module proxy, so on a restricted
+network set `GOPROXY` to a mirror or install that Go yourself. A *newer* Go is
+used as-is, standard library included. `go version ./janus` shows what went
+into the binary. It should be the latest patch release of its Go line; the
+[changelog](../CHANGELOG.md)'s Security entries name the fixed versions.
+
+`make install` alone only copies the binary. Follow it with
+`sudo systemctl restart janus`, or the old process keeps running.
 
 ## 9. Uninstalling
 

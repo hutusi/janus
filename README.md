@@ -63,6 +63,7 @@ Install it (unix):
 ```sh
 make build && sudo make install          # binary only → /usr/local/bin/janus (PREFIX= to relocate)
 make build && make install-service       # Linux: full systemd provision via deploy/install.sh --binary
+make build && make upgrade-service       # Linux: upgrade that service from a newer checkout, then restart
 ```
 
 `make install` places just the binary; the service install (dedicated user,

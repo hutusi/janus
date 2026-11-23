@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`make upgrade-service`** upgrades a source-built service: `make build && make upgrade-service` runs `deploy/install.sh upgrade --binary ./janus`. That installs the new binary and the packaged unit, restarts Janus, and checks `/healthz`, leaving the user, config, secrets and run history alone. Until now there was no make path to it. The installer only accepts its mode as the first argument, but `make install-service` puts `--binary` first, so `INSTALL_FLAGS=upgrade` couldn't reach it. The [deployment guide](docs/deployment.md#from-a-source-checkout) gains a "From a source checkout" upgrade section. It covers checking `go version ./janus` (for local builds the `toolchain` pin is only a minimum), keeping unit changes in a drop-in (`upgrade` replaces the unit file), passing a non-default `addr` as `--addr` so the health check probes the right port, and using `sudo ./deploy/install.sh upgrade --binary ./janus` on tags up to v0.4.1, which predate the target.
+
+### Fixed
+
+- **Re-running the installer over a running service no longer looks like an upgrade.** Install mode ends with `systemctl enable --now janus`, which starts a stopped service but leaves a running one alone. Repeating `make build && make install-service` to upgrade therefore replaced the binary on disk while the old process kept serving, and the run still ended in a success summary. Install mode still doesn't restart a running service: a restart cancels builds that outlast the 30 s drain, and loading a new build is `upgrade`'s job, which always restarts. But it now ends with a warning that Janus was already running and was **not** restarted, naming `make upgrade-service` and `systemctl restart janus`. An earlier draft that decided automatically whether to restart was dropped. Its edge cases (re-runs, interrupted and concurrent runs) kept multiplying, and an explicit command has none.
+
 ## [0.4.1] - 2026-11-23
 
 **Security release — upgrade from v0.4.0.** The published v0.4.0 binaries were built with go1.25.12, and govulncheck finds 21 known Go standard-library vulnerabilities in them. This release is built with go1.26.11, which has none. It also fixes a credential-redaction leak, below.

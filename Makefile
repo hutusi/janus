@@ -8,7 +8,7 @@ BINDIR  ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build
 
-.PHONY: build install uninstall install-service uninstall-service test race cover fmt fmt-check vet lint lint-sh lint-unit ci clean
+.PHONY: build install uninstall install-service upgrade-service uninstall-service test race cover fmt fmt-check vet lint lint-sh lint-unit ci clean
 
 ## build: compile the single static binary
 build:
@@ -28,6 +28,11 @@ uninstall:
 install-service:
 	@test -x $(BINARY) || { echo "no ./$(BINARY) binary — run 'make build' first"; exit 1; }
 	sudo deploy/install.sh --binary ./$(BINARY) $(INSTALL_FLAGS)
+
+## upgrade-service: install the local build over an existing service and restart it; user, config and secrets untouched (Linux; wraps deploy/install.sh upgrade)
+upgrade-service:
+	@test -x $(BINARY) || { echo "no ./$(BINARY) binary — run 'make build' first"; exit 1; }
+	sudo deploy/install.sh upgrade --binary ./$(BINARY) $(INSTALL_FLAGS)
 
 ## uninstall-service: stop and remove the systemd service; keeps config/state (INSTALL_FLAGS="--purge" removes them)
 uninstall-service:

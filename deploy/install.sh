@@ -78,9 +78,12 @@ Options:
   --dry-run            print the planned actions without changing anything
   -h, --help           show this help
 
-install (default)      full provision: binary, user, config, secrets, unit, start
-upgrade                re-download + checksum-verify the binary, then restart
-                       (leaves the user, config and secrets untouched)
+install (default)      full provision: binary, user, config, secrets, unit, start.
+                       A service that is already running is NOT restarted (it
+                       says so); use upgrade to load a new binary or unit
+upgrade                replace the binary (re-download + checksum-verify, or
+                       --binary <path> for a local build), reinstall the unit,
+                       restart; leaves the user, config and secrets untouched
 uninstall              stop + disable the service, remove the unit and binary;
                        keeps $CONFIG_DIR, $STATE_DIR and the user unless --purge
 
@@ -484,6 +487,20 @@ run install -d -m755 "$CONFIG_DIR"
 install_config
 install_env
 install_unit
+# `enable --now` starts a stopped service but leaves a running one alone, and
+# install mode deliberately doesn't restart it: a restart cancels runs that
+# outlast the 30s drain, and loading a new build is upgrade's job, which
+# always restarts. But say so. Otherwise a re-run over a live service with a
+# new binary looks like it took effect while the old process still serves.
+# The check is read-only, so --dry-run reports it too.
+was_active=0
+if systemctl is-active --quiet janus 2>/dev/null; then
+	was_active=1
+fi
 run systemctl enable --now janus
 verify_service
 print_summary
+if [ "$was_active" -eq 1 ]; then
+	warn "janus was already running and was NOT restarted: it still runs the binary and unit it started with."
+	warn "To load a new build: make upgrade-service (or sudo ./deploy/install.sh upgrade --binary ./janus), or sudo systemctl restart janus."
+fi
