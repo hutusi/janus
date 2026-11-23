@@ -412,7 +412,7 @@ Next steps (not automated — see docs/deployment.md):
 Handy commands:
   systemctl status janus
   journalctl -u janus -f
-  curl -s $(health_url)
+  curl -s --noproxy '*' '$(health_url)'
 EOF
 }
 
@@ -514,9 +514,14 @@ if systemctl is-active --quiet janus 2>/dev/null; then
 	was_active=1
 fi
 run systemctl enable --now janus
-verify_service
-print_summary
+# Warn before verifying: a failing health check exits, and the warning
+# matters most when the old process is the one failing. Suggest only a
+# restart, which activates exactly what this run installed, whether from
+# --binary, --version, or a download. A make target would copy the
+# checkout's ./janus instead.
 if [ "$was_active" -eq 1 ]; then
 	warn "janus was already running and was NOT restarted: it still runs the binary and unit it started with."
-	warn "To load a new build: make upgrade-service (or sudo ./deploy/install.sh upgrade --binary ./janus), or sudo systemctl restart janus."
+	warn "To run what was just installed: sudo systemctl restart janus"
 fi
+verify_service
+print_summary
