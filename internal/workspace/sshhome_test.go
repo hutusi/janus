@@ -60,7 +60,11 @@ func TestSSHHomeProbe(t *testing.T) {
 	kh := filepath.Join(dir, "known_hosts")
 	sshDir := fakeEntry{info: fakeInfo(fs.ModeDir | 0o700)}
 	readable := fakeEntry{info: fakeInfo(0o600)}
-	inaccessible := []string{"cannot read its ~/.ssh", "passwd home, not $HOME", "checkouts that rely on a key or known_hosts there will fail", "Host key verification failed"}
+	inaccessible := []string{"cannot read its ~/.ssh (", "passwd home, not $HOME", "checkouts that rely on a key or known_hosts there will fail", "Host key verification failed"}
+	// Only the file is unusable: the key in the directory still works, so
+	// the message claims less and offers no re-homing.
+	unreadableFile := []string{"cannot read its ~/.ssh/known_hosts", "rely on host keys in that file will fail", "Host key verification failed", "Make sure janus owns it"}
+	fileOnlyNot := []string{"cannot read its ~/.ssh (", "a key or known_hosts", "usermod"}
 
 	tests := []struct {
 		name       string
@@ -68,6 +72,7 @@ func TestSSHHomeProbe(t *testing.T) {
 		env        []string
 		gitSSH     bool
 		want       []string // substrings of the message; nil means no warning
+		notWant    []string // substrings the message must not contain
 		wantAttrs  []string
 		wantOpened []string
 	}{
@@ -97,7 +102,8 @@ func TestSSHHomeProbe(t *testing.T) {
 		{
 			name:       "unreadable known_hosts",
 			entries:    map[string]fakeEntry{dir: sshDir, kh: {info: fakeInfo(0o600), openErr: fs.ErrPermission}},
-			want:       inaccessible,
+			want:       unreadableFile,
+			notWant:    fileOnlyNot,
 			wantAttrs:  []string{"dir", "err"},
 			wantOpened: []string{kh},
 		},
@@ -112,7 +118,8 @@ func TestSSHHomeProbe(t *testing.T) {
 			// without opening anything.
 			name:      "directory at known_hosts",
 			entries:   map[string]fakeEntry{dir: sshDir, kh: sshDir},
-			want:      inaccessible,
+			want:      unreadableFile,
+			notWant:   fileOnlyNot,
 			wantAttrs: []string{"dir", "err"},
 		},
 		{
@@ -168,6 +175,11 @@ func TestSSHHomeProbe(t *testing.T) {
 			for _, w := range tc.want {
 				if !strings.Contains(msg, w) {
 					t.Errorf("message %q lacks %q", msg, w)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(msg, w) {
+					t.Errorf("message %q should not contain %q", msg, w)
 				}
 			}
 			var keys []string

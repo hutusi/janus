@@ -174,7 +174,16 @@ func (p sshHomeProbe) diagnose() (string, []any) {
 	case err == nil && !info.IsDir():
 		err = fmt.Errorf("%s is not a directory", dir)
 	case err == nil:
-		err = p.knownHostsReadable(filepath.Join(dir, "known_hosts"))
+		var fileErr error
+		err, fileErr = p.knownHostsProblem(filepath.Join(dir, "known_hosts"))
+		if fileErr != nil {
+			// Only the file is unusable. The directory, and any key in it,
+			// is fine, and ssh moves on to /etc/ssh/ssh_known_hosts after
+			// failing to open its own known_hosts, so only host keys kept
+			// in this file are lost.
+			return fmt.Sprintf(`clone_url is "ssh" but the service account cannot read its ~/.ssh/known_hosts; SSH checkouts that rely on host keys in that file will fail with "Host key verification failed". Make sure %s owns it and can read it.`, p.username),
+				append(attrs, "err", fileErr)
+		}
 	}
 	if err == nil {
 		return "", nil
@@ -187,28 +196,31 @@ func (p sshHomeProbe) diagnose() (string, []any) {
 	return `clone_url is "ssh" but the service account cannot read its ~/.ssh (ssh reads it from the account's passwd home, not $HOME); SSH checkouts that rely on a key or known_hosts there will fail, typically with "Host key verification failed". ` + fix, attrs
 }
 
-// knownHostsReadable reports whether ssh could read path. Stat comes first:
-// it fails with a permission error when the directory can't be searched,
-// which a stat of the directory itself does not catch. A directory is
-// reported from its mode. Only a regular file is opened, to test read
-// permission. Opening a FIFO with no writer would block, so other special
-// files are let through unopened. A missing known_hosts is fine:
-// /etc/ssh/ssh_known_hosts may hold the host key.
-func (p sshHomeProbe) knownHostsReadable(path string) error {
+// knownHostsProblem reports what keeps ssh from reading path. It returns
+// dirErr when the directory can't be entered, so nothing in it (keys
+// included) is usable, and fileErr when only the file itself is unusable.
+//
+// Stat comes first. It fails with a permission error when the directory
+// can't be searched, which a stat of the directory itself does not catch. A
+// directory at path is reported from its mode. Only a regular file is
+// opened, to test read permission. Opening a FIFO with no writer would
+// block, so other special files are let through unopened. A missing
+// known_hosts is fine: /etc/ssh/ssh_known_hosts may hold the host key.
+func (p sshHomeProbe) knownHostsProblem(path string) (dirErr, fileErr error) {
 	info, err := p.stat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return nil
+		return nil, nil
 	case err != nil:
-		return err
+		return err, nil
 	case info.IsDir():
 		// ssh can't load host keys from a directory. Stat alone says so,
 		// with no blocking open needed.
-		return fmt.Errorf("%s is a directory", path)
+		return nil, fmt.Errorf("%s is a directory", path)
 	case !info.Mode().IsRegular():
-		return nil
+		return nil, nil
 	}
-	return p.open(path)
+	return nil, p.open(path)
 }
 
 // openClose opens path for reading and closes it again.
