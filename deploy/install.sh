@@ -329,6 +329,14 @@ health_url() {
 	printf 'http://%s/healthz' "$probe"
 }
 
+# health_check_cmd: the manual health check, ready to paste into any shell.
+# The URL is quoted (zsh treats an IPv6 [::1] as a glob) and, like the
+# probe, bypasses any proxy. Every printed check comes from here, so they
+# can't drift apart.
+health_check_cmd() {
+	printf "curl -s --noproxy '*' '%s'" "$(health_url)"
+}
+
 verify_service() {
 	log "verifying service"
 	# An inactive service is an install failure regardless of what the HTTP
@@ -339,14 +347,14 @@ verify_service() {
 	fi
 	url=$(health_url)
 	if [ "$DRY_RUN" -eq 1 ]; then
-		printf "+ curl -fsS --noproxy '*' %s\n" "$url"
+		printf "+ curl -fsS --noproxy '*' '%s'\n" "$url"
 		return
 	fi
 	# curl is optional for a --binary (offline) install, so it may be absent.
 	# is-active above already gates on the service state; skip the HTTP probe
 	# rather than loop for 10s and warn misleadingly.
 	if ! command -v curl >/dev/null 2>&1; then
-		log "curl not present — skipping the HTTP health check; verify once up with: curl -s $url"
+		log "curl not present — skipping the HTTP health check; verify once up with: $(health_check_cmd)"
 		return 0
 	fi
 	# --noproxy '*': the bind is loopback, so never route the check through an
@@ -412,7 +420,7 @@ Next steps (not automated — see docs/deployment.md):
 Handy commands:
   systemctl status janus
   journalctl -u janus -f
-  curl -s --noproxy '*' '$(health_url)'
+  $(health_check_cmd)
 EOF
 }
 
